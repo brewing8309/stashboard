@@ -360,6 +360,35 @@
     return version;
   }
 
+  // Clears where playback stopped and records a play now, so the scene
+  // leaves "Continue watching" and counts as watched.
+  const WATCHED_MUTATION = `mutation StashboardWatched($id: ID!) {
+  sceneResetActivity(id: $id, reset_resume: true, reset_duration: false)
+  sceneAddPlay(id: $id) { count }
+}`;
+
+  function WatchedButton({ scene, lang, onDone }) {
+    const [state, setState] = useState({ busy: false, error: null });
+    const mark = async () => {
+      setState({ busy: true, error: null });
+      try {
+        await stashQuery(WATCHED_MUTATION, { id: scene.id });
+        onDone(scene.id);
+      } catch (e) {
+        console.warn(LOG, "Couldn't mark the scene as watched:", e);
+        setState({ busy: false, error: e.message || String(e) });
+      }
+    };
+    return h(Button, {
+      variant: state.error ? "danger" : "secondary",
+      size: "sm",
+      className: "stashboard-watched",
+      disabled: state.busy,
+      title: state.error ? Core.t(lang, "error.row", { message: state.error }) : Core.t(lang, "action.watched.title"),
+      onClick: mark
+    }, state.error ? Core.t(lang, "action.failed") : Core.t(lang, "action.watched"));
+  }
+
   function BoxCard({ card, box, lang, stasharr }) {
     const owned = !!card.localId;
     const download = stasharr ? Core.downloadLink(card, box) : null;
@@ -403,6 +432,8 @@
   function Row({ id, env, ctx }) {
     const ref = useRef(null);
     const stasharr = useStasharr();
+    // Scenes marked as watched here, left out without reloading the row.
+    const [watched, setWatched] = useState([]);
     const near = useNearScreen(ref);
     const row = Core.parseRowId(id);
     const box = row.source === "box" ? env.boxes.find((b) => b.host === row.host) : null;
@@ -415,7 +446,8 @@
     }, `${id}|${seed}|${ctx.refresh}|${ctx.count}|${ctx.hideOwned}`, near);
 
     const data = state.data || {};
-    const items = row.source === "box" ? data.cards : data.scenes;
+    const items = row.source === "box" ? data.cards : (data.scenes || []).filter((s) => !watched.includes(s.id));
+    const markable = row.source === "local" && row.kind === "continue";
     // An empty row says nothing; hide it. Errors are shown, the row was asked for.
     if (state.status === "done" && (!items || !items.length)) return h("div", { ref, className: "stashboard-row-empty", "data-row": id });
 
@@ -425,7 +457,11 @@
     if (state.status === "error") body = h(RowMessage, { text: errorText(state.error, env.lang, box) });
     else if (state.status !== "done") body = h(Strip, { lang: env.lang }, h(Skeletons, { count: ctx.count }));
     else if (row.source === "box") body = h(Strip, { lang: env.lang }, items.map((card) => h(BoxCard, { key: card.id, card, box, lang: env.lang, stasharr })));
-    else body = h(Strip, { lang: env.lang }, items.map((scene, i) => h(LocalCard, { key: scene.id, scene, index: i })));
+    else if (markable) {
+      body = h(Strip, { lang: env.lang }, items.map((scene, i) => h("div", { key: scene.id, className: "stashboard-card-wrap", "data-scene": scene.id },
+        h(LocalCard, { scene, index: i }),
+        h(WatchedButton, { scene, lang: env.lang, onDone: (id) => setWatched((list) => [...list, id]) }))));
+    } else body = h(Strip, { lang: env.lang }, items.map((scene, i) => h(LocalCard, { key: scene.id, scene, index: i })));
 
     return h("div", { ref, "data-row": id },
       h(RowFrame, { id, title, href, label: Core.t(env.lang, "action.viewAll") }, body));

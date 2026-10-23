@@ -358,6 +358,18 @@ async function main() {
     check("the saved layout applies: row moved up, row switched off",
       customised[1] === "local:recently_added" && !customised.includes("local:random"), customised.slice(0, 4));
 
+    console.log("Mark as watched");
+    const resumed = (await gql(base, "{ findScenes(scene_filter: { resume_time: { value: 0, modifier: GREATER_THAN } }) { scenes { id play_count } } }")).findScenes.scenes;
+    check("the Continue watching cards have a Watched button", await page.locator('[data-row="local:continue"] .stashboard-watched').count() === resumed.length && resumed.length === 1, resumed);
+    check("other rows don't", await page.locator('[data-row="local:recently_added"] .stashboard-watched').count() === 0);
+    await page.click('[data-row="local:continue"] .stashboard-watched');
+    await page.waitForSelector('[data-row="local:continue"] .stashboard-watched', { state: "detached", timeout: 10000 });
+    const after = (await gql(base, "query($id: ID!) { findScene(id: $id) { resume_time play_count } }", { id: resumed[0].id })).findScene;
+    check("Watched forgets the position and counts a play; the row goes", after.resume_time === 0 && after.play_count === resumed[0].play_count + 1 &&
+      await page.locator('[data-row="local:continue"]:not(.stashboard-row-empty)').count() === 0, after);
+    await openDashboard(page, base);
+    check("…and stays gone after a reload", !(await rowsOnPage(page)).includes("local:continue"));
+
     console.log("Settings");
     await setPluginSettings(base, { hideNativeRows: true, hideOwned: true, itemsPerRow: 6 });
     await openDashboard(page, base);
@@ -375,7 +387,7 @@ async function main() {
     await openDashboard(page, base);
     const toolbar = await page.locator(".stashboard-toolbar").textContent();
     check("German texts when Stash is set to German", /Neu mischen/.test(toolbar) && /Anpassen/.test(toolbar), toolbar);
-    check("German row titles", (await rowInfo(page, "local:continue")).title.toLowerCase() === "weiterschauen");
+    check("German row titles", (await rowInfo(page, "local:recently_added")).title.toLowerCase() === "neu hinzugefügt");
     if (shots) await page.screenshot({ path: path.join(shots, "dashboard-de.png") });
     await gql(base, "mutation { configureInterface(input: { language: \"en-US\" }) { language } }");
 

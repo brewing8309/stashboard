@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0 — 2026-10-23
+
+### Added
+
+- **✓ Watched in Continue watching.** A button under each card marks the scene as watched: Stash
+  forgets where you stopped (the same as **Reset resume time** in the scene's History tab) and
+  records a play, so it leaves the row and counts as seen. Stash does this by itself when you
+  watch at least 98% of a scene; the button is for the ones you're done with earlier.
+
 ## 1.1.0 — 2026-10-23
 
 ### Added

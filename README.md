@@ -45,7 +45,7 @@ dashboard unless you switch them off.
 | Row | Source | What's in it |
 |---|---|---|
 | **Spotlight** | Curator, or your library | One big pick: Curator's best bet, else one of your top rated, else a random scene. **▶ Play** starts it. |
-| **Continue watching** | Library | Scenes you started and didn't finish. |
+| **Continue watching** | Library | Scenes you started and didn't finish. **✓ Watched** under a card takes it off the row and counts a play. |
 | **Recently added** | Library | The newest scenes in Stash. |
 | **Unwatched with your favourites** | Library | Scenes with a favourite performer you haven't played or started. |
 | **Tag of the day** · **Studio spotlight** | Library | One tag and one studio with at least four scenes, a different one every day. |

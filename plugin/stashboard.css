@@ -147,6 +147,14 @@
   .stashboard-strip-btn { display: none; }
 }
 
+.stashboard-card-wrap {
+  display: flex;
+  flex-direction: column;
+}
+.stashboard-watched {
+  margin: 0 5px 5px;
+}
+
 .stashboard-skeleton {
   flex: 0 0 auto;
   height: 250px;
