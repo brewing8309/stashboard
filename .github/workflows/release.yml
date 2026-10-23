@@ -1,0 +1,61 @@
+# Push a tag v<version> → tests (unit and end-to-end) → the zip is rebuilt,
+# checked against index.yml and published as a GitHub release, which is
+# where index.yml points Stash.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Tag matches the plugin version
+        id: version
+        run: |
+          version=$(node -p 'require("./scripts/build.js").pluginVersion()')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match plugin version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Unit and consistency tests
+        run: node --test tests/
+      - name: index.yml matches the package
+        run: node scripts/build.js --check
+
+  e2e:
+    needs: test
+    uses: ./.github/workflows/e2e.yml
+
+  publish:
+    needs: [test, e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Build and check the package
+        run: node scripts/build.js --check
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '/^## /{p = ($2 == v); next} p' CHANGELOG.md > notes.md
+          gh release create "$GITHUB_REF_NAME" "dist/stashboard-$VERSION.zip" \
+            --title "Stashboard $VERSION" --notes-file notes.md --verify-tag

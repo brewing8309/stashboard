@@ -1,0 +1,41 @@
+name: Stashboard
+description: A dashboard for Stash's front page — continue watching, the day's tag, trending on StashDB, new from your favourites, and Curator's picks when it's installed.
+version: 1.0.0
+url: https://github.com/brewing8309/stashboard
+
+ui:
+  javascript:
+    - stashboard-core.js
+    - stashboard.js
+  css:
+    - stashboard.css
+  # The stash-boxes the dashboard may query from the browser. Must match
+  # KNOWN_BOXES in stashboard-core.js (tests/project.test.js checks it).
+  csp:
+    connect-src:
+      - https://stashdb.org
+      - https://fansdb.cc
+      - https://pmvstash.org
+      - https://javstash.org
+
+settings:
+  hideNativeRows:
+    displayName: Hide Stash's own front page rows
+    description: Show only Stashboard on the front page. Off by default, so your own front page rows stay below the dashboard.
+    type: BOOLEAN
+  hideOwned:
+    displayName: Hide stash-box scenes you already have
+    description: Leave scenes that are already in your library out of the StashDB rows instead of marking them with ✓.
+    type: BOOLEAN
+  disableExternal:
+    displayName: Don't contact stash-boxes
+    description: Show only rows from your library (and Curator). StashDB and other stash-boxes are not asked for anything.
+    type: BOOLEAN
+  itemsPerRow:
+    displayName: Scenes per row
+    description: How many scenes each row shows, 4 to 40. Default 12.
+    type: NUMBER
+  cacheHours:
+    displayName: Stash-box cache (hours)
+    description: How long rows from StashDB and other stash-boxes are kept before asking again, 0 to 168. Default 6. Refresh on the dashboard always asks again.
+    type: NUMBER

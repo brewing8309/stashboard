@@ -1,0 +1,9 @@
+# A stand-in for the Stash Curator plugin in the end-to-end test: same id,
+# same raw interface, answers get_slate with fixed local scene IDs.
+name: Stash Curator (test double)
+description: Answers get_slate like Stash Curator does, for Stashboard's tests.
+version: 0.0.0-test
+exec:
+  - python3
+  - "{pluginDir}/fake_curator.py"
+interface: raw

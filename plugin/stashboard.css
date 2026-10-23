@@ -1,0 +1,299 @@
+/* Stashboard. Colours lean on translucency so Stash themes still show through. */
+
+.stashboard-front .stashboard {
+  margin-bottom: 2rem;
+}
+
+.stashboard-loading {
+  min-height: 40vh;
+}
+
+/* Toolbar */
+.stashboard-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0 0 1rem;
+}
+.stashboard-brand {
+  font-weight: 700;
+  font-size: 1.1rem;
+  letter-spacing: 0.02em;
+  opacity: 0.85;
+}
+.stashboard-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+/* Spotlight */
+.stashboard-spotlight {
+  position: relative;
+  overflow: hidden;
+  min-height: 340px;
+  margin-bottom: 2rem;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
+}
+.stashboard-spotlight-loading {
+  animation: stashboard-pulse 1.6s ease-in-out infinite;
+}
+.stashboard-spotlight-image {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center 30%;
+}
+.stashboard-spotlight-shade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, rgba(0, 0, 0, 0.88) 0%, rgba(0, 0, 0, 0.6) 45%, rgba(0, 0, 0, 0.05) 100%);
+}
+.stashboard-spotlight-content {
+  position: relative;
+  max-width: 640px;
+  padding: 2.25rem 2.5rem;
+  color: #fff;
+}
+.stashboard-spotlight-reason {
+  display: inline-block;
+  padding: 0.15rem 0.6rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+}
+.stashboard-spotlight-title {
+  margin: 0 0 0.4rem;
+  font-size: 2rem;
+  line-height: 1.15;
+}
+.stashboard-spotlight-title a {
+  color: inherit;
+}
+.stashboard-spotlight-meta,
+.stashboard-spotlight-performers {
+  opacity: 0.85;
+}
+.stashboard-spotlight-details {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  margin: 0.75rem 0 0;
+  opacity: 0.8;
+}
+.stashboard-spotlight-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1.25rem;
+}
+
+/* Rows */
+.stashboard-row-message {
+  padding: 0.75rem 0;
+  opacity: 0.75;
+  font-style: italic;
+}
+.stashboard-view-all {
+  white-space: nowrap;
+}
+
+.stashboard-strip-wrap {
+  position: relative;
+}
+.stashboard-strip {
+  display: flex;
+  gap: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  scrollbar-width: thin;
+  padding-bottom: 0.5rem;
+}
+.stashboard-strip > * {
+  flex: 0 0 auto;
+  scroll-snap-align: start;
+}
+.stashboard-strip-btn {
+  position: absolute;
+  top: 35%;
+  z-index: 3;
+  width: 2.25rem;
+  height: 3.5rem;
+  border: 0;
+  border-radius: 4px;
+  font-size: 1.75rem;
+  line-height: 1;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  cursor: pointer;
+}
+.stashboard-strip-left { left: 0; }
+.stashboard-strip-right { right: 0; }
+.stashboard-strip-wrap:hover .stashboard-strip-btn,
+.stashboard-strip-btn:focus-visible {
+  opacity: 1;
+}
+@media (hover: none) {
+  .stashboard-strip-btn { display: none; }
+}
+
+.stashboard-skeleton {
+  flex: 0 0 auto;
+  height: 250px;
+  margin: 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  animation: stashboard-pulse 1.6s ease-in-out infinite;
+}
+@keyframes stashboard-pulse {
+  50% { opacity: 0.45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stashboard-skeleton,
+  .stashboard-spotlight-loading { animation: none; }
+}
+
+/* Stash-box cards: built to sit next to Stash's own scene cards. */
+.stashboard-ext-card {
+  display: flex;
+  flex-direction: column;
+  margin: 5px;
+  overflow: hidden;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+}
+.stashboard-ext-card.is-owned {
+  box-shadow: inset 0 0 0 2px rgba(40, 167, 69, 0.75);
+}
+.stashboard-ext-thumb {
+  position: relative;
+  display: block;
+  aspect-ratio: 16 / 9;
+  background: rgba(0, 0, 0, 0.4);
+}
+.stashboard-ext-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.stashboard-ext-noimg {
+  width: 100%;
+  height: 100%;
+}
+.stashboard-ext-duration {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  padding: 0 0.35rem;
+  font-size: 0.8rem;
+  color: #fff;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.7);
+}
+.stashboard-ext-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.5rem 0.65rem 0.6rem;
+  min-width: 0;
+}
+.stashboard-ext-title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 600;
+  color: inherit;
+}
+.stashboard-ext-meta,
+.stashboard-ext-performers {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 0.85rem;
+  opacity: 0.75;
+}
+.stashboard-ext-source {
+  align-self: flex-start;
+  margin-top: 0.2rem;
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+.stashboard-badge {
+  align-self: flex-start;
+  padding: 0 0.45rem;
+  margin-bottom: 0.15rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  border-radius: 999px;
+}
+.stashboard-badge-owned {
+  color: #fff;
+  background: #28a745;
+}
+.stashboard-badge-owned:hover {
+  color: #fff;
+  text-decoration: none;
+  filter: brightness(1.1);
+}
+
+/* Customise dialog */
+.stashboard-customise-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.stashboard-customise-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.4rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.stashboard-customise-list li .form-check {
+  flex: 1;
+  margin: 0;
+}
+.stashboard-customise-list li.is-off label {
+  opacity: 0.6;
+}
+.stashboard-customise-source {
+  font-size: 0.8rem;
+  opacity: 0.65;
+  white-space: nowrap;
+}
+.stashboard-customise-move {
+  display: flex;
+  gap: 0.25rem;
+}
+.stashboard-customise-hint {
+  font-size: 0.9rem;
+  opacity: 0.8;
+}
+
+/* Required Notices (see LICENSE): keep them readable. */
+.stashboard-notice {
+  padding: 0.75rem 1rem;
+  font-size: 0.8rem;
+  opacity: 0.75;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.stashboard-notice p {
+  margin: 0.2rem 0;
+}
+
+@media (max-width: 576px) {
+  .stashboard-spotlight-content { padding: 1.5rem 1.25rem; }
+  .stashboard-spotlight-title { font-size: 1.5rem; }
+  .stashboard-customise-source { display: none; }
+}

@@ -1,0 +1,30 @@
+# Every push and pull request: unit and consistency tests, then the
+# end-to-end test against the oldest supported Stash and the newest
+# development build.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Unit and consistency tests
+        run: node --test tests/
+      - name: index.yml matches the package
+        run: node scripts/build.js --check
+
+  e2e:
+    needs: test
+    uses: ./.github/workflows/e2e.yml

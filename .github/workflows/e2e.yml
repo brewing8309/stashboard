@@ -1,0 +1,47 @@
+# The end-to-end test (tests/e2e/run.js) against real Stash builds. Called
+# by CI and by Release.
+name: End-to-end
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stash:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        stash: [v0.31.1, latest_develop]
+    name: Stash ${{ matrix.stash }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Install Playwright and Chromium
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Download Stash ${{ matrix.stash }}
+        run: |
+          curl -fsSL -o stash-linux "https://github.com/stashapp/stash/releases/download/${{ matrix.stash }}/stash-linux"
+          chmod +x stash-linux
+          ./stash-linux --version
+      - name: End-to-end test
+        env:
+          STASH_BIN: ./stash-linux
+          SCREENSHOTS: screenshots
+        run: node tests/e2e/run.js
+      - name: Stash log
+        if: failure()
+        run: tail -n 200 /tmp/stashboard-e2e-*/stash.log || true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: screenshots-${{ matrix.stash }}
+          path: screenshots
+          if-no-files-found: ignore

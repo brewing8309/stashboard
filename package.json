@@ -1,0 +1,19 @@
+{
+  "name": "stashboard",
+  "private": true,
+  "description": "A dashboard for Stash's front page. The plugin itself has no dependencies; Playwright is only for the end-to-end test.",
+  "license": "SEE LICENSE IN LICENSE",
+  "scripts": {
+    "test": "node --test tests/",
+    "build": "node scripts/build.js",
+    "index": "node scripts/build.js --write-index",
+    "check": "node scripts/build.js --check",
+    "e2e": "node tests/e2e/run.js"
+  },
+  "devDependencies": {
+    "playwright": "1.64.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
