@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.0 — 2026-10-23
+
+### Added
+
+- **⬇ Download on StashDB tiles.** With [stasharr](https://github.com/brewing8309/stasharr) 1.6
+  or newer in the browser, every StashDB scene you don't have yet gets a Download button: it opens
+  the scene on StashDB with stasharr's Prowlarr search already running, and you pick the release
+  there. The button only shows where stasharr has marked the Stash page, so without stasharr
+  nothing changes.
+
 ## 1.0.0 — 2026-10-23
 
 The first release: a dashboard for Stash's front page.

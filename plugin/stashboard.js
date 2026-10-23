@@ -341,8 +341,28 @@
       h("div", { className: "stashboard-ext-body" }, h("div", { className: "stashboard-ext-title" }, scene.title || `#${scene.id}`)));
   }
 
-  function BoxCard({ card, box, lang }) {
+  // stasharr's version, once it has marked the page (it may do so after
+  // the dashboard has rendered), or null.
+  function useStasharr() {
+    const read = () => document.documentElement.getAttribute(Core.STASHARR_ATTRIBUTE);
+    const [version, setVersion] = useState(read);
+    useEffect(() => {
+      const update = () => setVersion(read());
+      window.addEventListener("stasharr:ready", update);
+      const observer = new MutationObserver(update);
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: [Core.STASHARR_ATTRIBUTE] });
+      update();
+      return () => {
+        window.removeEventListener("stasharr:ready", update);
+        observer.disconnect();
+      };
+    }, []);
+    return version;
+  }
+
+  function BoxCard({ card, box, lang, stasharr }) {
     const owned = !!card.localId;
+    const download = stasharr ? Core.downloadLink(card, box) : null;
     const meta = [card.studio, card.date].filter(Boolean).join(" · ");
     const thumb = [
       card.image ? h("img", { key: "i", src: card.image, alt: "", loading: "lazy", referrerPolicy: "no-referrer" }) : h("div", { key: "i", className: "stashboard-ext-noimg" }),
@@ -358,7 +378,11 @@
         h("a", { ...external, className: "stashboard-ext-title", title: card.title }, card.title || "—"),
         meta ? h("div", { className: "stashboard-ext-meta" }, meta) : null,
         card.performers.length ? h("div", { className: "stashboard-ext-performers", title: card.performers.join(", ") }, card.performers.join(", ")) : null,
-        h("a", { ...external, className: "stashboard-ext-source" }, `↗ ${box.name}`)));
+        h("div", { className: "stashboard-ext-actions" },
+          download
+            ? h("a", { href: download, target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-sm stashboard-download", title: Core.t(lang, "action.download.title") }, `⬇ ${Core.t(lang, "action.download")}`)
+            : null,
+          h("a", { ...external, className: "stashboard-ext-source" }, `↗ ${box.name}`))));
   }
 
   function RowMessage({ text }) {
@@ -378,6 +402,7 @@
 
   function Row({ id, env, ctx }) {
     const ref = useRef(null);
+    const stasharr = useStasharr();
     const near = useNearScreen(ref);
     const row = Core.parseRowId(id);
     const box = row.source === "box" ? env.boxes.find((b) => b.host === row.host) : null;
@@ -399,7 +424,7 @@
     let body;
     if (state.status === "error") body = h(RowMessage, { text: errorText(state.error, env.lang, box) });
     else if (state.status !== "done") body = h(Strip, { lang: env.lang }, h(Skeletons, { count: ctx.count }));
-    else if (row.source === "box") body = h(Strip, { lang: env.lang }, items.map((card) => h(BoxCard, { key: card.id, card, box, lang: env.lang })));
+    else if (row.source === "box") body = h(Strip, { lang: env.lang }, items.map((card) => h(BoxCard, { key: card.id, card, box, lang: env.lang, stasharr })));
     else body = h(Strip, { lang: env.lang }, items.map((scene, i) => h(LocalCard, { key: scene.id, scene, index: i })));
 
     return h("div", { ref, "data-row": id },

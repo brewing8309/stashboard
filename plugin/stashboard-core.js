@@ -396,6 +396,24 @@
   }
 
   /* ------------------------------------------------------------------ *
+   * stasharr                                                            *
+   * ------------------------------------------------------------------ */
+
+  // stasharr (github.com/brewing8309/stasharr), a Firefox extension, marks
+  // the Stash page with this attribute when it's installed, and opens a
+  // StashDB scene link ending in STASHARR_HASH with its Prowlarr search
+  // already running.
+  const STASHARR_ATTRIBUTE = "data-stasharr";
+  const STASHARR_HASH = "#stasharr-search";
+
+  // The download link for a stash-box card: only StashDB scenes (stasharr
+  // works on stashdb.org) that aren't in the library yet.
+  function downloadLink(card, box) {
+    if (!card || card.localId || !box || box.host !== "stashdb.org") return null;
+    return `${card.url}${STASHARR_HASH}`;
+  }
+
+  /* ------------------------------------------------------------------ *
    * Cache (external rows only; localStorage in the browser)             *
    * ------------------------------------------------------------------ */
 
@@ -501,6 +519,8 @@
       "action.details": "Details",
       "action.scrollLeft": "Scroll left",
       "action.scrollRight": "Scroll right",
+      "action.download": "Download",
+      "action.download.title": "Opens the scene on StashDB and searches Prowlarr with stasharr",
       "badge.owned": "✓ In your library",
       "spotlight.curator": "Curator's best bet",
       "spotlight.local": "From your top rated",
@@ -552,6 +572,8 @@
       "action.details": "Details",
       "action.scrollLeft": "Nach links",
       "action.scrollRight": "Nach rechts",
+      "action.download": "Herunterladen",
+      "action.download.title": "Öffnet die Szene auf StashDB und sucht mit stasharr in Prowlarr",
       "badge.owned": "✓ In deiner Bibliothek",
       "spotlight.curator": "Curators bester Treffer",
       "spotlight.local": "Aus deinen Bestbewerteten",
@@ -607,7 +629,7 @@
     dayKey, hashSeed, rowSeed, isoDate,
     REDISCOVER_DAYS, localRowQuery, PICK_MIN_SCENES, pickQuery, localRowLink,
     BOX_SCENES_QUERY, BOX_PERFORMERS_MAX, boxRowInput, followedPerformerIds, pickImage, normalizeBoxScene,
-    ownedMap, applyOwnership,
+    ownedMap, applyOwnership, STASHARR_ATTRIBUTE, STASHARR_HASH, downloadLink,
     CACHE_PREFIX, cacheGet, cacheSet, cacheClear,
     curatorAvailable, curatorSceneIds, orderByIds,
     STRINGS, langOf, t, rowTitle, formatDuration

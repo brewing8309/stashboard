@@ -226,6 +226,7 @@ async function main() {
     const box = { fail: null };
     await context.route(`${mock.IMAGE_HOST}/**`, (route) =>
       route.fulfill({ contentType: "image/svg+xml", body: mock.imageSvg(route.request().url()) }));
+    await context.route("https://stashdb.org/scenes/**", (route) => route.fulfill({ contentType: "text/html", body: "<title>StashDB scene</title>" }));
     await context.route("https://stashdb.org/graphql", async (route) => {
       const req = route.request();
       const cors = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "content-type,apikey", "Access-Control-Allow-Methods": "POST" };
@@ -296,8 +297,28 @@ async function main() {
 
     const nativeRows = await page.locator(".stashboard-native .recommendation-row").count();
     check("Stash's own front page rows stay below", nativeRows > 0, nativeRows);
+    if (shots) await page.screenshot({ path: path.join(shots, "dashboard.png") });
+
+    console.log("stasharr");
+    check("without stasharr there are no download buttons", await page.locator(".stashboard-download").count() === 0);
+    // What stasharr's stash-marker.js does on the Stash page, after the dashboard has rendered.
+    await page.evaluate(() => {
+      document.documentElement.setAttribute("data-stasharr", "1.6.0");
+      window.dispatchEvent(new CustomEvent("stasharr:ready"));
+    });
+    await page.waitForSelector(".stashboard-download", { timeout: 10000 });
+    const downloads = await page.evaluate(() => [...document.querySelectorAll('[data-row="box:stashdb.org:trending"] .stashboard-ext-card')].map((c) => {
+      const a = c.querySelector(".stashboard-download");
+      return { owned: c.classList.contains("is-owned"), href: a && a.getAttribute("href"), target: a && a.getAttribute("target") };
+    }));
+    check("with stasharr every StashDB scene you don't have gets a download button",
+      downloads.filter((d) => !d.owned).every((d) => /^https:\/\/stashdb\.org\/scenes\/[^#]+#stasharr-search$/.test(d.href) && d.target === "_blank") &&
+      downloads.filter((d) => d.owned).every((d) => d.href === null) && downloads.filter((d) => d.href).length === 10, downloads);
+    const [tab] = await Promise.all([context.waitForEvent("page"), page.click('[data-row="box:stashdb.org:trending"] .stashboard-download >> nth=0')]);
+    await tab.waitForLoadState("domcontentloaded").catch(() => {});
+    check("Download opens the scene on StashDB with stasharr's search hash", tab.url() === "https://stashdb.org/scenes/t2#stasharr-search", tab.url());
+    await tab.close();
     if (shots) {
-      await page.screenshot({ path: path.join(shots, "dashboard.png") });
       await page.locator('[data-row="box:stashdb.org:trending"]').scrollIntoViewIfNeeded();
       await page.screenshot({ path: path.join(shots, "stashdb-rows.png") });
     }

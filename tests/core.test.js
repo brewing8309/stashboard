@@ -249,3 +249,12 @@ test("local row links", () => {
   assert.equal(c.localRowLink("studio_spotlight", null), null);
   assert.equal(c.localRowLink("random"), null);
 });
+
+test("download links: StashDB scenes not in the library, opening with stasharr's search", () => {
+  const card = { id: "s1", url: "https://stashdb.org/scenes/s1" };
+  assert.equal(c.downloadLink(card, box), "https://stashdb.org/scenes/s1#stasharr-search");
+  assert.equal(c.downloadLink({ ...card, localId: "4" }, box), null, "already in the library");
+  const fans = c.boxFromConfig({ endpoint: "https://fansdb.cc/graphql", api_key: "k" });
+  assert.equal(c.downloadLink({ id: "x", url: "https://fansdb.cc/scenes/x" }, fans), null, "stasharr only works on StashDB");
+  assert.equal(c.downloadLink(null, box), null);
+});

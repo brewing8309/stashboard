@@ -61,7 +61,15 @@ Everything "random" is random **per day**: the same all day, different tomorrow.
 draws again. StashDB scenes you already have are marked **✓ In your library** and open your
 copy; the rest open on StashDB.
 
-![StashDB rows with scenes already in the library marked](docs/stashdb-rows.png)
+![StashDB rows with scenes already in the library marked, and Download buttons from stasharr](docs/stashdb-rows.png)
+
+### Download with stasharr
+
+With [stasharr](https://github.com/brewing8309/stasharr) 1.6 or newer in Firefox, every StashDB tile
+you don't have yet gets **⬇ Download**. It opens the scene on StashDB with stasharr's Prowlarr
+search already running; you pick the release there. stasharr marks your Stash page when its
+Stash URL is set, which is how Stashboard knows to show the button — without stasharr there's no
+button, just the link to StashDB.
 
 ## Install
 
@@ -132,6 +140,7 @@ Stash's interface language decides the dashboard's: German and English so far.
 | "StashDB needs a valid API key" | The key under Settings → Metadata Providers → Stash-box Endpoints is wrong or expired. |
 | No ✓ on StashDB scenes you have | Those scenes aren't linked to StashDB in Stash (no StashDB ID), or Stash is older than 0.31. |
 | "Curator has no recommendations yet" | Run **Sync and build recommendations** in Curator. |
+| No **⬇ Download** on StashDB tiles | stasharr isn't installed in this browser, is older than 1.6, or its Stash URL isn't this Stash's address (`http://host:9999`, port included). Owned scenes and other stash-boxes never get one. |
 | A row is missing | It's empty — e.g. nothing half watched, no favourite performers, nothing rated. |
 | StashDB rows look stale | They're cached for 6 hours; **⟳ Refresh** asks again. |
 
