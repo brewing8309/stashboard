@@ -33,7 +33,7 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Unit and consistency tests
-        run: node --test tests/
+        run: node --test
       - name: index.yml matches the package
         run: node scripts/build.js --check
 

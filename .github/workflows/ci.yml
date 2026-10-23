@@ -21,7 +21,7 @@ jobs:
         with:
           node-version: 22
       - name: Unit and consistency tests
-        run: node --test tests/
+        run: node --test
       - name: index.yml matches the package
         run: node scripts/build.js --check
 
