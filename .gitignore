@@ -3,3 +3,4 @@ dist/
 test-results/
 screenshots/
 *.log
+stash-linux

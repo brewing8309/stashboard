@@ -194,7 +194,9 @@ function rowInfo(page, id) {
  * ------------------------------------------------------------------ */
 
 async function main() {
-  const bin = process.env.STASH_BIN;
+  // Stash runs inside the temporary directory, so a relative path has to be
+  // resolved first.
+  const bin = process.env.STASH_BIN && path.resolve(process.env.STASH_BIN);
   if (!bin || !fs.existsSync(bin)) throw new Error("Set STASH_BIN to a Stash binary.");
   const shots = process.env.SCREENSHOTS || null;
   if (shots) fs.mkdirSync(shots, { recursive: true });
