@@ -244,7 +244,9 @@ async function main() {
     const problems = [];
     page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
     page.on("console", (m) => {
-      if (m.type() === "error" && !/Failed to load resource/.test(m.text())) problems.push(`console.error: ${m.text()}`);
+      // Stash's own: missing images of file-less scenes, and its player
+      // asking for a wake lock that headless Chromium refuses.
+      if (m.type() === "error" && !/Failed to load resource|Screen Wake Lock/.test(m.text())) problems.push(`console.error: ${m.text()}`);
     });
 
     console.log("Dashboard");
