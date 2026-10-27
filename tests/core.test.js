@@ -29,12 +29,12 @@ test("usableBoxes keeps one box per host and names the unsupported ones", () => 
 test("the default layout turns on the default rows that are available", () => {
   const plain = c.defaultLayout(env({ boxes: [] }));
   assert.deepEqual(plain.filter((r) => r.on).map((r) => r.id), [
-    "spotlight", "local:continue", "local:recently_added", "local:unwatched_favorites",
+    "spotlight", "local:continue", "radar", "local:recently_added", "local:unwatched_favorites",
     "local:tag_of_the_day", "local:rediscover", "local:studio_spotlight", "local:top_rated", "local:random"
   ]);
   const full = c.defaultLayout(env({ curator: true }));
   const on = full.filter((r) => r.on).map((r) => r.id);
-  assert.deepEqual(on.slice(0, 6), ["spotlight", "local:continue", "curator:for_you", "local:recently_added", "box:stashdb.org:favorites", "box:stashdb.org:trending"]);
+  assert.deepEqual(on.slice(0, 7), ["spotlight", "local:continue", "radar", "curator:for_you", "local:recently_added", "box:stashdb.org:favorites", "box:stashdb.org:trending"]);
   assert.ok(full.some((r) => r.id === "curator:dormant" && !r.on), "other Curator lanes are offered, switched off");
   assert.ok(full.some((r) => r.id === "box:stashdb.org:new" && !r.on));
 });
@@ -59,7 +59,7 @@ test("a saved layout keeps its order and choices, and new rows join in their def
     { id: "local:random", on: false }
   ];
   const layout = c.resolveLayout(saved, env({ curator: true }));
-  assert.deepEqual(layout.slice(0, 3).map((r) => [r.id, r.on]), [["local:random", true], ["local:continue", false], ["curator:for_you", true]]);
+  assert.deepEqual(layout.slice(0, 4).map((r) => [r.id, r.on]), [["local:random", true], ["local:continue", false], ["radar", true], ["curator:for_you", true]]);
   assert.ok(!layout.some((r) => r.id === "bogus:row"));
   assert.equal(layout.filter((r) => r.id === "local:random").length, 1);
   assert.equal(new Set(layout.map((r) => r.id)).size, layout.length);
@@ -74,7 +74,8 @@ test("rows of a missing source stay in the saved layout but aren't shown, and re
 });
 
 test("settings fall back to defaults and clamp numbers", () => {
-  assert.deepEqual(c.readSettings(undefined), { hideNativeRows: false, disableExternal: false, hideOwned: false, cacheHours: 6, itemsPerRow: 12, layout: null });
+  assert.deepEqual(c.readSettings(undefined), { hideNativeRows: false, disableExternal: false, hideOwned: false, cacheHours: 6, radarDecisionDays: 30, itemsPerRow: 12, layout: null });
+  assert.equal(c.readSettings({ radarDecisionDays: 0 }).radarDecisionDays, 1);
   const s = c.readSettings({ hideOwned: true, cacheHours: 500, itemsPerRow: "2", layout: "[{\"id\":\"spotlight\",\"on\":true}]" });
   assert.equal(s.hideOwned, true);
   assert.equal(s.cacheHours, 168);
@@ -257,4 +258,80 @@ test("download links: StashDB scenes not in the library, opening with stasharr's
   const fans = c.boxFromConfig({ endpoint: "https://fansdb.cc/graphql", api_key: "k" });
   assert.equal(c.downloadLink({ id: "x", url: "https://fansdb.cc/scenes/x" }, fans), null, "stasharr only works on StashDB");
   assert.equal(c.downloadLink(null, box), null);
+});
+
+const radar = (id, since, extra = {}) => ({ id, name: `P${id}`, custom_fields: since ? { radar: since } : {}, ...extra });
+
+test("radar: the day comes from the custom field, in local days", () => {
+  assert.equal(c.radarSince(radar("1", "2026-10-01")), "2026-10-01");
+  assert.equal(c.radarSince(radar("1", null)), null);
+  assert.equal(c.radarSince({ id: "1", custom_fields: { radar: "soon" } }), null);
+  assert.equal(c.radarSince({ id: "1" }), null);
+  assert.equal(c.radarDays("2026-10-01", new Date(2026, 9, 27, 23, 59)), 26);
+  assert.equal(c.radarDays("2026-10-27", new Date(2026, 9, 27, 0, 1)), 0);
+  assert.equal(c.radarDays("2026-10-28", new Date(2026, 9, 27)), 0, "never negative");
+  assert.equal(c.localIsoDate(new Date(2026, 0, 5, 23, 30)), "2026-01-05");
+});
+
+test("radar: the three most recent get a row, plus a different other one each day", () => {
+  const people = [radar("1", "2026-09-01"), radar("2", "2026-10-20"), radar("3", "2026-10-25"), radar("4", "2026-10-10"),
+    radar("5", "2026-08-01"), radar("6", "2026-07-01"), radar("7", null)];
+  const today = c.radarPick(people, "20261027").map((p) => p.id);
+  assert.deepEqual(today.slice(0, 3), ["3", "2", "4"]);
+  assert.equal(today.length, 4);
+  assert.ok(["1", "5", "6"].includes(today[3]));
+  const days = new Set(Array.from({ length: 30 }, (_, i) => c.radarPick(people, `202611${String(i + 1).padStart(2, "0")}`)[3].id));
+  assert.ok(days.size > 1, "the fourth changes from day to day");
+  assert.deepEqual(c.radarPick(people.slice(0, 2), "20261027").map((p) => p.id), ["2", "1"]);
+  assert.deepEqual(c.radarPick([], "20261027"), []);
+});
+
+test("radar: the decision is due after the set days or three scenes watched", () => {
+  assert.equal(c.radarDecisionDue(29, 2, 30), false);
+  assert.equal(c.radarDecisionDue(30, 0, 30), true);
+  assert.equal(c.radarDecisionDue(2, 3, 30), true);
+});
+
+test("radar: queries for the library part and the stash-box part", () => {
+  const now = Date.UTC(2026, 9, 27, 12);
+  assert.deepEqual(c.radarLocalQuery(5, { count: 12, seed: 7 }), {
+    filter: { per_page: 12, sort: "random_7" },
+    scene_filter: { performers: { value: ["5"], modifier: "INCLUDES" }, play_count: { value: 0, modifier: "EQUALS" } }
+  });
+  assert.deepEqual(c.radarBoxInput("sdb-1", { count: 24, now }), {
+    page: 1, per_page: 24, direction: "DESC", sort: "POPULARITY",
+    date: { value: "2026-10-28", modifier: "LESS_THAN" },
+    performers: { value: ["sdb-1"], modifier: "INCLUDES" }
+  });
+});
+
+test("radar: StashDB first for the stash-box part, else another box the performer is on", () => {
+  const fans = c.boxFromConfig({ endpoint: "https://fansdb.cc/graphql", api_key: "k" });
+  const both = { stash_ids: [{ endpoint: "https://fansdb.cc/graphql", stash_id: "f1" }, { endpoint: "https://stashdb.org/graphql", stash_id: "s1" }] };
+  assert.deepEqual(c.radarBox(both, [fans, box]), { box, stashId: "s1" });
+  assert.deepEqual(c.radarBox({ stash_ids: [{ endpoint: "https://fansdb.cc/graphql", stash_id: "f1" }] }, [box, fans]), { box: fans, stashId: "f1" });
+  assert.equal(c.radarBox({ stash_ids: [] }, [box]), null);
+});
+
+test("radar: Curator's hunt becomes cards, best match first, without what Curator finds locally", () => {
+  const scene = (title) => ({ title, release_date: "2026-10-01", images: [{ url: `${title}.jpg`, width: 640, height: 360 }], performers: [], studio: { name: "S" } });
+  const cards = c.curatorHuntCards({ items: [
+    { id: "h1", score: 0.2, payload: scene("one") },
+    { id: "h2", score: 0.9, payload: scene("two") },
+    { id: "h3", score: 0.95, payload: { ...scene("three"), curator_local_match: { type: "phash" } } },
+    { id: "h4", payload: null }
+  ] }, box);
+  assert.deepEqual(cards.map((x) => [x.id, x.title, x.url]), [["h2", "two", "https://stashdb.org/scenes/h2"], ["h1", "one", "https://stashdb.org/scenes/h1"]]);
+  assert.deepEqual(c.curatorHuntCards(null, box), []);
+});
+
+test("followed performers: favourites, then the radar, then the rest", () => {
+  const ep = "https://stashdb.org/graphql";
+  const p = (sid, extra) => ({ stash_ids: [{ endpoint: ep, stash_id: sid }], ...extra });
+  assert.deepEqual(c.followedPerformerIds([p("rest"), p("radar", { custom_fields: { radar: "2026-10-01" } }), p("fav", { favorite: true })], ep), ["fav", "radar", "rest"]);
+});
+
+test("radar row titles", () => {
+  assert.equal(c.rowTitle("de", "radar", env(), { name: "Jane Doe" }), "Mehr von Jane Doe");
+  assert.equal(c.rowTitle("en", "radar", env(), null), "More from performers on your radar");
 });

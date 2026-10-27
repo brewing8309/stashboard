@@ -35,6 +35,10 @@ settings:
     displayName: Scenes per row
     description: How many scenes each row shows, 4 to 40. Default 12.
     type: NUMBER
+  radarDecisionDays:
+    displayName: Radar decision after (days)
+    description: After this many days on your radar (or three of the performer's scenes watched), the radar row asks whether they're a favourite. 1 to 365, default 30.
+    type: NUMBER
   cacheHours:
     displayName: Stash-box cache (hours)
     description: How long rows from StashDB and other stash-boxes are kept before asking again, 0 to 168. Default 6. Refresh on the dashboard always asks again.

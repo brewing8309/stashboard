@@ -25,11 +25,14 @@ const ROWS = {
   trending: ["sdb-scene-1", "t2", "t3", "sdb-scene-2", "t5", "t6", "t7", "t8", "t9", "t10", "t11", "t12", "t13", "t14"],
   favorites: ["f1", "sdb-scene-3", "f3", "f4", "f5", "f6"],
   performers: ["p1", "p2", "p3", "p4"],
-  new: ["n1", "n2", "n3"]
+  new: ["n1", "n2", "n3"],
+  // A radar row's stash-box part without Curator's hunt: her most popular.
+  radar: ["r1", "r2", "sdb-scene-5", "r4"]
 };
 
 function kindOf(input) {
   if (input.sort === "TRENDING") return "trending";
+  if (input.sort === "POPULARITY" && input.performers) return "radar";
   if (input.favorites) return "favorites";
   if (input.performers) return "performers";
   return "new";
