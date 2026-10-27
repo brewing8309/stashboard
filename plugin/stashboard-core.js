@@ -75,6 +75,7 @@
   const DEFAULT_ON = [
     "spotlight",
     "local:continue",
+    "radar",
     "curator:for_you",
     "local:recently_added",
     "box:*:favorites",
@@ -92,7 +93,7 @@
 
   // Every row id that can be shown with what's available right now.
   function availableRows(env) {
-    const ids = ["spotlight", ...LOCAL_ROWS.map((r) => `local:${r}`)];
+    const ids = ["spotlight", "radar", ...LOCAL_ROWS.map((r) => `local:${r}`)];
     if (env.curator) ids.push(...CURATOR_LANES.map((l) => `curator:${l}`));
     if (!env.disableExternal) {
       for (const box of env.boxes || []) ids.push(...BOX_ROWS.map((k) => `box:${box.host}:${k}`));
@@ -103,6 +104,7 @@
   function parseRowId(id) {
     const parts = String(id).split(":");
     if (parts[0] === "spotlight" && parts.length === 1) return { source: "spotlight" };
+    if (parts[0] === "radar" && parts.length === 1) return { source: "radar" };
     if (parts[0] === "local" && parts.length === 2 && LOCAL_ROWS.includes(parts[1])) return { source: "local", kind: parts[1] };
     if (parts[0] === "curator" && parts.length === 2 && CURATOR_LANES.includes(parts[1])) return { source: "curator", lane: parts[1] };
     if (parts[0] === "box" && parts.length === 3 && BOX_ROWS.includes(parts[2])) return { source: "box", host: parts[1], kind: parts[2] };
@@ -180,6 +182,7 @@
       disableExternal: m.disableExternal === true,
       hideOwned: m.hideOwned === true,
       cacheHours: clampNumber(m.cacheHours, 6, 0, 168),
+      radarDecisionDays: Math.round(clampNumber(m.radarDecisionDays, 30, 1, 365)),
       itemsPerRow: Math.round(clampNumber(m.itemsPerRow, 12, 4, 40)),
       layout
     };
@@ -337,9 +340,11 @@
   }
 
   // The local performers whose StashDB (or other box) IDs the performers
-  // row follows: favourites first, then the most collected.
+  // row follows: favourites first, then those on the radar, then the most
+  // collected.
   function followedPerformerIds(performers, endpoint) {
-    const ordered = (performers || []).slice().sort((a, b) => (b.favorite === true) - (a.favorite === true));
+    const rank = (p) => (p.favorite === true ? 0 : radarSince(p) ? 1 : 2);
+    const ordered = (performers || []).slice().sort((a, b) => rank(a) - rank(b));
     const ids = [];
     for (const p of ordered) {
       const sid = (p.stash_ids || []).find((s) => s.endpoint === endpoint);
@@ -393,6 +398,94 @@
   function applyOwnership(cards, owned, hideOwned) {
     const marked = cards.map((c) => (owned[c.id] ? { ...c, localId: owned[c.id] } : c));
     return hideOwned ? marked.filter((c) => !c.localId) : marked;
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Radar: performers to see more of, short of a favourite              *
+   * ------------------------------------------------------------------ */
+
+  // The performer custom field that holds the day a performer went on the
+  // radar (YYYY-MM-DD, local time). stasharr reads and writes the same
+  // field, so it's shared between the two.
+  const RADAR_FIELD = "radar";
+  const RADAR_ROWS = 3;
+  const RADAR_DECISION_PLAYS = 3;
+
+  function localIsoDate(date) {
+    const d = date instanceof Date ? date : new Date(date);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  // The day a performer went on the radar, or null.
+  function radarSince(performer) {
+    const value = performer && performer.custom_fields && performer.custom_fields[RADAR_FIELD];
+    return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : null;
+  }
+
+  // Whole days on the radar, counted in local days.
+  function radarDays(since, now) {
+    const [y, m, d] = since.split("-").map(Number);
+    const start = new Date(y, m - 1, d);
+    const today = new Date(now);
+    const midnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    return Math.max(0, Math.round((midnight - start) / 86400000));
+  }
+
+  // The radar performers that get a row today: the RADAR_ROWS most recent,
+  // plus one of the others, a different one each day.
+  function radarPick(performers, day) {
+    const on = (performers || []).filter(radarSince)
+      .sort((a, b) => radarSince(b).localeCompare(radarSince(a)) || String(a.name).localeCompare(String(b.name)));
+    const picked = on.slice(0, RADAR_ROWS);
+    const rest = on.slice(RADAR_ROWS);
+    if (rest.length) picked.push(rest[hashSeed(`${day}|radar`) % rest.length]);
+    return picked;
+  }
+
+  // Time to ask "favourite or off the radar?": long enough on it, or
+  // enough of the performer's scenes watched since.
+  function radarDecisionDue(days, playsSince, decisionDays) {
+    return days >= decisionDays || playsSince >= RADAR_DECISION_PLAYS;
+  }
+
+  // The performer's scenes in the library that haven't been played.
+  function radarLocalQuery(performerId, ctx) {
+    return {
+      filter: { per_page: ctx.count, sort: `random_${ctx.seed}` },
+      scene_filter: { performers: { value: [String(performerId)], modifier: "INCLUDES" }, play_count: { value: 0, modifier: "EQUALS" } }
+    };
+  }
+
+  // The performer's most popular released scenes on a stash-box.
+  function radarBoxInput(stashId, ctx) {
+    return {
+      page: 1, per_page: ctx.count, direction: "DESC", sort: "POPULARITY",
+      date: { value: isoDate(ctx.now + 86400000), modifier: "LESS_THAN" },
+      performers: { value: [stashId], modifier: "INCLUDES" }
+    };
+  }
+
+  // The box and the performer's ID there for the stash-box part of the
+  // row: StashDB first, else the first other box they're linked on.
+  function radarBox(performer, boxes) {
+    const ordered = (boxes || []).slice().sort((a, b) => (b.host === "stashdb.org") - (a.host === "stashdb.org"));
+    for (const box of ordered) {
+      const sid = (performer.stash_ids || []).find((s) => s.endpoint === box.endpoint);
+      if (sid && sid.stash_id) return { box, stashId: sid.stash_id };
+    }
+    return null;
+  }
+
+  // Curator's Performer Hunt (get_performer_hunt) → the performer's scenes as
+  // cards, best match first, without the ones Curator finds in the library
+  // (by StashDB ID or pHash).
+  function curatorHuntCards(output, box) {
+    const items = output && Array.isArray(output.items) ? output.items : [];
+    return items
+      .filter((item) => item && item.id && item.payload && !item.payload.curator_local_match)
+      .sort((a, b) => (Number(b.score) || 0) - (Number(a.score) || 0))
+      .map((item) => normalizeBoxScene({ ...item.payload, id: item.id }, box));
   }
 
   /* ------------------------------------------------------------------ *
@@ -483,6 +576,8 @@
   const STRINGS = {
     en: {
       "row.spotlight": "Spotlight",
+      "row.radar": "More from performers on your radar",
+      "row.radar.one": "More from {name}",
       "row.local.continue": "Continue watching",
       "row.local.recently_added": "Recently added",
       "row.local.unwatched_favorites": "Unwatched with your favourites",
@@ -506,6 +601,7 @@
       "source.local": "Your library",
       "source.curator": "Curator",
       "source.box": "{box}",
+      "source.radar": "Library + StashDB",
       "action.viewAll": "View all",
       "action.mix": "New mix",
       "action.refresh": "Refresh",
@@ -519,6 +615,23 @@
       "action.details": "Details",
       "action.scrollLeft": "Scroll left",
       "action.scrollRight": "Scroll right",
+      "action.watched": "✓ Watched",
+      "action.watched.title": "Mark as watched: forgets where you stopped and adds a play",
+      "action.failed": "Failed",
+      "radar.add": "📡 Radar",
+      "radar.add.title": "Put on your radar: not a favourite, but more suggestions on the front page",
+      "radar.on": "📡 On your radar",
+      "radar.on.title": "On your radar since {date}. Click to take off.",
+      "radar.since.today": "📡 On your radar since today",
+      "radar.since.one": "📡 On your radar for 1 day",
+      "radar.since": "📡 On your radar for {days} days",
+      "radar.decide": "📡 On your radar since {date}, {plays} scenes watched since. A favourite?",
+      "radar.favourite": "★ Favourite",
+      "radar.remove": "✕ Off the radar",
+      "radar.added": "{name} is on your radar",
+      "radar.removed": "{name} is off your radar",
+      "radar.favourited": "{name} is a favourite now",
+      "radar.empty": "Nothing new: you've watched all of it in your library, and there's nothing on StashDB you're missing.",
       "action.download": "Download",
       "action.download.title": "Opens the scene on StashDB and searches Prowlarr with stasharr",
       "badge.owned": "✓ In your library",
@@ -536,6 +649,8 @@
     },
     de: {
       "row.spotlight": "Im Rampenlicht",
+      "row.radar": "Mehr von Performern auf deinem Radar",
+      "row.radar.one": "Mehr von {name}",
       "row.local.continue": "Weiterschauen",
       "row.local.recently_added": "Neu hinzugefügt",
       "row.local.unwatched_favorites": "Ungesehen mit deinen Favoriten",
@@ -559,6 +674,7 @@
       "source.local": "Deine Bibliothek",
       "source.curator": "Curator",
       "source.box": "{box}",
+      "source.radar": "Bibliothek + StashDB",
       "action.viewAll": "Alle anzeigen",
       "action.mix": "Neu mischen",
       "action.refresh": "Aktualisieren",
@@ -572,6 +688,23 @@
       "action.details": "Details",
       "action.scrollLeft": "Nach links",
       "action.scrollRight": "Nach rechts",
+      "action.watched": "✓ Gesehen",
+      "action.watched.title": "Als gesehen markieren: vergisst die Stelle, an der du aufgehört hast, und zählt eine Wiedergabe",
+      "action.failed": "Fehlgeschlagen",
+      "radar.add": "📡 Radar",
+      "radar.add.title": "Aufs Radar setzen: kein Favorit, aber mehr Vorschläge auf der Startseite",
+      "radar.on": "📡 Auf deinem Radar",
+      "radar.on.title": "Seit {date} auf deinem Radar. Klicken zum Entfernen.",
+      "radar.since.today": "📡 Seit heute auf deinem Radar",
+      "radar.since.one": "📡 Seit 1 Tag auf deinem Radar",
+      "radar.since": "📡 Seit {days} Tagen auf deinem Radar",
+      "radar.decide": "📡 Seit {date} auf deinem Radar, seitdem {plays} Szenen gesehen. Ein Favorit?",
+      "radar.favourite": "★ Favorit",
+      "radar.remove": "✕ Vom Radar",
+      "radar.added": "{name} ist jetzt auf deinem Radar",
+      "radar.removed": "{name} ist nicht mehr auf deinem Radar",
+      "radar.favourited": "{name} ist jetzt ein Favorit",
+      "radar.empty": "Nichts Neues: In deiner Bibliothek hast du alles gesehen, und auf StashDB fehlt dir nichts.",
       "action.download": "Herunterladen",
       "action.download.title": "Öffnet die Szene auf StashDB und sucht mit stasharr in Prowlarr",
       "badge.owned": "✓ In deiner Bibliothek",
@@ -604,6 +737,7 @@
     const row = parseRowId(id);
     if (!row) return id;
     if (row.source === "spotlight") return t(lang, "row.spotlight");
+    if (row.source === "radar") return picked ? t(lang, "row.radar.one", { name: picked.name }) : t(lang, "row.radar");
     if (row.source === "local") {
       if ((row.kind === "tag_of_the_day" || row.kind === "studio_spotlight") && !picked) return t(lang, `row.local.${row.kind}.plain`);
       return t(lang, `row.local.${row.kind}`, { name: picked && picked.name });
@@ -630,6 +764,8 @@
     REDISCOVER_DAYS, localRowQuery, PICK_MIN_SCENES, pickQuery, localRowLink,
     BOX_SCENES_QUERY, BOX_PERFORMERS_MAX, boxRowInput, followedPerformerIds, pickImage, normalizeBoxScene,
     ownedMap, applyOwnership, STASHARR_ATTRIBUTE, STASHARR_HASH, downloadLink,
+    RADAR_FIELD, RADAR_ROWS, RADAR_DECISION_PLAYS, localIsoDate, radarSince, radarDays, radarPick,
+    radarDecisionDue, radarLocalQuery, radarBoxInput, radarBox, curatorHuntCards,
     CACHE_PREFIX, cacheGet, cacheSet, cacheClear,
     curatorAvailable, curatorSceneIds, orderByIds,
     STRINGS, langOf, t, rowTitle, formatDuration

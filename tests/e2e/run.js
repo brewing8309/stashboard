@@ -244,7 +244,9 @@ async function main() {
     const problems = [];
     page.on("pageerror", (e) => problems.push(`pageerror: ${e.message}`));
     page.on("console", (m) => {
-      if (m.type() === "error" && !/Failed to load resource/.test(m.text())) problems.push(`console.error: ${m.text()}`);
+      // Stash's own: missing images of file-less scenes, and its player
+      // asking for a wake lock that headless Chromium refuses.
+      if (m.type() === "error" && !/Failed to load resource|Screen Wake Lock/.test(m.text())) problems.push(`console.error: ${m.text()}`);
     });
 
     console.log("Dashboard");
@@ -347,8 +349,8 @@ async function main() {
     check("the customise dialog shows the Required Notices",
       await page.locator(".stashboard-customise .stashboard-notice").filter({ hasText: "This software is vibecoded." }).count() === 1);
     await page.click('.stashboard-customise-list li[data-row="local:random"] label');
-    await page.click('.stashboard-customise-list li[data-row="local:recently_added"] button[aria-label="Move up"]');
-    await page.click('.stashboard-customise-list li[data-row="local:recently_added"] button[aria-label="Move up"]');
+    // Past For you, the radar and Continue watching, to right under the spotlight.
+    for (let i = 0; i < 3; i++) await page.click('.stashboard-customise-list li[data-row="local:recently_added"] button[aria-label="Move up"]');
     await page.click(".stashboard-save");
     await page.waitForSelector(".stashboard-customise", { state: "detached" });
     const saved = await pluginSettings(base);
@@ -357,6 +359,99 @@ async function main() {
     const customised = await rowsOnPage(page);
     check("the saved layout applies: row moved up, row switched off",
       customised[1] === "local:recently_added" && !customised.includes("local:random"), customised.slice(0, 4));
+
+    console.log("Mark as watched");
+    const resumed = (await gql(base, "{ findScenes(scene_filter: { resume_time: { value: 0, modifier: GREATER_THAN } }) { scenes { id play_count } } }")).findScenes.scenes;
+    check("the Continue watching cards have a Watched button", await page.locator('[data-row="local:continue"] .stashboard-watched').count() === resumed.length && resumed.length === 1, resumed);
+    check("other rows don't", await page.locator('[data-row="local:recently_added"] .stashboard-watched').count() === 0);
+    await page.click('[data-row="local:continue"] .stashboard-watched');
+    await page.waitForSelector('[data-row="local:continue"] .stashboard-watched', { state: "detached", timeout: 10000 });
+    const after = (await gql(base, "query($id: ID!) { findScene(id: $id) { resume_time play_count } }", { id: resumed[0].id })).findScene;
+    check("Watched forgets the position and counts a play; the row goes", after.resume_time === 0 && after.play_count === resumed[0].play_count + 1 &&
+      await page.locator('[data-row="local:continue"]:not(.stashboard-row-empty)').count() === 0, after);
+    await openDashboard(page, base);
+    check("…and stays gone after a reload", !(await rowsOnPage(page)).includes("local:continue"));
+
+    console.log("Radar");
+    const performer = async (id) => (await gql(base, "query($id: ID!) { findPerformer(id: $id) { favorite custom_fields } }", { id })).findPerformer;
+    const today = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })();
+    await page.goto(`${base}/scenes/1`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".performer-card", { timeout: 30000 });
+    await sleep(500);
+    check("no 📡 for a favourite (Jane)", await page.locator(".stashboard-radar-card").count() === 0);
+    await page.goto(`${base}/scenes/2`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".performer-card .stashboard-radar-card", { timeout: 30000 });
+    await page.locator(".performer-card").first().hover();
+    await page.click(".performer-card .stashboard-radar-card");
+    await page.waitForSelector(".performer-card .stashboard-radar-card.is-on", { timeout: 10000 });
+    check("📡 on a performer card puts Mary on the radar, dated today", (await performer("2")).custom_fields.radar === today, await performer("2"));
+    check("…and says so", /Mary Major is on your radar/.test(await page.locator(".toast-container").innerText().catch(() => "")));
+
+    // Rita: linked to StashDB, no scenes here, no Curator hunt → StashDB's popularity.
+    await gql(base, "mutation($input: PerformerCreateInput!) { performerCreate(input: $input) { id } }", { input: {
+      name: "Rita Radar", gender: "FEMALE",
+      stash_ids: [{ endpoint: STASHDB, stash_id: "sdb-perf-rita" }],
+      custom_fields: { radar: "2026-01-01" }
+    } });
+    await openDashboard(page, base);
+    const radarIds = await page.evaluate(() => [...document.querySelectorAll(".stashboard-radar-row")].map((r) => r.getAttribute("data-row")));
+    check("each performer on the radar gets a row, newest first", radarIds.length === 2 && radarIds[0] === "radar:2", radarIds);
+    const radarRow = (id) => page.evaluate((rowId) => {
+      const el = document.querySelector(`[data-row="${rowId}"]`);
+      return el && {
+        title: el.querySelector("h2").textContent.trim(),
+        bar: el.querySelector(".stashboard-radar-bar").textContent,
+        due: el.querySelector(".stashboard-radar-bar").classList.contains("is-due"),
+        local: el.querySelectorAll(".scene-card").length,
+        external: [...el.querySelectorAll(".stashboard-ext-card .stashboard-ext-title")].map((t) => t.textContent.trim()),
+        message: (el.querySelector(".stashboard-row-message") || {}).textContent || ""
+      };
+    }, id);
+    const maryUnwatched = (await gql(base, "{ findScenes(scene_filter: { performers: { value: [\"2\"], modifier: INCLUDES }, play_count: { value: 0, modifier: EQUALS } }) { count } }")).findScenes.count;
+    const mary = await radarRow("radar:2");
+    check("Mary's row: her unwatched scenes from the library", mary.title.toLowerCase() === "more from mary major" && mary.local === Math.min(12, maryUnwatched) && /since today/.test(mary.bar) && !mary.due, mary);
+    check("…then Curator's hunt for her, best match first, without what Curator found locally",
+      JSON.stringify(mary.external) === JSON.stringify(["Hunt Two", "Hunt One"]), mary.external);
+    const rita = await radarRow("radar:" + (await gql(base, "{ findPerformers(filter: { q: \"Rita Radar\" }) { performers { id } } }")).findPerformers.performers[0].id);
+    check("without a hunt, StashDB's most popular, minus what's in the library", JSON.stringify(rita.external) === JSON.stringify(["StashDB Scene r1", "StashDB Scene r2", "StashDB Scene r4"]) && rita.local === 0, rita);
+    check("…and the decision is due after 30 days", rita.due && /A favourite\?/.test(rita.bar), rita.bar);
+    const radarReq = boxRequests.find((r) => r.kind === "radar");
+    check("the StashDB part asks for her released scenes by popularity", radarReq && radarReq.input.sort === "POPULARITY" &&
+      JSON.stringify(radarReq.input.performers) === JSON.stringify({ value: ["sdb-perf-rita"], modifier: "INCLUDES" }) && radarReq.input.date.modifier === "LESS_THAN", radarReq);
+    await page.evaluate(() => { document.documentElement.setAttribute("data-stasharr", "1.7.0"); window.dispatchEvent(new CustomEvent("stasharr:ready")); });
+    await page.waitForSelector('[data-row="radar:2"] .stashboard-download', { timeout: 10000 });
+    check("with stasharr, the radar's StashDB scenes can be downloaded", await page.locator('[data-row="radar:2"] .stashboard-download').count() === 2);
+    if (shots) {
+      await page.locator('[data-row="radar:2"]').scrollIntoViewIfNeeded();
+      // To the end of the row: the last library cards and the StashDB ones.
+      await page.evaluate(() => { const strip = document.querySelector('[data-row="radar:2"] .stashboard-strip'); strip.scrollLeft = strip.scrollWidth; });
+      await sleep(300);
+      await page.locator('[data-row="radar:2"]').screenshot({ path: path.join(shots, "radar.png") });
+    }
+
+    // Three of Mary's scenes watched since she went on the radar → the question comes early.
+    const maryScenes = (await gql(base, "{ findScenes(scene_filter: { performers: { value: [\"2\"], modifier: INCLUDES } }, filter: { per_page: 3 }) { scenes { id } } }")).findScenes.scenes;
+    for (const s of maryScenes) await gql(base, "mutation($id: ID!) { sceneAddPlay(id: $id) { count } }", { id: s.id });
+    await openDashboard(page, base);
+    check("three scenes watched since: the decision is due early", (await radarRow("radar:2")).due);
+    await page.click('[data-row="radar:2"] .stashboard-radar-favourite');
+    await page.waitForSelector('[data-row="radar:2"]', { state: "detached", timeout: 10000 });
+    const maryNow = await performer("2");
+    check("★ Favourite makes Mary a favourite and takes her off the radar", maryNow.favorite === true && !("radar" in maryNow.custom_fields), maryNow);
+    await page.click('.stashboard-radar-row .stashboard-radar-remove');
+    await page.waitForSelector(".stashboard-radar-row", { state: "detached", timeout: 10000 });
+    const ritaNow = (await gql(base, "{ findPerformers(filter: { q: \"Rita Radar\" }) { performers { favorite custom_fields } } }")).findPerformers.performers[0];
+    check("✕ Off the radar removes just the radar field", ritaNow.favorite === false && !("radar" in ritaNow.custom_fields), ritaNow);
+
+    await page.goto(`${base}/performers/3`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".stashboard-radar-button", { timeout: 30000 });
+    await page.click(".stashboard-radar-button");
+    await page.waitForSelector(".stashboard-radar-button.is-on", { timeout: 10000 });
+    check("the performer page has the same switch", (await performer("3")).custom_fields.radar === today && /On your radar/.test(await page.locator(".stashboard-radar-button").innerText()));
+    if (shots) await page.screenshot({ path: path.join(shots, "performer-radar.png") });
+    await page.click(".stashboard-radar-button");
+    await page.waitForSelector(".stashboard-radar-button:not(.is-on)", { timeout: 10000 });
+    check("…and takes them off again", !("radar" in (await performer("3")).custom_fields));
 
     console.log("Settings");
     await setPluginSettings(base, { hideNativeRows: true, hideOwned: true, itemsPerRow: 6 });
@@ -375,7 +470,7 @@ async function main() {
     await openDashboard(page, base);
     const toolbar = await page.locator(".stashboard-toolbar").textContent();
     check("German texts when Stash is set to German", /Neu mischen/.test(toolbar) && /Anpassen/.test(toolbar), toolbar);
-    check("German row titles", (await rowInfo(page, "local:continue")).title.toLowerCase() === "weiterschauen");
+    check("German row titles", (await rowInfo(page, "local:recently_added")).title.toLowerCase() === "neu hinzugefügt");
     if (shots) await page.screenshot({ path: path.join(shots, "dashboard-de.png") });
     await gql(base, "mutation { configureInterface(input: { language: \"en-US\" }) { language } }");
 

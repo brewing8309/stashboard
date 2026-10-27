@@ -179,16 +179,20 @@
   }
 
   const FOLLOWED_QUERY = `query StashboardFollowed($filter: FindFilterType, $f: PerformerFilterType) {
-  findPerformers(filter: $filter, performer_filter: $f) { performers { id favorite stash_ids { endpoint stash_id } } }
+  findPerformers(filter: $filter, performer_filter: $f) { performers { id favorite custom_fields stash_ids { endpoint stash_id } } }
 }`;
 
+  // Favourites, performers on the radar, and the most collected — in that
+  // order of priority (see followedPerformerIds).
   async function followedPerformers(box) {
     const linked = { stash_id_endpoint: { endpoint: box.endpoint, modifier: "NOT_NULL" } };
-    const [favourites, collected] = await Promise.all([
-      stashQuery(FOLLOWED_QUERY, { filter: { per_page: Core.BOX_PERFORMERS_MAX, sort: "scenes_count", direction: "DESC" }, f: { ...linked, filter_favorites: true } }),
-      stashQuery(FOLLOWED_QUERY, { filter: { per_page: Core.BOX_PERFORMERS_MAX, sort: "scenes_count", direction: "DESC" }, f: linked })
+    const filter = { per_page: Core.BOX_PERFORMERS_MAX, sort: "scenes_count", direction: "DESC" };
+    const lists = await Promise.all([
+      stashQuery(FOLLOWED_QUERY, { filter, f: { ...linked, filter_favorites: true } }),
+      stashQuery(FOLLOWED_QUERY, { filter, f: { ...linked, custom_fields: [{ field: Core.RADAR_FIELD, modifier: "NOT_NULL" }] } }),
+      stashQuery(FOLLOWED_QUERY, { filter, f: linked })
     ]);
-    return Core.followedPerformerIds([...favourites.findPerformers.performers, ...collected.findPerformers.performers], box.endpoint);
+    return Core.followedPerformerIds(lists.flatMap((l) => l.findPerformers.performers), box.endpoint);
   }
 
   const OWNED_QUERY = `query StashboardOwned($f: SceneFilterType) {
@@ -245,6 +249,157 @@
       if (result.scenes[0]) return { scene: result.scenes[0], reason };
     }
     return { scene: null };
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Radar                                                               *
+   * ------------------------------------------------------------------ */
+
+  // Through Stash's own client and PerformerUpdate document: the answer
+  // lands in Stash's cache, so the performer's cards, heart and page update
+  // by themselves.
+  async function updatePerformer(input) {
+    const client = Api.utils.StashService.getClient();
+    const res = await client.mutate({ mutation: Api.GQL.PerformerUpdateDocument, variables: { input } });
+    return res.data.performerUpdate;
+  }
+
+  function setRadar(performerId, on) {
+    return updatePerformer({
+      id: performerId,
+      custom_fields: on ? { partial: { [Core.RADAR_FIELD]: Core.localIsoDate(new Date()) } } : { remove: [Core.RADAR_FIELD] }
+    });
+  }
+
+  function makeFavourite(performerId) {
+    return updatePerformer({ id: performerId, favorite: true, custom_fields: { remove: [Core.RADAR_FIELD] } });
+  }
+
+  const RADAR_QUERY = `query StashboardRadar($f: PerformerFilterType) {
+  findPerformers(performer_filter: $f, filter: { per_page: -1 }) {
+    performers { id name favorite custom_fields stash_ids { endpoint stash_id } }
+  }
+}`;
+
+  async function radarPerformers() {
+    const data = await stashQuery(RADAR_QUERY, { f: { custom_fields: [{ field: Core.RADAR_FIELD, modifier: "NOT_NULL" }] } });
+    return data.findPerformers.performers;
+  }
+
+  const PLAYED_SINCE_QUERY = `query StashboardPlayedSince($f: SceneFilterType) {
+  findScenes(scene_filter: $f, filter: { per_page: 1 }) { count }
+}`;
+
+  // Curator's Performer Hunt fetches the whole catalogue from StashDB and
+  // can take a while; past this, the row uses StashDB's popularity instead.
+  const HUNT_TIMEOUT_MS = 45000;
+
+  function withTimeout(promise, ms) {
+    let timer;
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer within ${ms / 1000}s`)), ms); })
+    ]).finally(() => clearTimeout(timer));
+  }
+
+  async function radarBoxCards(linked, env, ctx) {
+    const { box, stashId } = linked;
+    const want = ctx.count * 2;
+    const byCurator = env.curator && box.host === "stashdb.org";
+    const key = `radar:${box.host}:${stashId}:${want}:${ctx.day}:${byCurator ? "curator" : "popular"}`;
+    let cards = Core.cacheGet(storage(), key, ctx.cacheHours * 3600000, ctx.now);
+    if (!cards) {
+      if (byCurator) {
+        try {
+          const output = await withTimeout(curatorOperation({ operation: "get_performer_hunt", performer_id: stashId }), HUNT_TIMEOUT_MS);
+          cards = Core.curatorHuntCards(output, box).slice(0, want);
+        } catch (e) {
+          console.warn(LOG, "Curator's Performer Hunt unavailable, using StashDB's popularity:", e.message);
+        }
+      }
+      if (!cards || !cards.length) {
+        const data = await boxQuery(box, Core.BOX_SCENES_QUERY, { input: Core.radarBoxInput(stashId, { count: want, now: ctx.now }) });
+        cards = ((data.queryScenes && data.queryScenes.scenes) || []).map((s) => Core.normalizeBoxScene(s, box));
+      }
+      Core.cacheSet(storage(), key, cards, ctx.now);
+    }
+    // Scenes already in the library show in the library part (if unwatched).
+    const owned = await ownedScenes(box, cards.map((c) => c.id));
+    return Core.applyOwnership(cards, owned, true).slice(0, ctx.count);
+  }
+
+  async function loadRadarRow(performer, env, ctx) {
+    const since = Core.radarSince(performer);
+    const [local, played] = await Promise.all([
+      findSlimScenes(Core.radarLocalQuery(performer.id, ctx)),
+      stashQuery(PLAYED_SINCE_QUERY, { f: {
+        performers: { value: [performer.id], modifier: "INCLUDES" },
+        last_played_at: { value: since, modifier: "GREATER_THAN" }
+      } })
+    ]);
+    const linked = env.disableExternal ? null : Core.radarBox(performer, env.boxes);
+    let cards = [];
+    let boxError = null;
+    if (linked) {
+      try {
+        cards = await radarBoxCards(linked, env, ctx);
+      } catch (e) {
+        console.warn(LOG, "Radar row's stash-box part failed:", e);
+        boxError = e;
+      }
+    }
+    return { scenes: local.scenes, cards, box: linked && linked.box, boxError, playedSince: played.findScenes.count };
+  }
+
+  // Stash's interface language, for components outside the dashboard.
+  let languagePromise = null;
+  function useLang() {
+    const [lang, setLang] = useState("en");
+    useEffect(() => {
+      let current = true;
+      if (!languagePromise) {
+        languagePromise = stashQuery("query StashboardLanguage { configuration { interface { language } } }")
+          .then((d) => Core.langOf(d.configuration.interface && d.configuration.interface.language), () => "en");
+      }
+      languagePromise.then((l) => current && setLang(l));
+      return () => { current = false; };
+    }, []);
+    return lang;
+  }
+
+  // 📡 on performer cards and the performer page. Hidden for favourites,
+  // unless one somehow is on the radar too (so it can be taken off).
+  function RadarToggle({ performer, variant }) {
+    const lang = useLang();
+    const Toast = Api.hooks.useToast();
+    const [busy, setBusy] = useState(false);
+    if (!performer || !performer.id) return null;
+    const since = Core.radarSince(performer);
+    if (performer.favorite && !since) return null;
+
+    const toggle = async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setBusy(true);
+      try {
+        await setRadar(performer.id, !since);
+        Toast.success(Core.t(lang, since ? "radar.removed" : "radar.added", { name: performer.name }));
+      } catch (err) {
+        Toast.error(err);
+      } finally {
+        setBusy(false);
+      }
+    };
+    const title = since ? Core.t(lang, "radar.on.title", { date: since }) : Core.t(lang, "radar.add.title");
+    if (variant === "card") {
+      return h("button", {
+        type: "button", disabled: busy, title, "aria-label": title, "aria-pressed": !!since, onClick: toggle,
+        className: `btn stashboard-radar-card${since ? " is-on" : ""}`
+      }, "📡");
+    }
+    return h("div", { className: "stashboard-radar-page" },
+      h(Button, { variant: since ? "primary" : "secondary", size: "sm", disabled: busy, title, "aria-pressed": !!since, onClick: toggle, className: `stashboard-radar-button${since ? " is-on" : ""}` },
+        Core.t(lang, since ? "radar.on" : "radar.add")));
   }
 
   // Runs `load` once the row is on (or near) screen; drops the answer if
@@ -360,6 +515,35 @@
     return version;
   }
 
+  // Clears where playback stopped and records a play now, so the scene
+  // leaves "Continue watching" and counts as watched.
+  const WATCHED_MUTATION = `mutation StashboardWatched($id: ID!) {
+  sceneResetActivity(id: $id, reset_resume: true, reset_duration: false)
+  sceneAddPlay(id: $id) { count }
+}`;
+
+  function WatchedButton({ scene, lang, onDone }) {
+    const [state, setState] = useState({ busy: false, error: null });
+    const mark = async () => {
+      setState({ busy: true, error: null });
+      try {
+        await stashQuery(WATCHED_MUTATION, { id: scene.id });
+        onDone(scene.id);
+      } catch (e) {
+        console.warn(LOG, "Couldn't mark the scene as watched:", e);
+        setState({ busy: false, error: e.message || String(e) });
+      }
+    };
+    return h(Button, {
+      variant: state.error ? "danger" : "secondary",
+      size: "sm",
+      className: "stashboard-watched",
+      disabled: state.busy,
+      title: state.error ? Core.t(lang, "error.row", { message: state.error }) : Core.t(lang, "action.watched.title"),
+      onClick: mark
+    }, state.error ? Core.t(lang, "action.failed") : Core.t(lang, "action.watched"));
+  }
+
   function BoxCard({ card, box, lang, stasharr }) {
     const owned = !!card.localId;
     const download = stasharr ? Core.downloadLink(card, box) : null;
@@ -403,6 +587,8 @@
   function Row({ id, env, ctx }) {
     const ref = useRef(null);
     const stasharr = useStasharr();
+    // Scenes marked as watched here, left out without reloading the row.
+    const [watched, setWatched] = useState([]);
     const near = useNearScreen(ref);
     const row = Core.parseRowId(id);
     const box = row.source === "box" ? env.boxes.find((b) => b.host === row.host) : null;
@@ -415,7 +601,8 @@
     }, `${id}|${seed}|${ctx.refresh}|${ctx.count}|${ctx.hideOwned}`, near);
 
     const data = state.data || {};
-    const items = row.source === "box" ? data.cards : data.scenes;
+    const items = row.source === "box" ? data.cards : (data.scenes || []).filter((s) => !watched.includes(s.id));
+    const markable = row.source === "local" && row.kind === "continue";
     // An empty row says nothing; hide it. Errors are shown, the row was asked for.
     if (state.status === "done" && (!items || !items.length)) return h("div", { ref, className: "stashboard-row-empty", "data-row": id });
 
@@ -425,10 +612,74 @@
     if (state.status === "error") body = h(RowMessage, { text: errorText(state.error, env.lang, box) });
     else if (state.status !== "done") body = h(Strip, { lang: env.lang }, h(Skeletons, { count: ctx.count }));
     else if (row.source === "box") body = h(Strip, { lang: env.lang }, items.map((card) => h(BoxCard, { key: card.id, card, box, lang: env.lang, stasharr })));
-    else body = h(Strip, { lang: env.lang }, items.map((scene, i) => h(LocalCard, { key: scene.id, scene, index: i })));
+    else if (markable) {
+      body = h(Strip, { lang: env.lang }, items.map((scene, i) => h("div", { key: scene.id, className: "stashboard-card-wrap", "data-scene": scene.id },
+        h(LocalCard, { scene, index: i }),
+        h(WatchedButton, { scene, lang: env.lang, onDone: (id) => setWatched((list) => [...list, id]) }))));
+    } else body = h(Strip, { lang: env.lang }, items.map((scene, i) => h(LocalCard, { key: scene.id, scene, index: i })));
 
     return h("div", { ref, "data-row": id },
       h(RowFrame, { id, title, href, label: Core.t(env.lang, "action.viewAll") }, body));
+  }
+
+  function RadarRow({ performer, env, ctx, decisionDays }) {
+    const ref = useRef(null);
+    const near = useNearScreen(ref);
+    const stasharr = useStasharr();
+    const Toast = Api.hooks.useToast();
+    const [gone, setGone] = useState(false);
+    const [busy, setBusy] = useState(false);
+    const lang = env.lang;
+    const since = Core.radarSince(performer);
+    const seed = Core.rowSeed(ctx.day, `radar:${performer.id}`, ctx.mix);
+    const state = useRowData(() => loadRadarRow(performer, env, { ...ctx, seed }), `radar:${performer.id}|${seed}|${ctx.refresh}|${ctx.count}`, near);
+    if (gone || !since) return null;
+
+    const data = state.data || {};
+    const days = Core.radarDays(since, ctx.now);
+    const decide = state.status === "done" && Core.radarDecisionDue(days, data.playedSince || 0, decisionDays);
+    const sinceText = decide
+      ? Core.t(lang, "radar.decide", { date: since, plays: data.playedSince })
+      : days === 0 ? Core.t(lang, "radar.since.today") : days === 1 ? Core.t(lang, "radar.since.one") : Core.t(lang, "radar.since", { days });
+
+    const act = (fn, message) => async () => {
+      setBusy(true);
+      try {
+        await fn(performer.id);
+        Toast.success(Core.t(lang, message, { name: performer.name }));
+        setGone(true);
+      } catch (e) {
+        Toast.error(e);
+        setBusy(false);
+      }
+    };
+    const bar = h("div", { className: `stashboard-radar-bar${decide ? " is-due" : ""}` },
+      h("span", { className: "stashboard-radar-since" }, sinceText),
+      h("span", { className: "stashboard-radar-actions" },
+        h(Button, { variant: decide ? "primary" : "secondary", size: "sm", disabled: busy, className: "stashboard-radar-favourite", onClick: act(makeFavourite, "radar.favourited") }, Core.t(lang, "radar.favourite")),
+        h(Button, { variant: "secondary", size: "sm", disabled: busy, className: "stashboard-radar-remove", onClick: act((id) => setRadar(id, false), "radar.removed") }, Core.t(lang, "radar.remove"))));
+
+    let body;
+    if (state.status === "error") body = h(RowMessage, { text: errorText(state.error, lang, null) });
+    else if (state.status !== "done") body = h(Strip, { lang }, h(Skeletons, { count: ctx.count }));
+    else {
+      const items = [
+        ...data.scenes.map((scene, i) => h(LocalCard, { key: `l${scene.id}`, scene, index: i })),
+        ...data.cards.map((card) => h(BoxCard, { key: `b${card.id}`, card, box: data.box, lang, stasharr }))
+      ];
+      body = items.length ? h(Strip, { lang }, items) : h(RowMessage, { text: Core.t(lang, "radar.empty") });
+      if (data.boxError) body = h(React.Fragment, null, body, h(RowMessage, { text: errorText(data.boxError, lang, data.box) }));
+    }
+    return h("div", { ref, "data-row": `radar:${performer.id}`, className: "stashboard-radar-row" },
+      h(RowFrame, { id: "radar", title: Core.rowTitle(lang, "radar", env, performer), href: `/performers/${performer.id}`, label: Core.t(lang, "action.viewAll") },
+        bar, body));
+  }
+
+  function RadarRows({ env, ctx, decisionDays }) {
+    const state = useRowData(radarPerformers, `radar|${ctx.refresh}`, true);
+    if (state.status !== "done") return null;
+    return Core.radarPick(state.data, ctx.day).map((performer) =>
+      h(Boundary, { key: performer.id, name: `radar ${performer.id}` }, h(RadarRow, { performer, env, ctx, decisionDays })));
   }
 
   function Spotlight({ env, ctx }) {
@@ -464,6 +715,7 @@
   function sourceLabel(lang, id, env) {
     const row = Core.parseRowId(id);
     if (row.source === "curator") return Core.t(lang, "source.curator");
+    if (row.source === "radar") return Core.t(lang, "source.radar");
     if (row.source === "box") {
       const box = env.boxes.find((b) => b.host === row.host);
       return Core.t(lang, "source.box", { box: box ? box.name : row.host });
@@ -596,7 +848,9 @@
           h(Button, { variant: "secondary", size: "sm", onClick: refreshAll, className: "stashboard-refresh" }, `⟳ ${Core.t(lang, "action.refresh")}`),
           h(Button, { variant: "secondary", size: "sm", onClick: () => setCustomising(true), className: "stashboard-customise-open" }, `⚙ ${Core.t(lang, "action.customise")}`))),
       rows.map((id) => h(Boundary, { key: `${id}|${mix}|${refresh}`, name: id },
-        id === "spotlight" ? h(Spotlight, { env, ctx }) : h(Row, { id, env, ctx }))),
+        id === "spotlight" ? h(Spotlight, { env, ctx })
+          : id === "radar" ? h(RadarRows, { env, ctx, decisionDays: settings.radarDecisionDays })
+            : h(Row, { id, env, ctx }))),
       customising ? h(Customise, { state, onClose: () => setCustomising(false), onSave: saveLayout }) : null);
   }
 
@@ -615,6 +869,21 @@
       h(Boundary, { name: "dashboard", fallback: null }, h(Dashboard, { onSettings })),
       hideNative ? null : h("div", { className: "stashboard-native" }, h(NativeFrontPage, { render, args })));
   }
+
+  // 📡 on every performer card (scene pages, performer lists) and on the
+  // performer page, next to Stash's own controls.
+  Api.patch.after("PerformerCard.Overlays", function (...args) {
+    const result = args[args.length - 1];
+    return h(React.Fragment, null, result,
+      h(Boundary, { name: "radar on a card" }, h(RadarToggle, { performer: args[0] && args[0].performer, variant: "card" })));
+  });
+
+  Api.patch.after("PerformerDetailsPanel", function (...args) {
+    const result = args[args.length - 1];
+    return h(React.Fragment, null,
+      h(Boundary, { name: "radar on the performer page" }, h(RadarToggle, { performer: args[0] && args[0].performer, variant: "page" })),
+      result);
+  });
 
   Api.patch.instead("FrontPage", function (...args) {
     const render = args[args.length - 1];

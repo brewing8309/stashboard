@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.0 — 2026-10-27
+
+### Added
+
+- **📡 On your radar.** For performers who caught your eye but aren't a favourite (yet): 📡 on
+  their performer card (on a scene's page, in the performer lists) or **📡 Radar** on their
+  performer page. The front page then gets a **More from …** row for them: their unwatched scenes
+  in your library, then their most popular StashDB scenes you don't have (ranked by Curator's
+  Performer Hunt when Curator is installed), with **⬇ Download** through stasharr. After 30 days
+  (setting **Radar decision after**) or three of their scenes watched, the row asks: **★
+  Favourite** or **✕ Off the radar**. Radar performers also follow right after favourites in
+  "New on StashDB with your performers". Stored as the performer custom field `radar` (the day
+  it was set), which stasharr 1.7 can set from StashDB too.
+- **✓ Watched in Continue watching.** A button under each card marks the scene as watched: Stash
+  forgets where you stopped (the same as **Reset resume time** in the scene's History tab) and
+  records a play, so it leaves the row and counts as seen. Stash does this by itself when you
+  watch at least 98% of a scene; the button is for the ones you're done with earlier.
+
 ## 1.1.0 — 2026-10-23
 
 ### Added

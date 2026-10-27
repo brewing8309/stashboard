@@ -147,6 +147,14 @@
   .stashboard-strip-btn { display: none; }
 }
 
+.stashboard-card-wrap {
+  display: flex;
+  flex-direction: column;
+}
+.stashboard-watched {
+  margin: 0 5px 5px;
+}
+
 .stashboard-skeleton {
   flex: 0 0 auto;
   height: 250px;
@@ -254,6 +262,58 @@
   color: #fff;
   text-decoration: none;
   filter: brightness(1.1);
+}
+
+/* Radar: the toggle on performer cards sits under Stash's heart and, like
+   an empty heart, shows on hover until it's on. */
+.performer-card .stashboard-radar-card {
+  position: absolute;
+  top: 3.1rem;
+  right: 5px;
+  z-index: 2;
+  padding: 0.1rem 0.4rem;
+  font-size: 1.15rem;
+  line-height: 1.2;
+  border: 0;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.45);
+  opacity: 0;
+  filter: grayscale(1);
+  transition: opacity 0.15s ease;
+}
+.performer-card:hover .stashboard-radar-card,
+.performer-card .stashboard-radar-card:focus-visible {
+  opacity: 0.85;
+}
+.performer-card .stashboard-radar-card.is-on {
+  opacity: 1;
+  filter: none;
+  background: rgba(47, 111, 208, 0.85);
+}
+@media (hover: none) {
+  .performer-card .stashboard-radar-card { opacity: 0.85; }
+}
+.stashboard-radar-page {
+  margin: 0.25rem 0 0.75rem;
+}
+.stashboard-radar-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: -0.25rem 0 0.6rem;
+  opacity: 0.85;
+}
+.stashboard-radar-bar.is-due {
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: rgba(47, 111, 208, 0.18);
+  opacity: 1;
+}
+.stashboard-radar-actions {
+  display: flex;
+  gap: 0.4rem;
 }
 
 /* Customise dialog */

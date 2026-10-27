@@ -45,7 +45,8 @@ dashboard unless you switch them off.
 | Row | Source | What's in it |
 |---|---|---|
 | **Spotlight** | Curator, or your library | One big pick: Curator's best bet, else one of your top rated, else a random scene. **▶ Play** starts it. |
-| **Continue watching** | Library | Scenes you started and didn't finish. |
+| **More from …** | Library + StashDB | One row per performer on your [📡 radar](#-on-your-radar): their unwatched scenes, then StashDB scenes you're missing. |
+| **Continue watching** | Library | Scenes you started and didn't finish. **✓ Watched** under a card takes it off the row and counts a play. |
 | **Recently added** | Library | The newest scenes in Stash. |
 | **Unwatched with your favourites** | Library | Scenes with a favourite performer you haven't played or started. |
 | **Tag of the day** · **Studio spotlight** | Library | One tag and one studio with at least four scenes, a different one every day. |
@@ -70,6 +71,25 @@ you don't have yet gets **⬇ Download**. It opens the scene on StashDB with sta
 search already running; you pick the release there. stasharr marks your Stash page when its
 Stash URL is set, which is how Stashboard knows to show the button — without stasharr there's no
 button, just the link to StashDB.
+
+### 📡 On your radar
+
+Someone caught your eye, but a favourite feels like too much? Click **📡** on their performer
+card — on a scene's page, in the performer lists — or **📡 Radar** on their performer page. From
+then on the front page has a row **More from …** for them: their scenes in your library you
+haven't watched yet, then their most popular StashDB scenes you don't have (with
+[Curator](#curator-rows), the ones that fit your taste best), each with **⬇ Download** if
+stasharr is around.
+
+After 30 days on the radar, or once you've watched three of their scenes since, the row asks:
+**★ Favourite** or **✕ Off the radar**. Nothing is taken off by itself. Performers on the radar
+also follow right after your favourites in **New on StashDB with your performers**.
+
+The radar is a custom field on the performer in Stash (`radar: 2026-10-27`, the day it was set),
+so it's yours, it shows on the performer's page, and anything can filter by it. The three most
+recent get a row every day, the others take turns in a fourth.
+
+![A radar row: unwatched scenes from the library, then StashDB scenes with Download](docs/radar.png)
 
 ## Install
 
@@ -117,6 +137,7 @@ More in **Settings → Plugins → Stashboard**:
 | **Don't contact stash-boxes** | off | Library and Curator rows only; StashDB is never asked for anything. |
 | **Scenes per row** | 12 | 4 to 40. |
 | **Stash-box cache (hours)** | 6 | How long StashDB rows are kept before asking again; 0 turns the cache off. |
+| **Radar decision after (days)** | 30 | When a radar row asks "favourite or off the radar?" (or after three of their scenes watched). |
 
 Stash's interface language decides the dashboard's: German and English so far.
 
@@ -128,8 +149,10 @@ Stash's interface language decides the dashboard's: German and English so far.
   each StashDB row: trending, your StashDB favourites, new releases. The **New on StashDB with
   your performers** row sends the StashDB IDs of up to 50 performers from your library; switch
   that row off if you'd rather not. Answers are cached in your browser (6 hours by default).
-- **Writes** — the only thing Stashboard ever saves is its own settings and layout, in Stash's
-  plugin settings. It doesn't change scenes, performers or anything else.
+- **Writes** — only when you click: its own settings and layout (in Stash's plugin settings),
+  **✓ Watched** (the scene's resume time and a play), **📡** (the performer's `radar` field) and
+  **★ Favourite** in a radar row (the performer's favourite flag). Nothing else in Stash is
+  changed.
 
 ## Troubleshooting
 
@@ -141,6 +164,8 @@ Stash's interface language decides the dashboard's: German and English so far.
 | No ✓ on StashDB scenes you have | Those scenes aren't linked to StashDB in Stash (no StashDB ID), or Stash is older than 0.31. |
 | "Curator has no recommendations yet" | Run **Sync and build recommendations** in Curator. |
 | No **⬇ Download** on StashDB tiles | stasharr isn't installed in this browser, is older than 1.6, or its Stash URL isn't this Stash's address (`http://host:9999`, port included). Owned scenes and other stash-boxes never get one. |
+| No 📡 on a performer | They're already a favourite. |
+| A radar row shows nothing new | Everything of theirs in your library is watched and StashDB has nothing you're missing — or they aren't linked to StashDB in Stash (no StashDB ID), so only the library part works. |
 | A row is missing | It's empty — e.g. nothing half watched, no favourite performers, nothing rated. |
 | StashDB rows look stale | They're cached for 6 hours; **⟳ Refresh** asks again. |
 

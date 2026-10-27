@@ -1,6 +1,6 @@
 name: Stashboard
 description: A dashboard for Stash's front page — continue watching, the day's tag, trending on StashDB, new from your favourites, and Curator's picks when it's installed.
-version: 1.1.0
+version: 1.2.0
 url: https://github.com/brewing8309/stashboard
 
 ui:
@@ -34,6 +34,10 @@ settings:
   itemsPerRow:
     displayName: Scenes per row
     description: How many scenes each row shows, 4 to 40. Default 12.
+    type: NUMBER
+  radarDecisionDays:
+    displayName: Radar decision after (days)
+    description: After this many days on your radar (or three of the performer's scenes watched), the radar row asks whether they're a favourite. 1 to 365, default 30.
     type: NUMBER
   cacheHours:
     displayName: Stash-box cache (hours)
