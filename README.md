@@ -6,13 +6,13 @@
 
 A [Stash](https://github.com/stashapp/stash) plugin that turns the front page into a dashboard:
 pick up where you left off, the day's tag and studio, what's trending on
-[StashDB](https://stashdb.org), what's new from your favourites — and, if you use
-[Stash Curator](https://github.com/mrx-31415/stash-curator), its personal recommendations.
+[StashDB](https://stashdb.org), what's new from your favourites — and personal recommendations
+from [Stash Curator](CURATOR.md), which comes with it.
 
 ![Stash](https://img.shields.io/badge/Stash-0.31%2B-2f6fd0)
 ![Plugin](https://img.shields.io/badge/plugin-UI%20only-blue)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-success)
-![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)
+![License](https://img.shields.io/badge/license-AGPL--3.0--only-blue)
 ![Vibecoded](https://img.shields.io/badge/100%25-vibecoded-ff69b4)
 
 ![Stashboard on Stash's front page](docs/dashboard.png)
@@ -94,8 +94,9 @@ row); **🎲 Someone else** picks another right away.
 
 ## Install
 
-You need **Stash 0.31 or newer**. Stashboard is a UI-only plugin: no Python, no database, nothing
-to run.
+You need **Stash 0.31 or newer**, with Python available to Stash (as for most plugins): Stash
+Curator's backend comes with Stashboard and runs through it. On Linux (x86-64, ARM64), macOS and
+Windows (x86-64).
 
 1. In Stash, open **Settings → Plugins → Available Plugins → Add Source** and add
    - Name: `Stashboard`
@@ -105,6 +106,10 @@ to run.
 3. Reload the page and open the front page.
 
 Updates show up in the same list (**Installed Plugins → Check for Updates**).
+
+**Coming from the separate Stash Curator plugin?** Install Stashboard, open the front page once,
+then uninstall Stash Curator (the dashboard reminds you while both are on). Stashboard copies
+Curator's data — model, history, your answers — and its settings on first use.
 
 ### StashDB rows
 
@@ -119,11 +124,11 @@ to the hosts its manifest lists — and are named in the Customise dialog.
 
 ### Curator rows
 
-If [Stash Curator](https://github.com/mrx-31415/stash-curator) is installed and enabled, its
-For you becomes the top 5, its other lanes can be switched on, and the Spotlight becomes
-Curator's best bet. Nothing to set up: Stashboard
-asks Curator through Stash, the way Curator's own page does. Curator needs to have built its model
-first (**Sync and build recommendations** in Curator).
+[Stash Curator](CURATOR.md) is part of Stashboard: its For you is the top 5, its other lanes can
+be switched on, and the Spotlight is its best bet. Its own pages, tasks and settings are there
+too (**Curator** in the navigation bar, **Settings → Tasks**, **Settings → Plugins →
+Stashboard**). It needs to have built its model once: **Sync and build recommendations** in
+Curator or under Settings → Tasks.
 
 ## Make it yours
 
@@ -157,7 +162,11 @@ Stash's interface language decides the dashboard's: German and English so far.
   if Stash hasn't counted one). Everything else only when you click: **✓ Watched** (the scene's
   resume time and a play), **✕ Remove** (the resume time and the newest play), **📡** (the
   performer's `radar` field) and **★ Favourite** in a radar row (the performer's favourite flag).
-  Nothing else in Stash is changed.
+  Nothing else in Stash is changed by the dashboard.
+- **Curator** — keeps its model, your plays and answers in an SQLite file in Stashboard's plugin
+  directory (`data/`, or the **Sidecar database path** setting), and does what its own pages and
+  tasks say; see [its documentation](curator/README.md). On the first start Stashboard copies a
+  separately installed Stash Curator's `data/` there, once, and leaves the original alone.
 
 ## Troubleshooting
 
@@ -179,11 +188,14 @@ If Stashboard itself fails, the front page falls back to Stash's own; the browse
 ## Under the hood
 
 ```
-plugin/stashboard.yml       the plugin manifest: files, CSP for the stash-boxes, settings
+plugin/stashboard.yml       Stashboard's part of the manifest: files, CSP for the stash-boxes, settings
 plugin/stashboard-core.js   pure logic: rows, layouts, queries, seeds, cache, texts — tested in Node
 plugin/stashboard.js        the React UI and the talking (Stash GraphQL, stash-boxes, Curator)
 plugin/stashboard.css       styles
+curator/                    Stash Curator, unchanged (git subtree) — see CURATOR.md
+curator-adapter/            what Stashboard changes about it: plugin id, launcher, binaries lock
 scripts/build.js            the deterministic zip and index.yml
+scripts/curator.js          the merged manifest, Curator's files, building curator-core
 tests/                      node:test unit and consistency tests
 tests/e2e/                  end-to-end test against a real Stash (Playwright)
 index.yml                   the plugin source Stash reads
@@ -219,17 +231,18 @@ release exists.
 
 ## License
 
-[**PolyForm Noncommercial License 1.0.0**](LICENSE) — source available, not open source.
+[**GNU Affero General Public License v3.0 only**](LICENSE) (AGPL-3.0-only), like the
+[Stash Curator](CURATOR.md) it includes. Releases up to 2.0.0 were published under the PolyForm
+Noncommercial License 1.0.0 and stay available under it.
 
-**You can:** use it, fork it, modify it, redistribute it, run it at home or in any nonprofit,
-school or public institution.
+**You can:** use it, study it, change it and pass it on, also commercially.
 
-**You must:** keep both Required Notices with it — the copyright line and the vibecoded
-statement — and keep them *visible* in any version you publish: in the README, and in the
-plugin's Customise dialog. Reformat them however you like; just don't bury them or make them less
-prominent than your own credits. Nothing requires you to call *your* changes vibecoded.
-
-**You can't:** charge money for it, or use it commercially in any form.
+**You must:** pass it on under the same license, with its source, including to people who only
+use a changed version over a network. And, as an additional term under the license's section
+7(b), keep both Required Notices with it — the copyright line and the vibecoded statement — and
+keep them *visible* in any version you publish: in the README, and in the plugin's Customise
+dialog. Reformat them however you like; just don't bury them or make them less prominent than
+your own credits. Nothing requires you to call *your* changes vibecoded.
 
 ```
 Required Notice: Copyright 2026 brewing8309 — https://github.com/brewing8309/stashboard

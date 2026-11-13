@@ -8,7 +8,9 @@
   "use strict";
 
   const PLUGIN_ID = "stashboard";
-  const CURATOR_PLUGIN_ID = "stash-curator";
+  // Stash Curator runs inside Stashboard (curator/, see CURATOR.md). The
+  // separate plugin it replaces had this id; its settings are taken over.
+  const OLD_CURATOR_ID = "stash-curator";
 
   /* ------------------------------------------------------------------ *
    * Stash-boxes                                                         *
@@ -635,8 +637,22 @@
    * Curator                                                             *
    * ------------------------------------------------------------------ */
 
-  function curatorAvailable(plugins) {
-    return (plugins || []).some((p) => p && p.id === CURATOR_PLUGIN_ID && p.enabled);
+  // The separate Stash Curator plugin, still installed and switched on next
+  // to the one inside Stashboard: then Curator runs twice.
+  function oldCuratorEnabled(plugins) {
+    return (plugins || []).some((p) => p && p.id === OLD_CURATOR_ID && p.enabled);
+  }
+
+  const CURATOR_TAKEN = "curatorSettingsTaken";
+
+  // The old plugin's settings, for Stashboard's own, once: only the ones
+  // Stashboard doesn't have yet. null when there's nothing to do.
+  function takeOverCuratorSettings(own, old) {
+    if (!old || own[CURATOR_TAKEN] === true) return null;
+    const keys = Object.keys(old).filter((k) => !(k in own));
+    const merged = { ...own, [CURATOR_TAKEN]: true };
+    for (const k of keys) merged[k] = old[k];
+    return keys.length ? merged : null;
   }
 
   // get_slate's answer → local scene IDs in Curator's order.
@@ -766,7 +782,7 @@
       "customise.hint": "Choose what's on the front page and in which order. Saved in Stash, so it applies to every browser.",
       "customise.unsupported": "Not supported here (only {known}): {names}",
       "customise.noBoxes": "Add StashDB under Settings → Metadata Providers → Stash-box Endpoints to get its rows.",
-      "customise.noCurator": "Install the Stash Curator plugin for personal recommendation rows.",
+      "notice.oldCurator": "Stash Curator is part of Stashboard now. Uninstall the separate Stash Curator plugin (Settings → Plugins), or Curator runs twice. Your Curator data has been copied over.",
       "error.noKey": "{box} needs a valid API key: Settings → Metadata Providers → Stash-box Endpoints.",
       "error.row": "Couldn't load this row: {message}",
       "error.curatorModel": "Curator has no recommendations yet. Run “Sync and build recommendations” in Curator."
@@ -876,7 +892,7 @@
       "customise.hint": "Wähle, was auf der Startseite steht und in welcher Reihenfolge. Wird in Stash gespeichert und gilt in jedem Browser.",
       "customise.unsupported": "Hier nicht unterstützt (nur {known}): {names}",
       "customise.noBoxes": "Trage StashDB unter Einstellungen → Metadatenanbieter → Stash-Box-Endpunkte ein, um dessen Zeilen zu bekommen.",
-      "customise.noCurator": "Installiere das Plugin Stash Curator für persönliche Empfehlungszeilen.",
+      "notice.oldCurator": "Stash Curator steckt jetzt in Stashboard. Deinstalliere das separate Plugin Stash Curator (Einstellungen → Plugins), sonst läuft Curator doppelt. Deine Curator-Daten wurden übernommen.",
       "error.noKey": "{box} braucht einen gültigen API-Key: Einstellungen → Metadatenanbieter → Stash-Box-Endpunkte.",
       "error.row": "Diese Zeile konnte nicht geladen werden: {message}",
       "error.curatorModel": "Curator hat noch keine Empfehlungen. Starte in Curator „Sync and build recommendations“."
@@ -988,7 +1004,7 @@
   }
 
   const api = {
-    PLUGIN_ID, CURATOR_PLUGIN_ID, KNOWN_BOXES, boxFromConfig, usableBoxes,
+    PLUGIN_ID, OLD_CURATOR_ID, CURATOR_TAKEN, KNOWN_BOXES, boxFromConfig, usableBoxes,
     LOCAL_ROWS, CURATOR_LANES, BOX_ROWS, DEFAULT_ON, MODULES, moduleSize, THEMES, moduleTheme, UPNEXT_TOTAL, TAG_CHIPS, ZONES, rowZone, byZone, availableRows, parseRowId, defaultLayout,
     resolveLayout, visibleRows, readSettings, serializeLayout,
     dayKey, hashSeed, rowSeed, isoDate,
@@ -998,7 +1014,7 @@
     RADAR_FIELD, RADAR_DECISION_PLAYS, localIsoDate, radarSince, radarDays, radarPick,
     radarDecisionDue, radarLocalQuery, radarBoxInput, radarBox, curatorHuntCards,
     CACHE_PREFIX, cacheGet, cacheSet, cacheClear,
-    curatorAvailable, curatorSceneIds, orderByIds,
+    oldCuratorEnabled, takeOverCuratorSettings, curatorSceneIds, orderByIds,
     STRINGS, langOf, t, rowTitle, formatDuration, sceneTitle, sceneProgress, minutesLeft, daysAgo, whenText, stars,
     BUBBLES_MAX, unwatchedCountsQuery, bubbleOrder
   };

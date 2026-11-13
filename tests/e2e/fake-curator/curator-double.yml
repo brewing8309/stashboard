@@ -1,0 +1,10 @@
+# A stand-in for Curator's backend in the end-to-end test: same raw
+# interface, answers get_slate with fixed local scene IDs. Stashboard is
+# pointed at it with window.__stashboardCuratorBackend = "curator-double".
+name: Stash Curator (test double)
+description: Answers get_slate like Stash Curator does, for Stashboard's tests.
+version: 0.0.0-test
+exec:
+  - python3
+  - "{pluginDir}/fake_curator.py"
+interface: raw

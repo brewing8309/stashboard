@@ -20,6 +20,8 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+      - name: Curator's patches apply and its binaries match curator/
+        run: node scripts/curator.js check
       - name: Unit and consistency tests
         run: node --test
       - name: index.yml matches the package

@@ -1,5 +1,32 @@
 # Changelog
 
+## 3.0.0 — 2026-11-13
+
+### Changed
+
+- **Stash Curator comes with Stashboard.** Curator (from the fork
+  [brewing8309/stash-curator](https://github.com/brewing8309/stash-curator), unchanged, see
+  [CURATOR.md](CURATOR.md)) runs inside Stashboard: its backend, tasks, hooks, settings and pages.
+  The separate Stash Curator plugin isn't needed any more; uninstall it after the first start —
+  the dashboard reminds you while both are on. Stashboard takes over its data (model, history,
+  answers) and settings once.
+- **License: AGPL-3.0-only** (was PolyForm Noncommercial 1.0.0), as Curator's license requires for
+  the combined plugin. The Required Notices stay, now as additional terms under section 7(b).
+  Releases up to 2.0.0 stay available under PolyForm Noncommercial.
+- Each module has its own colour and symbol, so they tell apart at a glance.
+- **Curator: your top 5 today** shows the pictures in their own 16:9: number one big, the next four
+  beside it.
+- **Discover** keeps more in reserve: **More** shows up to 20 trending scenes, 16 per StashDB
+  module and 12 scenes on a radar profile.
+- **Surprise me** has no 🎲 any more (its picture is blurred anyway); New mix draws a new one.
+- The browser tab reads **Stashboard | Stash** on the dashboard (Stash's front page sets no title
+  of its own).
+
+### Changes for setups
+
+- Stash needs Python for Stashboard now (Curator's backend starts through it). The package is
+  bigger (about 25 MB): Curator's backend for Linux, macOS and Windows.
+
 ## 2.0.0 — 2026-11-13
 
 ### Changed

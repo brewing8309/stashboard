@@ -97,9 +97,13 @@
     return json.data;
   }
 
+  // Curator's backend is Stashboard's own (curator/). The end-to-end test
+  // points this at a stand-in with known answers.
+  const CURATOR_BACKEND = window.__stashboardCuratorBackend || Core.PLUGIN_ID;
+
   async function curatorOperation(args) {
     const data = await stashQuery(
-      `mutation StashboardCurator($args: Map!) { runPluginOperation(plugin_id: "${Core.CURATOR_PLUGIN_ID}", args: $args) }`,
+      `mutation StashboardCurator($args: Map!) { runPluginOperation(plugin_id: "${CURATOR_BACKEND}", args: $args) }`,
       { args }
     );
     return data.runPluginOperation;
@@ -109,19 +113,30 @@
   configuration {
     general { stashBoxes { endpoint api_key name } }
     interface { language }
-    plugins(include: ["${Core.PLUGIN_ID}"])
+    plugins(include: ["${Core.PLUGIN_ID}", "${Core.OLD_CURATOR_ID}"])
   }
   plugins { id enabled }
 }`;
 
   async function loadEnvironment() {
     const data = await stashQuery(ENV_QUERY);
-    const raw = (data.configuration.plugins && data.configuration.plugins[Core.PLUGIN_ID]) || {};
+    const plugins = data.configuration.plugins || {};
+    let raw = plugins[Core.PLUGIN_ID] || {};
+    const taken = Core.takeOverCuratorSettings(raw, plugins[Core.OLD_CURATOR_ID]);
+    if (taken) {
+      try {
+        await saveSettings({}, taken);
+        raw = taken;
+      } catch (e) {
+        console.warn(LOG, "Couldn't take over the old Curator's settings:", e);
+      }
+    }
     const settings = Core.readSettings(raw);
     const { boxes, unsupported } = Core.usableBoxes(data.configuration.general.stashBoxes);
     const env = {
       lang: Core.langOf(data.configuration.interface && data.configuration.interface.language),
-      curator: Core.curatorAvailable(data.plugins),
+      curator: true,
+      oldCurator: Core.oldCuratorEnabled(data.plugins),
       boxes,
       unsupported,
       disableExternal: settings.disableExternal
@@ -1182,7 +1197,6 @@
     const hints = [];
     if (!env.boxes.length && !env.disableExternal) hints.push(Core.t(lang, "customise.noBoxes"));
     if (env.unsupported.length) hints.push(Core.t(lang, "customise.unsupported", { known: Core.KNOWN_BOXES.map((b) => b.name).join(", "), names: env.unsupported.join(", ") }));
-    if (!env.curator) hints.push(Core.t(lang, "customise.noCurator"));
 
     return h(Modal, { show: true, onHide: onClose, size: "lg", className: "stashboard-customise", scrollable: true },
       h(Modal.Header, { closeButton: true }, h(Modal.Title, null, Core.t(lang, "customise.title"))),
@@ -1211,7 +1225,9 @@
       h("div", { className: "stashboard-notice" },
         h("p", null, "Copyright 2026 brewing8309 — ", h("a", { href: "https://github.com/brewing8309/stashboard", target: "_blank", rel: "noopener noreferrer" }, "github.com/brewing8309/stashboard")),
         h("p", null, h("strong", null, "This software is vibecoded."), " It was written end to end by an AI (Claude) from natural-language prompts. No human wrote or reviewed the code by hand. It ships with automated tests but no warranty."),
-        h("p", null, "Licensed under the PolyForm Noncommercial License 1.0.0 — free to use and modify for any noncommercial purpose; selling it is not permitted.")),
+        h("p", null, "Licensed under the GNU Affero General Public License v3.0 only. Includes Stash Curator — ",
+          h("a", { href: "https://github.com/mrx-31415/stash-curator", target: "_blank", rel: "noopener noreferrer" }, "github.com/mrx-31415/stash-curator"),
+          " — under the same license.")),
       h(Modal.Footer, null,
         h(Button, { variant: "outline-secondary", className: "mr-auto me-auto", onClick: () => setRows(Core.defaultLayout(env)) }, Core.t(lang, "action.reset")),
         h(Button, { variant: "secondary", onClick: onClose }, Core.t(lang, "action.cancel")),
@@ -1221,6 +1237,31 @@
   /* ------------------------------------------------------------------ *
    * The dashboard                                                       *
    * ------------------------------------------------------------------ */
+
+  // Stash's front page sets no title of its own, so the tab kept whatever
+  // the last page (or a plugin) left there. Stashboard names it, the way
+  // Stash's pages do ("Stashboard | Stash"), and gives it back on leaving.
+  const TAB_TITLE = "Stashboard";
+
+  function useTabTitle() {
+    useEffect(() => {
+      const before = document.title;
+      const site = (before.split(" | ").pop() || "Stash").trim() || "Stash";
+      const title = `${TAB_TITLE} | ${site}`;
+      document.title = title;
+      // Stash's pages set theirs through react-helmet when they mount; keep
+      // ours while the dashboard is up, in case something resets it.
+      const observer = new MutationObserver(() => {
+        if (document.title !== title && document.title.split(" | ").length <= 1) document.title = title;
+      });
+      const head = document.querySelector("title");
+      if (head) observer.observe(head, { childList: true });
+      return () => {
+        observer.disconnect();
+        if (document.title === title) document.title = before;
+      };
+    }, []);
+  }
 
   const MIX_KEY = "stashboard:mix";
   const DISCOVER_HIDDEN_KEY = "stashboard:discover-hidden";
@@ -1260,6 +1301,7 @@
       });
     }, []);
     useEffect(reload, []);
+    useTabTitle();
 
     if (failed) return null;
     if (!state) return h("div", { className: "stashboard stashboard-loading" });
@@ -1300,6 +1342,7 @@
           h(Button, { variant: "secondary", size: "sm", onClick: newMix, className: "stashboard-mix" }, `🔀 ${Core.t(lang, "action.mix")}`),
           h(Button, { variant: "secondary", size: "sm", onClick: refreshAll, className: "stashboard-refresh" }, `⟳ ${Core.t(lang, "action.refresh")}`),
           h(Button, { variant: "secondary", size: "sm", onClick: () => setCustomising(true), className: "stashboard-customise-open" }, `⚙ ${Core.t(lang, "action.customise")}`))),
+      env.oldCurator ? h("p", { className: "stashboard-notice-bar", role: "status" }, Core.t(lang, "notice.oldCurator")) : null,
       zones.library.length ? h("div", { className: "stashboard-grid", "data-zone": "library" }, zones.library.map(renderRow)) : null,
       zones.discover.length ? h(DiscoverZone, { lang }, h("div", { className: "stashboard-grid" }, zones.discover.map(renderRow))) : null,
       customising ? h(Customise, { state, onClose: () => setCustomising(false), onSave: saveLayout }) : null);

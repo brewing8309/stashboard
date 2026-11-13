@@ -4,3 +4,4 @@ test-results/
 screenshots/
 *.log
 stash-linux
+.cache/

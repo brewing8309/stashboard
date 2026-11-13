@@ -1,0 +1,38 @@
+{
+  "comment": "Written by `node scripts/curator.js build-core`. The curator-core binaries for curator/ as patched by curator-adapter/, deflated, attached to the release below.",
+  "sourceHash": "62dec8135b813acf192c326e298ff265190f98c703f4b8cd6fcbed4889ac58b8",
+  "curatorVersion": "0.58.1",
+  "release": "curator-core-62dec8135b81",
+  "binaries": [
+    {
+      "name": "curator-core-darwin-amd64",
+      "size": 13606809,
+      "crc32": 3419833469,
+      "sha256": "07a74ab8b7991f3457dbfa9880eb0852648ae6f8c65c9fa170146edb8d903f00"
+    },
+    {
+      "name": "curator-core-darwin-arm64",
+      "size": 12447650,
+      "crc32": 3298720037,
+      "sha256": "580f932f6a9a25a4c0bd2bcd2edf9765180bc4a3ea6d8da74a79190a8b5de02e"
+    },
+    {
+      "name": "curator-core-linux-amd64",
+      "size": 13709776,
+      "crc32": 2418029695,
+      "sha256": "6c566cff4dc888b6e56d20f8af30e2209eac391290b8ea0ae18b30c7a53f3fff"
+    },
+    {
+      "name": "curator-core-linux-arm64",
+      "size": 12311344,
+      "crc32": 3854337557,
+      "sha256": "62c2b1ef2ac972616db60c3f7832fa4b06f7d1b50f4b25aa07e911ff44ffbef8"
+    },
+    {
+      "name": "curator-core-windows-amd64.exe",
+      "size": 14051840,
+      "crc32": 4006308036,
+      "sha256": "b630600731bf9912cc36bd46c684435a2cd91c4b787ea5de96d0cd86d8fca058"
+    }
+  ]
+}

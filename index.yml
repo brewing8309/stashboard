@@ -5,8 +5,8 @@
 - id: stashboard
   name: Stashboard
   metadata:
-    description: "A dashboard for Stash's front page — continue watching, the day's tag, trending on StashDB, new from your favourites, and Curator's picks when it's installed."
-  version: 2.0.0
-  date: 2026-11-13 13:09:48
-  path: https://github.com/brewing8309/stashboard/releases/download/v2.0.0/stashboard-2.0.0.zip
-  sha256: 67ebecb854286345afa8765ac1a10fe756f362e5386fd52cfc3c3ac03ee1ac80
+    description: "A dashboard for Stash's front page — up next, your performers, the day's tag, trending on StashDB, new from your favourites — with Stash Curator's recommendations built in."
+  version: 3.0.0
+  date: 2026-11-13 14:11:59
+  path: https://github.com/brewing8309/stashboard/releases/download/v3.0.0/stashboard-3.0.0.zip
+  sha256: bd9a96f26ff07ece1f3b62b980daba87b548faf7ff032c442d8f0c76a0db1319

@@ -212,10 +212,10 @@ test("cache entries expire, survive broken storage and can be cleared", () => {
   assert.doesNotThrow(() => c.cacheClear(throwing));
 });
 
-test("Curator is used only when installed and enabled; its order is kept", () => {
-  assert.equal(c.curatorAvailable([{ id: "stash-curator", enabled: true }]), true);
-  assert.equal(c.curatorAvailable([{ id: "stash-curator", enabled: false }]), false);
-  assert.equal(c.curatorAvailable(null), false);
+test("Curator's order is kept; a separate Stash Curator still on is noticed", () => {
+  assert.equal(c.oldCuratorEnabled([{ id: "stash-curator", enabled: true }]), true);
+  assert.equal(c.oldCuratorEnabled([{ id: "stash-curator", enabled: false }, { id: "stashboard", enabled: true }]), false);
+  assert.equal(c.oldCuratorEnabled(null), false);
   assert.deepEqual(c.curatorSceneIds({ items: [{ scene_id: "5" }, { scene_id: 3 }, { scene_id: "5" }, { scene_id: "x" }, {}] }), ["5", "3"]);
   assert.deepEqual(c.curatorSceneIds(null), []);
   assert.deepEqual(c.orderByIds([{ id: "3" }, { id: "5" }], ["5", "9", "3"]).map((s) => s.id), ["5", "3"]);
@@ -347,14 +347,16 @@ test("followed performers: favourites, then the radar, then the rest", () => {
 });
 
 test("module titles for the radar and your performers", () => {
-  assert.equal(c.rowTitle("de", "radar", env(), { name: "Jane Doe" }), "📡 Auf deinem Radar");
+  assert.equal(c.rowTitle("de", "radar", env(), { name: "Jane Doe" }), "Auf deinem Radar");
   assert.equal(c.rowTitle("en", "bubbles", env(), null), "Your performers");
 });
 
 test("modules: sizes, and plain tiles for the rest", () => {
   assert.equal(c.moduleSize("spotlight").span + c.moduleSize("local:continue").span, 12, "spotlight and up next share a line");
   assert.equal(c.moduleSize("box:stashdb.org:trending").count, 5);
-  assert.deepEqual(c.moduleSize("box:fansdb.cc:new"), { span: 4, count: 4 });
+  assert.deepEqual(c.moduleSize("box:fansdb.cc:new"), { span: 4, count: 4, more: 16 });
+  assert.equal(c.moduleSize("radar").more, 12, "Discover modules keep more for More");
+  assert.equal(c.moduleSize("local:top_rated").more, undefined);
   assert.deepEqual(c.moduleSize("local:top_rated"), { span: 6, count: 4 });
   assert.deepEqual(c.parseRowId("bubbles"), { source: "bubbles" });
   assert.ok(c.availableRows(env()).includes("bubbles"));
@@ -400,4 +402,23 @@ test("pastWatched: resume point past the watched percentage", () => {
   assert.equal(c.pastWatched(scene(0, 1000), 80), false);
   assert.equal(c.pastWatched(scene(900, null), 80), false);
   assert.equal(c.pastWatched(scene(900, 0), 80), false);
+});
+
+test("the separate Curator's settings are taken over once, without overwriting Stashboard's", () => {
+  const taken = c.takeOverCuratorSettings({ hideOwned: true, hideCardRatings: false }, { hideCardRatings: true, homeForYou: false });
+  assert.deepEqual(taken, { hideOwned: true, hideCardRatings: false, homeForYou: false, curatorSettingsTaken: true });
+  assert.equal(c.takeOverCuratorSettings({ curatorSettingsTaken: true }, { homeForYou: false }), null, "only once");
+  assert.equal(c.takeOverCuratorSettings({}, undefined), null, "no old Curator");
+  assert.equal(c.takeOverCuratorSettings({ hideCardRatings: true }, { hideCardRatings: false }), null, "nothing new to take");
+});
+
+test("modules have a colour and a symbol each, all different", () => {
+  const ids = ["local:continue", "curator:for_you", "local:tag_of_the_day", "local:studio_spotlight", "local:rediscover", "local:random",
+    "local:recently_added", "local:unwatched_favorites", "local:top_rated", "curator:best_bets", "curator:revisit", "curator:stretch",
+    "curator:blind_spots", "curator:dormant", "radar", "box:stashdb.org:trending", "box:stashdb.org:favorites", "box:fansdb.cc:performers", "box:stashdb.org:new"];
+  const themes = ids.map((id) => c.moduleTheme(id));
+  assert.ok(themes.every((t) => t && t.icon && typeof t.hue === "number"), "every module but the spotlight and the bubbles");
+  assert.equal(new Set(themes.map((t) => t.icon)).size, ids.length, "symbols differ");
+  assert.equal(c.moduleTheme("spotlight"), null);
+  assert.equal(c.moduleTheme("bubbles"), null);
 });

@@ -1,0 +1,39 @@
+# Builds Stash Curator's backend binaries (curator-core, Go) from curator/
+# as patched by curator-adapter/, attaches them to a release named after
+# their sources, and commits curator-adapter/core.lock.json to the branch it
+# runs on. Run it after taking over an update from Curator that touches
+# curator/core/ (`node scripts/curator.js check` says so).
+name: Curator core
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: curator/core/go.mod
+          cache-dependency-path: curator/core/go.sum
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Build curator-core and attach it to a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/curator.js build-core --upload
+      - name: Commit core.lock.json
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add curator-adapter/core.lock.json
+          git diff --cached --quiet || git commit -m "Curator core: $(node -p "require('./curator-adapter/core.lock.json').release")"
+          git push

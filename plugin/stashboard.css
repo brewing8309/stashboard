@@ -1058,3 +1058,12 @@
   .stashboard-spotlight-title { font-size: 1.5rem; }
   .stashboard-customise-source { display: none; }
 }
+
+/* The separate Stash Curator is still installed */
+.stashboard-notice-bar {
+  margin: 0 0 1rem;
+  padding: 0.6rem 0.9rem;
+  border-radius: 8px;
+  color: #1b1b1b;
+  background: #e0a526;
+}

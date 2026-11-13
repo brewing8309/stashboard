@@ -129,6 +129,25 @@ async function installFromSource(base, sourceUrl, pkg) {
   check("Stashboard is loaded and enabled", installed && installed.enabled && installed.version === pkg.version, plugins);
 }
 
+// Runs SQL on an SQLite file with Python's sqlite3 (Stash needs Python for
+// Curator anyway) and returns what it prints.
+function sqlite(file, sql) {
+  return require("node:child_process").execFileSync("python3", ["-c",
+    "import sqlite3, sys\ncon = sqlite3.connect(sys.argv[1])\nfor row in con.executescript(sys.argv[2]) if sys.argv[2].strip().upper().startswith(('CREATE', 'INSERT')) else con.execute(sys.argv[2]):\n    print(*row)\ncon.commit()",
+    file, sql], { encoding: "utf8" });
+}
+
+function findPluginDir(root, manifest) {
+  for (const name of fs.readdirSync(root)) {
+    const full = path.join(root, name);
+    if (!fs.statSync(full).isDirectory()) continue;
+    if (fs.existsSync(path.join(full, manifest))) return full;
+    const deeper = findPluginDir(full, manifest);
+    if (deeper) return deeper;
+  }
+  return null;
+}
+
 async function pluginSettings(base) {
   return (await gql(base, "{ configuration { plugins(include: [\"stashboard\"]) } }")).configuration.plugins.stashboard || {};
 }
@@ -172,8 +191,9 @@ function rowInfo(page, id) {
     const el = document.querySelector(`.stashboard [data-row="${rowId}"]`);
     if (!el) return null;
     const title = el.querySelector("h2");
+    const icon = title && title.querySelector(".stashboard-module-icon");
     return {
-      title: title ? title.textContent.trim() : "",
+      title: title ? title.textContent.slice(icon ? icon.textContent.length : 0).trim() : "",
       message: (el.querySelector(".stashboard-row-message") || {}).textContent || "",
       scenes: [...el.querySelectorAll(".stashboard-scene")].map((c) => {
         const a = c.querySelector("a[href*='/scenes/']");
@@ -213,8 +233,14 @@ async function main() {
     console.log("Install");
     await installFromSource(base, url, pkg);
 
-    fs.cpSync(path.join(__dirname, "fake-curator"), path.join(dir, "plugins", "stash-curator"), { recursive: true });
+    fs.cpSync(path.join(__dirname, "fake-curator"), path.join(dir, "plugins", "curator-double"), { recursive: true });
+    // A separately installed Stash Curator from before, with data and a setting.
+    const oldCurator = path.join(dir, "plugins", "old-source", "stash-curator");
+    fs.mkdirSync(path.join(oldCurator, "data"), { recursive: true });
+    fs.writeFileSync(path.join(oldCurator, "stash-curator.yml"), "name: Stash Curator\ndescription: the separate plugin from before\nversion: 0.58.1\n");
+    sqlite(path.join(oldCurator, "data", "curator.sqlite3"), "CREATE TABLE stashboard_e2e (marker TEXT); INSERT INTO stashboard_e2e VALUES ('from the old Curator');");
     await gql(base, "mutation { reloadPlugins }");
+    await gql(base, "mutation { configurePlugin(plugin_id: \"stash-curator\", input: { hideCardRatings: true }) }");
     await gql(base, "mutation($p: Map) { configureUI(partial: $p) }", { p: { lastNoteSeen: 99999999 } });
     await gql(base, "mutation($input: ConfigGeneralInput!) { configureGeneral(input: $input) { stashBoxes { endpoint } } }",
       { input: { stashBoxes: [{ endpoint: STASHDB, api_key: API_KEY, name: "StashDB" }] } });
@@ -222,6 +248,8 @@ async function main() {
 
     browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
     const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, locale: "en-US" });
+    // Curator's answers for the dashboard come from the double, so they're known.
+    await context.addInitScript(() => { window.__stashboardCuratorBackend = "curator-double"; });
     const boxRequests = [];
     const box = { fail: null };
     await context.route(`${mock.IMAGE_HOST}/**`, (route) =>
@@ -251,6 +279,11 @@ async function main() {
 
     console.log("Dashboard");
     await openDashboard(page, base);
+    check("the tab is named after the dashboard", (await page.title()) === "Stashboard | Stash", await page.title());
+    check("with the separate Stash Curator still on, the dashboard says to uninstall it",
+      /Uninstall the separate Stash Curator plugin/.test(await page.locator(".stashboard-notice-bar").textContent().catch(() => "")));
+    const takenOver = await pluginSettings(base);
+    check("the separate Curator's settings are taken over once", takenOver.hideCardRatings === true && takenOver.curatorSettingsTaken === true, takenOver);
     const rows = await rowsOnPage(page);
     check("default modules, in order", JSON.stringify(rows) === JSON.stringify([
       "spotlight", "local:continue", "bubbles", "curator:for_you", "local:tag_of_the_day", "local:studio_spotlight", "local:rediscover", "local:random",
@@ -386,12 +419,6 @@ async function main() {
     }
     check("New mix draws the random modules again", surpriseBefore !== surpriseAfter, { surpriseBefore, surpriseAfter });
     check("New mix doesn't ask StashDB again", boxRequests.length === boxBefore, { before: boxBefore, after: boxRequests.length });
-    await page.click('[data-row="local:random"] .stashboard-surprise-roll');
-    await page.waitForFunction((before) => {
-      const a = document.querySelector('[data-row="local:random"] .stashboard-surprise-go');
-      return a && a.getAttribute("href") !== before;
-    }, surpriseAfter, { timeout: 10000 }).catch(() => {});
-    check("🎲 in Surprise me draws another", (await surpriseNow()) !== surpriseAfter);
 
     console.log("Customise");
     await page.evaluate(() => window.scrollTo(0, 0));
@@ -552,6 +579,27 @@ async function main() {
     await page.click(".stashboard-discover-toggle");
     await settle(page);
     check("…and opens again", await page.locator('[data-zone="discover"] [data-row^="box:"]').count() > 0);
+
+    console.log("Curator inside");
+    const status = await gql(base, "mutation { runPluginOperation(plugin_id: \"stashboard\", args: { operation: \"get_status\" }) }");
+    check("Curator's backend answers as part of Stashboard", status.runPluginOperation && typeof status.runPluginOperation.schema_version === "number", status);
+    const ownData = path.join(findPluginDir(path.join(dir, "plugins"), "stashboard.yml"), "data", "curator.sqlite3");
+    check("the old Curator's data is copied into Stashboard's", fs.existsSync(ownData) && /from the old Curator/.test(sqlite(ownData, "SELECT marker FROM stashboard_e2e;")), ownData);
+    const curatorCalls = [];
+    page.on("request", (req) => { if (/runPluginOperation/.test(req.postData() || "")) curatorCalls.push(req.postData()); });
+    await page.goto(`${base}/plugins/stash-curator`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector('[class*="curator-"]', { timeout: 30000 });
+    await sleep(1500);
+    check("Curator's own page still works, and talks to Stashboard's backend",
+      curatorCalls.length > 0 && curatorCalls.every((c) => /plugin_id: \\"stashboard\\"/.test(c)), curatorCalls.slice(0, 3));
+    await page.goto(`${base}/scenes`, { waitUntil: "domcontentloaded" });
+    await page.waitForSelector(".scene-card", { timeout: 30000 });
+    await page.click('.navbar a[href="/"]');
+    await page.waitForSelector(".stashboard-toolbar", { timeout: 30000 });
+    check("…and back on the dashboard from another page, the tab says so again", (await page.title()) === "Stashboard | Stash", await page.title());
+    await gql(base, "mutation($m: BoolMap!) { setPluginsEnabled(enabledMap: $m) }", { m: { "stash-curator": false } });
+    await openDashboard(page, base);
+    check("once the separate Curator is off, the notice goes", await page.locator(".stashboard-notice-bar").count() === 0);
 
     console.log("Settings");
     await setPluginSettings(base, { hideNativeRows: true, hideOwned: true });

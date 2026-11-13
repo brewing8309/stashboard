@@ -7,9 +7,11 @@
  *   node scripts/build.js --write-index   …and point index.yml at it (version, date, sha256)
  *   node scripts/build.js --check         fail unless index.yml matches the package
  *
- * The zip is deterministic — stored, not compressed, with fixed timestamps
- * and permissions — so its SHA-256 is known before the release exists and
- * CI rebuilds exactly the file index.yml promises. No dependencies.
+ * The zip is deterministic — fixed timestamps and permissions, Stashboard's
+ * files stored, Curator's binaries as the deflate streams pinned in
+ * curator-adapter/core.lock.json (see scripts/curator.js) — so its SHA-256
+ * is known before the release exists and CI rebuilds exactly the file
+ * index.yml promises. No dependencies.
  */
 "use strict";
 
@@ -22,8 +24,9 @@ const REPO = "brewing8309/stashboard";
 
 // [path in the zip, source path in the repo]. Stash unpacks these into
 // plugins/<source>/stashboard/ and keeps each file's mode from the zip.
+// stashboard.yml is plugin/stashboard.yml merged with Curator's manifest,
+// and Curator's own files follow (scripts/curator.js).
 const FILES = [
-  ["stashboard.yml", "plugin/stashboard.yml"],
   ["stashboard-core.js", "plugin/stashboard-core.js"],
   ["stashboard.js", "plugin/stashboard.js"],
   ["stashboard.css", "plugin/stashboard.css"],
@@ -75,27 +78,33 @@ function crc32(buf) {
 
 const DOS_TIME = 0;                         // 00:00:00
 const DOS_DATE = (0 << 9) | (1 << 5) | 1;   // 1980-01-01
-const UNIX_FILE_0644 = (0o100644 << 16) >>> 0;
+const unixMode = (mode) => ((0o100000 | (mode || 0o644)) << 16) >>> 0;
 const MADE_BY_UNIX = (3 << 8) | 20;
 
 function zip(entries) {
   const locals = [];
   const centrals = [];
   let offset = 0;
-  for (const { name, data } of entries) {
+  // An entry is { name, data, mode? } (stored), or { name, deflated:
+  // { data, size, crc }, mode? } (an already deflated stream).
+  for (const entry of entries) {
+    const { name, mode } = entry;
     const nameBuf = Buffer.from(name, "utf8");
-    const crc = crc32(data);
+    const method = entry.deflated ? 8 : 0;
+    const data = entry.deflated ? entry.deflated.data : entry.data;
+    const size = entry.deflated ? entry.deflated.size : data.length;
+    const crc = entry.deflated ? entry.deflated.crc : crc32(data);
 
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);        // version needed
     local.writeUInt16LE(0x0800, 6);    // UTF-8 names
-    local.writeUInt16LE(0, 8);         // stored
+    local.writeUInt16LE(method, 8);
     local.writeUInt16LE(DOS_TIME, 10);
     local.writeUInt16LE(DOS_DATE, 12);
     local.writeUInt32LE(crc, 14);
     local.writeUInt32LE(data.length, 18);
-    local.writeUInt32LE(data.length, 22);
+    local.writeUInt32LE(size, 22);
     local.writeUInt16LE(nameBuf.length, 26);
     local.writeUInt16LE(0, 28);
     locals.push(local, nameBuf, data);
@@ -105,18 +114,18 @@ function zip(entries) {
     central.writeUInt16LE(MADE_BY_UNIX, 4);
     central.writeUInt16LE(20, 6);
     central.writeUInt16LE(0x0800, 8);
-    central.writeUInt16LE(0, 10);
+    central.writeUInt16LE(method, 10);
     central.writeUInt16LE(DOS_TIME, 12);
     central.writeUInt16LE(DOS_DATE, 14);
     central.writeUInt32LE(crc, 16);
     central.writeUInt32LE(data.length, 20);
-    central.writeUInt32LE(data.length, 24);
+    central.writeUInt32LE(size, 24);
     central.writeUInt16LE(nameBuf.length, 28);
     central.writeUInt16LE(0, 30);      // extra
     central.writeUInt16LE(0, 32);      // comment
     central.writeUInt16LE(0, 34);      // disk
     central.writeUInt16LE(0, 36);      // internal attributes
-    central.writeUInt32LE(UNIX_FILE_0644, 38);
+    central.writeUInt32LE(unixMode(mode), 38);
     central.writeUInt32LE(offset, 42);
     centrals.push(central, nameBuf);
 
@@ -132,7 +141,7 @@ function zip(entries) {
   return Buffer.concat([...locals, ...centrals, end]);
 }
 
-// Reads back what zip() writes (stored entries only) — for the tests.
+// Reads back what zip() writes — for the tests.
 function unzip(buf) {
   const endAt = buf.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]));
   if (endAt < 0) throw new Error("not a zip");
@@ -151,16 +160,26 @@ function unzip(buf) {
     const localAt = buf.readUInt32LE(at + 42);
     const name = buf.toString("utf8", at + 46, at + 46 + nameLen);
     const dataAt = localAt + 30 + buf.readUInt16LE(localAt + 26) + buf.readUInt16LE(localAt + 28);
-    const data = buf.subarray(dataAt, dataAt + size);
+    const raw = buf.subarray(dataAt, dataAt + size);
+    const data = method === 8 ? require("node:zlib").inflateRawSync(raw) : raw;
     files.push({ name, method, mode, data, crcOk: crc32(data) === crc });
     at += 46 + nameLen + extraLen + commentLen;
   }
   return files;
 }
 
+function packageFiles() {
+  const curator = require("./curator.js");
+  return [
+    { name: "stashboard.yml", data: curator.mergedManifest(read("plugin/stashboard.yml").toString("utf8")) },
+    ...FILES.map(([name, src]) => ({ name, data: read(src) })),
+    ...curator.packageEntries()
+  ];
+}
+
 function buildPackage() {
   const version = pluginVersion();
-  const data = zip(FILES.map(([name, src]) => ({ name, data: read(src) })));
+  const data = zip(packageFiles());
   return { version, name: packageName(version), data, sha256: crypto.createHash("sha256").update(data).digest("hex") };
 }
 
@@ -238,6 +257,6 @@ function main(args) {
   }
 }
 
-module.exports = { FILES, REPO, pluginVersion, packageName, releaseUrl, crc32, zip, unzip, buildPackage, stashTime, renderIndex, readIndex, checkIndex };
+module.exports = { FILES, packageFiles, REPO, pluginVersion, packageName, releaseUrl, crc32, zip, unzip, buildPackage, stashTime, renderIndex, readIndex, checkIndex };
 
 if (require.main === module) main(process.argv.slice(2));

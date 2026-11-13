@@ -2,7 +2,7 @@
   "name": "stashboard",
   "private": true,
   "description": "A dashboard for Stash's front page. The plugin itself has no dependencies; Playwright is only for the end-to-end test.",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "AGPL-3.0-only",
   "scripts": {
     "test": "node --test",
     "build": "node scripts/build.js",

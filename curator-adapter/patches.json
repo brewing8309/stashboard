@@ -1,0 +1,55 @@
+{
+  "comment": "The only changes Stashboard makes to the vendored Curator (curator/, kept 1:1). Applied at build time to copies, never to curator/ itself. `count` is how often `find` must occur; when an update from Curator moves or changes one of these places the build fails instead of shipping a half-renamed Curator.",
+  "pluginId": { "from": "stash-curator", "to": "stashboard" },
+  "patches": [
+    {
+      "file": "plugin/stash-curator.js",
+      "why": "Curator's operations run in Stashboard's backend",
+      "find": "runPluginOperation(plugin_id: \\\"stash-curator\\\"",
+      "replace": "runPluginOperation(plugin_id: \\\"stashboard\\\"",
+      "count": 1
+    },
+    {
+      "file": "plugin/stash-curator.js",
+      "why": "…and so do its tasks",
+      "find": "runPluginTask(plugin_id: \\\"stash-curator\\\"",
+      "replace": "runPluginTask(plugin_id: \\\"stashboard\\\"",
+      "count": 1
+    },
+    {
+      "file": "plugin/stash-curator.js",
+      "why": "Curator's settings are Stashboard's plugin settings",
+      "find": "configurePlugin(plugin_id: \"stash-curator\"",
+      "replace": "configurePlugin(plugin_id: \"stashboard\"",
+      "count": 1
+    },
+    {
+      "file": "plugin/stash-curator.js",
+      "why": "…read from there",
+      "find": "plugins(include: [\"stash-curator\"])",
+      "replace": "plugins(include: [\"stashboard\"])",
+      "count": 1
+    },
+    {
+      "file": "plugin/stash-curator.js",
+      "why": "…read from there",
+      "find": "configuration.plugins[\"stash-curator\"]",
+      "replace": "configuration.plugins[\"stashboard\"]",
+      "count": 1
+    },
+    {
+      "file": "core/graphql.go",
+      "why": "the backend reads its settings from Stashboard's plugin settings",
+      "find": "plugins(include: [\"stash-curator\"])",
+      "replace": "plugins(include: [\"stashboard\"])",
+      "count": 1
+    },
+    {
+      "file": "core/graphql.go",
+      "why": "…read from there",
+      "find": "get(\"plugins\").get(\"stash-curator\")",
+      "replace": "get(\"plugins\").get(\"stashboard\")",
+      "count": 1
+    }
+  ]
+}

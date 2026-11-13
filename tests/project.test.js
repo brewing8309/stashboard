@@ -6,6 +6,7 @@ const path = require("node:path");
 
 const core = require("../plugin/stashboard-core.js");
 const build = require("../scripts/build.js");
+const curator = require("../scripts/curator.js");
 
 const root = path.join(__dirname, "..");
 const read = (f) => fs.readFileSync(path.join(root, f), "utf8");
@@ -33,19 +34,53 @@ test("the plugin settings in the yml are the ones the code reads", () => {
   assert.deepEqual(declared, read);
 });
 
-test("the package is reproducible and holds exactly the plugin files, readable by everyone", () => {
+test("the package is reproducible and holds Stashboard's and Curator's files, with the right modes", () => {
   const a = build.buildPackage();
   const b = build.buildPackage();
   assert.equal(a.sha256, b.sha256);
   const files = build.unzip(a.data);
-  assert.deepEqual(files.map((f) => f.name), build.FILES.map(([name]) => name));
+  const names = files.map((f) => f.name);
+  const lock = curator.readLock();
+  assert.deepEqual(names, [
+    "stashboard.yml", ...build.FILES.map(([name]) => name),
+    "stash-curator.js", "stash-curator.css", "launcher.py", "stashboard-launcher.py",
+    "curator/explanations/realizations.json", "LICENSE-curator",
+    ...lock.binaries.map((x) => x.name)
+  ]);
+  const executable = new Set(["launcher.py", "stashboard-launcher.py", ...lock.binaries.map((x) => x.name)]);
   for (const f of files) {
-    assert.equal(f.method, 0, `${f.name} is stored`);
-    assert.equal(f.mode, 0o100644, `${f.name} mode`);
     assert.ok(f.crcOk, `${f.name} CRC`);
-    assert.ok(!f.name.includes("/"), `${f.name} sits at the zip's root, as Stash expects`);
+    assert.equal(f.mode, executable.has(f.name) ? 0o100755 : 0o100644, `${f.name} mode`);
+    assert.equal(f.method, f.name.startsWith("curator-core-") ? 8 : 0, `${f.name}: binaries deflated, the rest stored`);
   }
   assert.equal(files.find((f) => f.name === "stashboard.js").data.toString("utf8"), read("plugin/stashboard.js"));
+  assert.deepEqual(lock.binaries.map((x) => x.name).sort(), [
+    "curator-core-darwin-amd64", "curator-core-darwin-arm64", "curator-core-linux-amd64", "curator-core-linux-arm64", "curator-core-windows-amd64.exe"
+  ]);
+});
+
+test("Curator ships with Stashboard's plugin id, and nowhere else is it changed", () => {
+  curator.checkPatches();
+  const js = curator.adapted("plugin/stash-curator.js").toString("utf8");
+  assert.ok(!/plugin_id: \\?"stash-curator\\?"/.test(js), "no operation, task or setting under the old id");
+  assert.ok(js.includes('Api.register.route("/plugins/stash-curator", CuratorPage)'), "Curator's page keeps its address");
+  const original = read("curator/plugin/stash-curator.js");
+  assert.equal(original.length - js.length, curator.PATCHES.patches.filter((p) => p.file === "plugin/stash-curator.js").length * ("stash-curator".length - "stashboard".length));
+  assert.equal(curator.readLock().sourceHash, curator.sourceHash(), "curator-core was built from this curator/ (node scripts/curator.js build-core)");
+});
+
+test("the merged manifest runs Curator's backend through Stashboard's launcher, with both UIs, settings, tasks and hooks", () => {
+  const yml = curator.mergedManifest(read("plugin/stashboard.yml")).toString("utf8");
+  const blocks = curator.yamlBlocks(yml);
+  assert.ok(/^name: Stashboard$/m.test(yml) && /^version: /m.test(yml));
+  assert.ok(yml.includes('  - "{pluginDir}/stashboard-launcher.py"') && /^interface: raw$/m.test(yml));
+  assert.deepEqual(blocks.ui.filter((l) => /^ {4}- .*\.(js|css)$/.test(l)).map((l) => l.trim().slice(2)),
+    ["stashboard-core.js", "stashboard.js", "stash-curator.js", "stashboard.css", "stash-curator.css"]);
+  const settings = [...yml.split(/^settings:\s*$/m)[1].split(/^tasks:/m)[0].matchAll(/^ {2}(\w+):\s*$/gm)].map((m) => m[1]);
+  assert.ok(settings.includes("hideNativeRows") && settings.includes("databasePath"), "Stashboard's and Curator's settings");
+  assert.equal(new Set(settings).size, settings.length, "no setting twice");
+  assert.ok(blocks.tasks.some((l) => /Sync and build recommendations/.test(l)) && blocks.hooks.some((l) => /entity-sync/.test(l)));
+  assert.ok(!/stash-curator\.yml|plugin_id: "stash-curator"/.test(yml));
 });
 
 test("crc32 matches the standard check value", () => {
