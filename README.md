@@ -42,10 +42,16 @@ Rows of scenes, each scrolling sideways, with Stash's own scene cards for everyt
 library. Rows with nothing to show stay hidden; your own front page rows stay below the
 dashboard unless you switch them off.
 
+The page has two parts. On top, what's **in your library**: the spotlight, your rows and
+Curator's. Below, set apart in its own colour, **🧭 Discover**: everything that isn't in your
+library (yet) — the StashDB rows, with a **StashDB** label on each scene you don't have, and
+**More from …** for a performer on your radar. **▴ Hide** folds Discover away; that's
+remembered.
+
 | Row | Source | What's in it |
 |---|---|---|
 | **Spotlight** | Curator, or your library | One big pick: Curator's best bet, else one of your top rated, else a random scene. **▶ Play** starts it. |
-| **More from …** | Library + StashDB | One row per performer on your [📡 radar](#-on-your-radar): their unwatched scenes, then StashDB scenes you're missing. |
+| **More from …** | Library + StashDB | One performer from your [📡 radar](#-on-your-radar), a different one each visit: their unwatched scenes, then StashDB scenes you're missing. In Discover. |
 | **Continue watching** | Library | Scenes you started and didn't finish. Past 80% (setting **Watched from**) a scene counts as watched and leaves the row by itself; **✓ Watched** under a card does the same for the others; **✕ Remove** deletes the unfinished viewing from the scene's history instead. |
 | **Recently added** | Library | The newest scenes in Stash. |
 | **Unwatched with your favourites** | Library | Scenes with a favourite performer you haven't played or started. |
@@ -86,10 +92,11 @@ After 30 days on the radar, or once you've watched three of their scenes since, 
 also follow right after your favourites in **New on StashDB with your performers**.
 
 The radar is a custom field on the performer in Stash (`radar: 2026-10-27`, the day it was set),
-so it's yours, it shows on the performer's page, and anything can filter by it. The three most
-recent get a row every day, the others take turns in a fourth.
+so it's yours, it shows on the performer's page, and anything can filter by it. The row shows
+one of them at a time, picked at random each time the page loads (never the same one twice in a
+row); **🎲 Someone else** picks another right away.
 
-![A radar row: unwatched scenes from the library, then StashDB scenes with Download](docs/radar.png)
+![Discover: More from a radar performer, then the StashDB rows](docs/discover.png)
 
 ## Install
 
@@ -125,7 +132,8 @@ first (**Sync and build recommendations** in Curator).
 
 ## Make it yours
 
-**⚙ Customise** on the dashboard: switch rows on and off and change their order. The layout is
+**⚙ Customise** on the dashboard: switch rows on and off and change their order within the
+library part and within Discover. The layout is
 saved in Stash, so it's the same in every browser. **⟳ Refresh** asks StashDB again right away.
 
 More in **Settings → Plugins → Stashboard**:
@@ -150,10 +158,12 @@ Stash's interface language decides the dashboard's: German and English so far.
   each StashDB row: trending, your StashDB favourites, new releases. The **New on StashDB with
   your performers** row sends the StashDB IDs of up to 50 performers from your library; switch
   that row off if you'd rather not. Answers are cached in your browser (6 hours by default).
-- **Writes** — only when you click: its own settings and layout (in Stash's plugin settings),
-  **✓ Watched** (the scene's resume time and a play), **📡** (the performer's `radar` field) and
-  **★ Favourite** in a radar row (the performer's favourite flag). Nothing else in Stash is
-  changed.
+- **Writes** — its own settings and layout (in Stash's plugin settings); scenes in Continue
+  watching past **Watched from (%)** are marked watched by themselves (resume time reset, a play
+  if Stash hasn't counted one). Everything else only when you click: **✓ Watched** (the scene's
+  resume time and a play), **✕ Remove** (the resume time and the newest play), **📡** (the
+  performer's `radar` field) and **★ Favourite** in a radar row (the performer's favourite flag).
+  Nothing else in Stash is changed.
 
 ## Troubleshooting
 

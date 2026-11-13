@@ -290,7 +290,7 @@
 
   const RADAR_QUERY = `query StashboardRadar($f: PerformerFilterType) {
   findPerformers(performer_filter: $f, filter: { per_page: -1 }) {
-    performers { id name favorite custom_fields stash_ids { endpoint stash_id } }
+    performers { id name image_path favorite custom_fields stash_ids { endpoint stash_id } }
   }
 }`;
 
@@ -585,7 +585,8 @@
     const meta = [card.studio, card.date].filter(Boolean).join(" · ");
     const thumb = [
       card.image ? h("img", { key: "i", src: card.image, alt: "", loading: "lazy", referrerPolicy: "no-referrer" }) : h("div", { key: "i", className: "stashboard-ext-noimg" }),
-      card.duration ? h("span", { key: "d", className: "stashboard-ext-duration" }, Core.formatDuration(card.duration)) : null
+      card.duration ? h("span", { key: "d", className: "stashboard-ext-duration" }, Core.formatDuration(card.duration)) : null,
+      owned ? null : h("span", { key: "r", className: "stashboard-ext-ribbon" }, box.name)
     ];
     const external = { href: card.url, target: "_blank", rel: "noopener noreferrer" };
     return h("div", { className: `stashboard-ext-card${owned ? " is-owned" : ""}`, style: { width: CARD_WIDTH } },
@@ -658,18 +659,17 @@
       h(RowFrame, { id, title, href, label: Core.t(env.lang, "action.viewAll") }, body));
   }
 
-  function RadarRow({ performer, env, ctx, decisionDays }) {
+  function RadarRow({ performer, count, env, ctx, decisionDays, onGone, onNext }) {
     const ref = useRef(null);
     const near = useNearScreen(ref);
     const stasharr = useStasharr();
     const Toast = Api.hooks.useToast();
-    const [gone, setGone] = useState(false);
     const [busy, setBusy] = useState(false);
     const lang = env.lang;
     const since = Core.radarSince(performer);
     const seed = Core.rowSeed(ctx.day, `radar:${performer.id}`, ctx.mix);
     const state = useRowData(() => loadRadarRow(performer, env, { ...ctx, seed }), `radar:${performer.id}|${seed}|${ctx.refresh}|${ctx.count}`, near);
-    if (gone || !since) return null;
+    if (!since) return null;
 
     const data = state.data || {};
     const days = Core.radarDays(since, ctx.now);
@@ -683,15 +683,21 @@
       try {
         await fn(performer.id);
         Toast.success(Core.t(lang, message, { name: performer.name }));
-        setGone(true);
+        onGone(performer.id);
       } catch (e) {
         Toast.error(e);
         setBusy(false);
       }
     };
     const bar = h("div", { className: `stashboard-radar-bar${decide ? " is-due" : ""}` },
+      performer.image_path
+        ? h(Link, { to: `/performers/${performer.id}`, className: "stashboard-radar-avatar" }, h("img", { src: performer.image_path, alt: performer.name, loading: "lazy" }))
+        : null,
       h("span", { className: "stashboard-radar-since" }, sinceText),
       h("span", { className: "stashboard-radar-actions" },
+        count > 1
+          ? h(Button, { variant: "secondary", size: "sm", disabled: busy, className: "stashboard-radar-next", title: Core.t(lang, "radar.next.title", { count }), onClick: onNext }, Core.t(lang, "radar.next"))
+          : null,
         h(Button, { variant: decide ? "primary" : "secondary", size: "sm", disabled: busy, className: "stashboard-radar-favourite", onClick: act(makeFavourite, "radar.favourited") }, Core.t(lang, "radar.favourite")),
         h(Button, { variant: "secondary", size: "sm", disabled: busy, className: "stashboard-radar-remove", onClick: act((id) => setRadar(id, false), "radar.removed") }, Core.t(lang, "radar.remove"))));
 
@@ -699,10 +705,15 @@
     if (state.status === "error") body = h(RowMessage, { text: errorText(state.error, lang, null) });
     else if (state.status !== "done") body = h(Strip, { lang }, h(Skeletons, { count: ctx.count }));
     else {
+      // Library first; a divider where what you don't have begins.
+      const missing = data.cards.filter((card) => !card.localId);
       const items = [
         ...data.scenes.map((scene, i) => h(LocalCard, { key: `l${scene.id}`, scene, index: i })),
+        missing.length && data.scenes.length
+          ? h("div", { key: "divider", className: "stashboard-strip-divider" }, h("span", null, Core.t(lang, "radar.divider")), h("small", null, data.box.name))
+          : null,
         ...data.cards.map((card) => h(BoxCard, { key: `b${card.id}`, card, box: data.box, lang, stasharr }))
-      ];
+      ].filter(Boolean);
       body = items.length ? h(Strip, { lang }, items) : h(RowMessage, { text: Core.t(lang, "radar.empty") });
       if (data.boxError) body = h(React.Fragment, null, body, h(RowMessage, { text: errorText(data.boxError, lang, data.box) }));
     }
@@ -711,11 +722,47 @@
         bar, body));
   }
 
+  const RADAR_LAST_KEY = "stashboard:radar-last";
+
+  function readStored(key) {
+    try {
+      const store = storage();
+      return store ? store.getItem(key) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function writeStored(key, value) {
+    try {
+      const store = storage();
+      if (store) store.setItem(key, value);
+    } catch (e) { /* not remembered then */ }
+  }
+
+  // One performer from the radar, a different one each time the page loads
+  // (and on 🎲). The one shown last is remembered across visits.
   function RadarRows({ env, ctx, decisionDays }) {
     const state = useRowData(radarPerformers, `radar|${ctx.refresh}`, true);
-    if (state.status !== "done") return null;
-    return Core.radarPick(state.data, ctx.day).map((performer) =>
-      h(Boundary, { key: performer.id, name: `radar ${performer.id}` }, h(RadarRow, { performer, env, ctx, decisionDays })));
+    const [current, setCurrent] = useState(null);
+    const [gone, setGone] = useState([]);
+    const left = state.status === "done" ? state.data.filter((p) => Core.radarSince(p) && !gone.includes(p.id)) : [];
+    const performer = left.find((p) => p.id === current) || null;
+    const pick = (lastId) => {
+      const next = Core.radarPick(left, lastId, Math.random());
+      setCurrent(next ? next.id : null);
+      if (next) writeStored(RADAR_LAST_KEY, next.id);
+    };
+    useEffect(() => {
+      if (state.status === "done" && !performer && left.length) pick(current || readStored(RADAR_LAST_KEY));
+    }, [state.status, performer, left.length]);
+    if (!performer) return null;
+    return h(Boundary, { key: performer.id, name: `radar ${performer.id}` },
+      h(RadarRow, {
+        performer, count: left.length, env, ctx, decisionDays,
+        onGone: (id) => setGone((list) => [...list, id]),
+        onNext: () => pick(performer.id)
+      }));
   }
 
   function Spotlight({ env, ctx }) {
@@ -767,8 +814,9 @@
     const [saving, setSaving] = useState(false);
     const shown = rows.filter((r) => available.has(r.id));
 
+    // Rows move within their zone; the zones themselves stay in place.
     const move = (id, dir) => setRows((list) => {
-      const visible = list.filter((r) => available.has(r.id));
+      const visible = list.filter((r) => available.has(r.id) && Core.rowZone(r.id) === Core.rowZone(id));
       const i = visible.findIndex((r) => r.id === id);
       const j = i + dir;
       if (i < 0 || j < 0 || j >= visible.length) return list;
@@ -798,19 +846,25 @@
       h(Modal.Body, null,
         h("p", { className: "text-muted" }, Core.t(lang, "customise.hint")),
         hints.map((text, i) => h("p", { key: i, className: "stashboard-customise-hint" }, text)),
-        h("ul", { className: "stashboard-customise-list" },
-          shown.map((r, i) => h("li", { key: r.id, className: r.on ? "" : "is-off", "data-row": r.id },
-            h(Form.Check, {
-              type: "switch",
-              id: `stashboard-row-${r.id}`,
-              checked: r.on,
-              onChange: () => toggle(r.id),
-              label: Core.rowTitle(lang, r.id, env, null)
-            }),
-            h("span", { className: "stashboard-customise-source" }, sourceLabel(lang, r.id, env)),
-            h("span", { className: "stashboard-customise-move" },
-              h(Button, { variant: "secondary", size: "sm", disabled: i === 0, title: Core.t(lang, "action.up"), "aria-label": Core.t(lang, "action.up"), onClick: () => move(r.id, -1) }, "↑"),
-              h(Button, { variant: "secondary", size: "sm", disabled: i === shown.length - 1, title: Core.t(lang, "action.down"), "aria-label": Core.t(lang, "action.down"), onClick: () => move(r.id, 1) }, "↓")))))),
+        Core.ZONES.map((zone) => {
+          const inZone = shown.filter((r) => Core.rowZone(r.id) === zone);
+          if (!inZone.length) return null;
+          return h(React.Fragment, { key: zone },
+            h("h6", { className: `stashboard-customise-zone is-${zone}` }, Core.t(lang, `zone.${zone}`)),
+            h("ul", { className: "stashboard-customise-list", "data-zone": zone },
+              inZone.map((r, i) => h("li", { key: r.id, className: r.on ? "" : "is-off", "data-row": r.id },
+                h(Form.Check, {
+                  type: "switch",
+                  id: `stashboard-row-${r.id}`,
+                  checked: r.on,
+                  onChange: () => toggle(r.id),
+                  label: Core.rowTitle(lang, r.id, env, null)
+                }),
+                h("span", { className: "stashboard-customise-source" }, sourceLabel(lang, r.id, env)),
+                h("span", { className: "stashboard-customise-move" },
+                  h(Button, { variant: "secondary", size: "sm", disabled: i === 0, title: Core.t(lang, "action.up"), "aria-label": Core.t(lang, "action.up"), onClick: () => move(r.id, -1) }, "↑"),
+                  h(Button, { variant: "secondary", size: "sm", disabled: i === inZone.length - 1, title: Core.t(lang, "action.down"), "aria-label": Core.t(lang, "action.down"), onClick: () => move(r.id, 1) }, "↓"))))));
+        })),
       h("div", { className: "stashboard-notice" },
         h("p", null, "Copyright 2026 brewing8309 — ", h("a", { href: "https://github.com/brewing8309/stashboard", target: "_blank", rel: "noopener noreferrer" }, "github.com/brewing8309/stashboard")),
         h("p", null, h("strong", null, "This software is vibecoded."), " It was written end to end by an AI (Claude) from natural-language prompts. No human wrote or reviewed the code by hand. It ships with automated tests but no warranty."),
@@ -826,6 +880,25 @@
    * ------------------------------------------------------------------ */
 
   const MIX_KEY = "stashboard:mix";
+  const DISCOVER_HIDDEN_KEY = "stashboard:discover-hidden";
+
+  // Below the library: what isn't in it (yet), set apart so it doesn't mix
+  // with what's there to watch. Can be folded away; that's remembered.
+  function DiscoverZone({ lang, children }) {
+    const [hidden, setHidden] = useState(() => readStored(DISCOVER_HIDDEN_KEY) === "1");
+    const toggle = () => {
+      writeStored(DISCOVER_HIDDEN_KEY, hidden ? "0" : "1");
+      setHidden(!hidden);
+    };
+    return h("section", { className: `stashboard-discover${hidden ? " is-hidden" : ""}`, "data-zone": "discover" },
+      h("header", { className: "stashboard-discover-head" },
+        h("div", null,
+          h("h2", { className: "stashboard-discover-title" }, Core.t(lang, "zone.discover")),
+          h("p", { className: "stashboard-discover-sub" }, Core.t(lang, "zone.discover.sub"))),
+        h(Button, { variant: "secondary", size: "sm", className: "stashboard-discover-toggle", "aria-expanded": !hidden, onClick: toggle },
+          hidden ? `▾ ${Core.t(lang, "zone.show")}` : `▴ ${Core.t(lang, "zone.hide")}`)),
+      hidden ? null : children);
+  }
 
   function Dashboard({ onSettings }) {
     const [state, setState] = useState(null);
@@ -876,7 +949,11 @@
       reload();
     };
 
-    const rows = Core.visibleRows(state.layout, env);
+    const zones = Core.byZone(Core.visibleRows(state.layout, env));
+    const renderRow = (id) => h(Boundary, { key: `${id}|${mix}|${refresh}`, name: id },
+      id === "spotlight" ? h(Spotlight, { env, ctx })
+        : id === "radar" ? h(RadarRows, { env, ctx, decisionDays: settings.radarDecisionDays })
+          : h(Row, { id, env, ctx }));
     return h("div", { className: "stashboard" },
       h("div", { className: "stashboard-toolbar" },
         h("span", { className: "stashboard-brand" }, "Stashboard"),
@@ -884,10 +961,8 @@
           h(Button, { variant: "secondary", size: "sm", onClick: newMix, className: "stashboard-mix" }, `🔀 ${Core.t(lang, "action.mix")}`),
           h(Button, { variant: "secondary", size: "sm", onClick: refreshAll, className: "stashboard-refresh" }, `⟳ ${Core.t(lang, "action.refresh")}`),
           h(Button, { variant: "secondary", size: "sm", onClick: () => setCustomising(true), className: "stashboard-customise-open" }, `⚙ ${Core.t(lang, "action.customise")}`))),
-      rows.map((id) => h(Boundary, { key: `${id}|${mix}|${refresh}`, name: id },
-        id === "spotlight" ? h(Spotlight, { env, ctx })
-          : id === "radar" ? h(RadarRows, { env, ctx, decisionDays: settings.radarDecisionDays })
-            : h(Row, { id, env, ctx }))),
+      zones.library.map(renderRow),
+      zones.discover.length ? h(DiscoverZone, { lang }, zones.discover.map(renderRow)) : null,
       customising ? h(Customise, { state, onClose: () => setCustomising(false), onSave: saveLayout }) : null);
   }
 

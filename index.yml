@@ -7,6 +7,6 @@
   metadata:
     description: "A dashboard for Stash's front page — continue watching, the day's tag, trending on StashDB, new from your favourites, and Curator's picks when it's installed."
   version: 1.3.0
-  date: 2026-11-13 12:26:21
+  date: 2026-11-13 12:35:42
   path: https://github.com/brewing8309/stashboard/releases/download/v1.3.0/stashboard-1.3.0.zip
-  sha256: c443c51b787c3238650469da97f962cd9689387ca5ce1f339334fa5b16ab13a6
+  sha256: 593ce6e257d688b153ce7fe36011a59f909dae52782aa650ec79c8791fd8b544

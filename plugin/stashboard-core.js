@@ -72,24 +72,41 @@
 
   // Rows on by default, in this order. Rows of other kinds are available but
   // start switched off. Box rows apply to the first usable stash-box only.
+  // The radar and stash-box rows go below, in the Discover zone (rowZone).
   const DEFAULT_ON = [
     "spotlight",
     "local:continue",
-    "radar",
     "curator:for_you",
     "local:recently_added",
-    "box:*:favorites",
-    "box:*:trending",
     "local:unwatched_favorites",
     "curator:best_bets",
     "local:tag_of_the_day",
-    "box:*:performers",
     "local:rediscover",
     "local:studio_spotlight",
     "curator:revisit",
     "local:top_rated",
-    "local:random"
+    "local:random",
+    "radar",
+    "box:*:favorites",
+    "box:*:trending",
+    "box:*:performers"
   ];
+
+  // The front page has two zones: what's in your library (with Curator's
+  // picks from it) on top, and Discover below it, for what isn't (yet).
+  const ZONES = ["library", "discover"];
+
+  function rowZone(id) {
+    const row = parseRowId(id);
+    return row && (row.source === "box" || row.source === "radar") ? "discover" : "library";
+  }
+
+  // Row ids by zone, each in its given order.
+  function byZone(ids) {
+    const zones = { library: [], discover: [] };
+    for (const id of ids) zones[rowZone(id)].push(id);
+    return zones;
+  }
 
   // Every row id that can be shown with what's available right now.
   function availableRows(env) {
@@ -421,7 +438,6 @@
   // radar (YYYY-MM-DD, local time). stasharr reads and writes the same
   // field, so it's shared between the two.
   const RADAR_FIELD = "radar";
-  const RADAR_ROWS = 3;
   const RADAR_DECISION_PLAYS = 3;
 
   function localIsoDate(date) {
@@ -445,15 +461,13 @@
     return Math.max(0, Math.round((midnight - start) / 86400000));
   }
 
-  // The radar performers that get a row today: the RADAR_ROWS most recent,
-  // plus one of the others, a different one each day.
-  function radarPick(performers, day) {
-    const on = (performers || []).filter(radarSince)
-      .sort((a, b) => radarSince(b).localeCompare(radarSince(a)) || String(a.name).localeCompare(String(b.name)));
-    const picked = on.slice(0, RADAR_ROWS);
-    const rest = on.slice(RADAR_ROWS);
-    if (rest.length) picked.push(rest[hashSeed(`${day}|radar`) % rest.length]);
-    return picked;
+  // The radar performer to show: one at random, not the one shown last
+  // (`lastId`) unless there's no one else. `random` is in [0, 1).
+  function radarPick(performers, lastId, random) {
+    const on = (performers || []).filter(radarSince);
+    const others = on.length > 1 ? on.filter((p) => String(p.id) !== String(lastId)) : on;
+    if (!others.length) return null;
+    return others[Math.min(others.length - 1, Math.floor(random * others.length))];
   }
 
   // Time to ask "favourite or off the radar?": long enough on it, or
@@ -641,6 +655,14 @@
       "radar.since.one": "📡 On your radar for 1 day",
       "radar.since": "📡 On your radar for {days} days",
       "radar.decide": "📡 On your radar since {date}, {plays} scenes watched since. A favourite?",
+      "zone.library": "📚 From your library",
+      "zone.discover": "🧭 Discover",
+      "zone.discover.sub": "Not in your library (yet): new and popular on the stash-boxes, and more from a performer on your radar.",
+      "zone.hide": "Hide",
+      "zone.show": "Show",
+      "radar.next": "🎲 Someone else",
+      "radar.next.title": "Another performer from your radar ({count} on it)",
+      "radar.divider": "Not in your library",
       "radar.favourite": "★ Favourite",
       "radar.remove": "✕ Off the radar",
       "radar.added": "{name} is on your radar",
@@ -716,6 +738,14 @@
       "radar.since.one": "📡 Seit 1 Tag auf deinem Radar",
       "radar.since": "📡 Seit {days} Tagen auf deinem Radar",
       "radar.decide": "📡 Seit {date} auf deinem Radar, seitdem {plays} Szenen gesehen. Ein Favorit?",
+      "zone.library": "📚 Aus deiner Bibliothek",
+      "zone.discover": "🧭 Entdecken",
+      "zone.discover.sub": "Noch nicht in deiner Sammlung: Neues und Beliebtes von den Stash-Boxen und mehr von einem Performer auf deinem Radar.",
+      "zone.hide": "Einklappen",
+      "zone.show": "Ausklappen",
+      "radar.next": "🎲 Jemand anderes",
+      "radar.next.title": "Ein anderer Performer von deinem Radar ({count} insgesamt)",
+      "radar.divider": "Nicht in deiner Sammlung",
       "radar.favourite": "★ Favorit",
       "radar.remove": "✕ Vom Radar",
       "radar.added": "{name} ist jetzt auf deinem Radar",
@@ -775,13 +805,13 @@
 
   const api = {
     PLUGIN_ID, CURATOR_PLUGIN_ID, KNOWN_BOXES, boxFromConfig, usableBoxes,
-    LOCAL_ROWS, CURATOR_LANES, BOX_ROWS, DEFAULT_ON, availableRows, parseRowId, defaultLayout,
+    LOCAL_ROWS, CURATOR_LANES, BOX_ROWS, DEFAULT_ON, ZONES, rowZone, byZone, availableRows, parseRowId, defaultLayout,
     resolveLayout, visibleRows, readSettings, serializeLayout,
     dayKey, hashSeed, rowSeed, isoDate,
     REDISCOVER_DAYS, CONTINUE_OVERFETCH, pastWatched, localRowQuery, PICK_MIN_SCENES, pickQuery, localRowLink,
     BOX_SCENES_QUERY, BOX_PERFORMERS_MAX, boxRowInput, followedPerformerIds, pickImage, normalizeBoxScene,
     ownedMap, applyOwnership, STASHARR_ATTRIBUTE, STASHARR_HASH, downloadLink,
-    RADAR_FIELD, RADAR_ROWS, RADAR_DECISION_PLAYS, localIsoDate, radarSince, radarDays, radarPick,
+    RADAR_FIELD, RADAR_DECISION_PLAYS, localIsoDate, radarSince, radarDays, radarPick,
     radarDecisionDue, radarLocalQuery, radarBoxInput, radarBox, curatorHuntCards,
     CACHE_PREFIX, cacheGet, cacheSet, cacheClear,
     curatorAvailable, curatorSceneIds, orderByIds,

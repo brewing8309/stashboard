@@ -321,8 +321,102 @@
   display: flex;
   gap: 0.4rem;
 }
+.stashboard-radar-since {
+  flex: 1 1 auto;
+}
+.stashboard-radar-avatar img {
+  display: block;
+  width: 44px;
+  height: 44px;
+  object-fit: cover;
+  object-position: top;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--stashboard-discover);
+}
+
+/* Discover: what isn't in your library, set apart from what is */
+.stashboard {
+  --stashboard-discover: #e0a526;
+}
+.stashboard-discover {
+  position: relative;
+  margin: 2.5rem 0 1rem;
+  padding: 1rem 0.75rem 0.25rem;
+  border-top: 3px solid var(--stashboard-discover);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(224, 165, 38, 0.13), rgba(224, 165, 38, 0.03) 320px),
+    repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.015) 0 12px, transparent 12px 24px);
+}
+.stashboard-discover:not(.is-hidden):not(:has(.recommendation-row)) {
+  display: none;
+}
+.stashboard-discover-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+.stashboard-discover-title {
+  margin: 0;
+  font-size: 1.5rem;
+  color: var(--stashboard-discover);
+}
+.stashboard-discover-sub {
+  margin: 0.15rem 0 0;
+  opacity: 0.75;
+}
+.stashboard-discover.is-hidden {
+  padding-bottom: 0.25rem;
+}
+.stashboard-discover .stashboard-ext-card:not(.is-owned) {
+  box-shadow: inset 0 0 0 1px rgba(224, 165, 38, 0.35);
+}
+.stashboard-ext-ribbon {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  padding: 0 0.4rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #1b1b1b;
+  border-radius: 3px;
+  background: var(--stashboard-discover);
+}
+.stashboard-strip-divider {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 0.25rem;
+  width: 64px;
+  margin: 5px 6px;
+  border-left: 2px dashed var(--stashboard-discover);
+  color: var(--stashboard-discover);
+  text-align: center;
+}
+.stashboard-strip-divider span {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.stashboard-strip-divider small {
+  opacity: 0.8;
+}
 
 /* Customise dialog */
+.stashboard-customise-zone {
+  margin: 1rem 0 0.4rem;
+  font-weight: 600;
+}
+.stashboard-customise-zone.is-discover {
+  color: #e0a526;
+}
 .stashboard-customise-list {
   list-style: none;
   padding: 0;

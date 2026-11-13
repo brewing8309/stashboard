@@ -29,12 +29,13 @@ test("usableBoxes keeps one box per host and names the unsupported ones", () => 
 test("the default layout turns on the default rows that are available", () => {
   const plain = c.defaultLayout(env({ boxes: [] }));
   assert.deepEqual(plain.filter((r) => r.on).map((r) => r.id), [
-    "spotlight", "local:continue", "radar", "local:recently_added", "local:unwatched_favorites",
-    "local:tag_of_the_day", "local:rediscover", "local:studio_spotlight", "local:top_rated", "local:random"
+    "spotlight", "local:continue", "local:recently_added", "local:unwatched_favorites",
+    "local:tag_of_the_day", "local:rediscover", "local:studio_spotlight", "local:top_rated", "local:random", "radar"
   ]);
   const full = c.defaultLayout(env({ curator: true }));
   const on = full.filter((r) => r.on).map((r) => r.id);
-  assert.deepEqual(on.slice(0, 7), ["spotlight", "local:continue", "radar", "curator:for_you", "local:recently_added", "box:stashdb.org:favorites", "box:stashdb.org:trending"]);
+  assert.deepEqual(on.slice(0, 4), ["spotlight", "local:continue", "curator:for_you", "local:recently_added"]);
+  assert.deepEqual(on.slice(-4), ["radar", "box:stashdb.org:favorites", "box:stashdb.org:trending", "box:stashdb.org:performers"]);
   assert.ok(full.some((r) => r.id === "curator:dormant" && !r.on), "other Curator lanes are offered, switched off");
   assert.ok(full.some((r) => r.id === "box:stashdb.org:new" && !r.on));
 });
@@ -59,7 +60,8 @@ test("a saved layout keeps its order and choices, and new rows join in their def
     { id: "local:random", on: false }
   ];
   const layout = c.resolveLayout(saved, env({ curator: true }));
-  assert.deepEqual(layout.slice(0, 4).map((r) => [r.id, r.on]), [["local:random", true], ["local:continue", false], ["radar", true], ["curator:for_you", true]]);
+  assert.deepEqual(layout.slice(0, 4).map((r) => [r.id, r.on]), [["local:random", true], ["radar", true], ["box:stashdb.org:favorites", true], ["box:stashdb.org:trending", true]]);
+  assert.deepEqual(layout.slice(layout.findIndex((r) => r.id === "local:continue")).slice(0, 2).map((r) => r.id), ["local:continue", "curator:for_you"]);
   assert.ok(!layout.some((r) => r.id === "bogus:row"));
   assert.equal(layout.filter((r) => r.id === "local:random").length, 1);
   assert.equal(new Set(layout.map((r) => r.id)).size, layout.length);
@@ -273,17 +275,29 @@ test("radar: the day comes from the custom field, in local days", () => {
   assert.equal(c.localIsoDate(new Date(2026, 0, 5, 23, 30)), "2026-01-05");
 });
 
-test("radar: the three most recent get a row, plus a different other one each day", () => {
-  const people = [radar("1", "2026-09-01"), radar("2", "2026-10-20"), radar("3", "2026-10-25"), radar("4", "2026-10-10"),
-    radar("5", "2026-08-01"), radar("6", "2026-07-01"), radar("7", null)];
-  const today = c.radarPick(people, "20261027").map((p) => p.id);
-  assert.deepEqual(today.slice(0, 3), ["3", "2", "4"]);
-  assert.equal(today.length, 4);
-  assert.ok(["1", "5", "6"].includes(today[3]));
-  const days = new Set(Array.from({ length: 30 }, (_, i) => c.radarPick(people, `202611${String(i + 1).padStart(2, "0")}`)[3].id));
-  assert.ok(days.size > 1, "the fourth changes from day to day");
-  assert.deepEqual(c.radarPick(people.slice(0, 2), "20261027").map((p) => p.id), ["2", "1"]);
-  assert.deepEqual(c.radarPick([], "20261027"), []);
+test("radar: one performer at random, not the one shown last", () => {
+  const people = [radar("1", "2026-09-01"), radar("2", "2026-10-20"), radar("3", "2026-10-25"), radar("4", null)];
+  assert.equal(c.radarPick(people, null, 0).id, "1");
+  assert.equal(c.radarPick(people, null, 0.99).id, "3");
+  assert.equal(c.radarPick(people, "1", 0).id, "2", "the last one is left out");
+  for (let i = 0; i < 20; i++) assert.notEqual(c.radarPick(people, "2", i / 20).id, "2");
+  assert.ok(c.radarPick(people, null, 0.5).id !== "4", "only performers on the radar");
+  assert.equal(c.radarPick(people.slice(0, 1), "1", 0.5).id, "1", "alone, the same one again");
+  assert.equal(c.radarPick([], null, 0.5), null);
+  assert.equal(c.radarPick([radar("4", null)], null, 0.5), null);
+});
+
+test("zones: the radar and stash-box rows are Discover, the rest the library", () => {
+  assert.equal(c.rowZone("radar"), "discover");
+  assert.equal(c.rowZone("box:stashdb.org:trending"), "discover");
+  assert.equal(c.rowZone("spotlight"), "library");
+  assert.equal(c.rowZone("curator:best_bets"), "library");
+  assert.equal(c.rowZone("local:continue"), "library");
+  assert.deepEqual(c.byZone(["box:stashdb.org:new", "spotlight", "radar", "local:random"]),
+    { library: ["spotlight", "local:random"], discover: ["box:stashdb.org:new", "radar"] });
+  const ids = c.defaultLayout({ curator: true, boxes: [{ host: "stashdb.org" }] }).filter((r) => r.on).map((r) => r.id);
+  const first = ids.findIndex((id) => c.rowZone(id) === "discover");
+  assert.ok(first > 0 && ids.slice(first).every((id) => c.rowZone(id) === "discover"), "by default, Discover comes after the library");
 });
 
 test("radar: the decision is due after the set days or three scenes watched", () => {

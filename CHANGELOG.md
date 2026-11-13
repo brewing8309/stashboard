@@ -4,6 +4,10 @@
 
 ### Added
 
+- **🧭 Discover.** The front page now has two parts: what's in your library on top (the spotlight,
+  your rows, Curator), and below it, in its own colour, everything that isn't (yet): the StashDB
+  rows and **More from …**. Scenes you don't have carry a **StashDB** label; **▴ Hide** folds
+  Discover away and that's remembered. Customise groups the rows the same way.
 - **Watched from 80%.** Stash only forgets where you stopped once you're past 98%, so scenes you
   stopped during the last minutes stayed in "Continue watching". Scenes stopped past 80% (new
   setting **Watched from (%)**, 0 turns it off) now leave the row and count as watched: Stashboard
@@ -12,6 +16,15 @@
   finish. It deletes that unfinished viewing from the scene's history (the play Stash recorded when
   playback started, and where you stopped), so the scene leaves the row and is back to unwatched
   if that was its only play.
+
+### Changed
+
+- **More from … shows one performer from your radar**, picked at random each time the page loads
+  and never the same one twice in a row, instead of up to four rows. With their portrait, and
+  **🎲 Someone else** to pick another; a divider marks where the scenes you don't have begin.
+  Favourite or take one off the radar and the next one takes their place.
+- New default order: library and Curator rows first, then Discover. A saved layout keeps its
+  order within each part.
 
 ## 1.2.0 — 2026-10-27
 
