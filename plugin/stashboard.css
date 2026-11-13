@@ -29,228 +29,692 @@
   gap: 0.4rem;
 }
 
-/* Spotlight */
-.stashboard-spotlight {
+
+/* The grid: modules sit side by side, as wide as their --span (twelfths),
+   and the ones in a line grow to fill it when a neighbour stays empty. */
+.stashboard {
+  --stashboard-gap: 16px;
+  --stashboard-panel: rgba(255, 255, 255, 0.055);
+  --stashboard-panel-2: rgba(255, 255, 255, 0.1);
+  --stashboard-muted: rgba(255, 255, 255, 0.62);
+  --stashboard-accent: #2f8fd8;
+  --stashboard-discover: #e0a526;
+  --stashboard-radius: 12px;
+}
+.stashboard-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: var(--stashboard-gap);
+}
+.stashboard-module {
   position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: var(--span, 6) 1 calc((100% - 11 * var(--stashboard-gap)) * var(--span, 6) / 12 + (var(--span, 6) - 1) * var(--stashboard-gap));
+  min-width: 0;
+  padding: 14px;
+  border-radius: var(--stashboard-radius);
+  background: var(--stashboard-panel);
+}
+.stashboard-row-empty {
+  display: none;
+}
+@media (max-width: 900px) {
+  .stashboard-module {
+    flex-basis: 100%;
+  }
+}
+.stashboard-module-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 10px;
+}
+.stashboard-module h2 {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--stashboard-muted);
+}
+.stashboard-module-extra {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  white-space: nowrap;
+}
+.stashboard-view-all {
+  padding: 0;
+  font-size: 0.85rem;
+  color: var(--stashboard-accent);
+  background: none;
+  border: 0;
+}
+.stashboard-row-message {
+  margin: 0.25rem 0;
+  opacity: 0.75;
+}
+.stashboard-skeleton {
+  flex: 1;
+  min-height: 140px;
+  border-radius: 8px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.04));
+  background-size: 200% 100%;
+  animation: stashboard-shimmer 1.4s ease-in-out infinite;
+}
+.stashboard-skeleton.is-bubbles {
+  min-height: 96px;
+}
+@keyframes stashboard-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -100% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stashboard-skeleton { animation: none; }
+}
+.stashboard-sr {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
   overflow: hidden;
-  min-height: 340px;
-  margin-bottom: 2rem;
-  border-radius: 6px;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* Scene pictures */
+.stashboard-thumb {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  max-width: 100%;
+  border-radius: 8px;
   background: rgba(0, 0, 0, 0.35);
 }
+.stashboard-thumb img,
+.stashboard-thumb video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.stashboard-thumb img {
+  transition: transform 0.25s ease;
+}
+.stashboard-thumb:hover img {
+  transform: scale(1.04);
+}
+.stashboard-duration {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  z-index: 1;
+  padding: 0 0.35rem;
+  font-size: 0.75rem;
+  color: #fff;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.72);
+}
+.stashboard-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.25);
+}
+.stashboard-progress i {
+  display: block;
+  height: 100%;
+  background: var(--stashboard-accent);
+}
+.stashboard-scene {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.stashboard-scene-title {
+  display: block;
+  margin-top: 6px;
+  overflow: hidden;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: inherit;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.stashboard-scene-meta {
+  overflow: hidden;
+  font-size: 0.78rem;
+  color: var(--stashboard-muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* Four cards: two by two, or in one line once the module is wide enough
+   (never three and one left over). */
+.stashboard-module {
+  container-type: inline-size;
+}
+.stashboard-tile {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+@container (min-width: 820px) {
+  .stashboard-tile {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+.stashboard-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.stashboard-chip {
+  padding: 2px 10px;
+  font-size: 0.78rem;
+  color: inherit;
+  border: 0;
+  border-radius: 999px;
+  background: var(--stashboard-panel-2);
+}
+.stashboard-chip:hover {
+  color: inherit;
+  text-decoration: none;
+  background: rgba(255, 255, 255, 0.18);
+}
+.stashboard-chip.is-on {
+  color: #fff;
+  background: var(--stashboard-accent);
+}
+
+/* Spotlight */
+.stashboard-spotlight {
+  min-height: 380px;
+  padding: 0;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.3);
+}
 .stashboard-spotlight-loading {
-  animation: stashboard-pulse 1.6s ease-in-out infinite;
+  background: rgba(255, 255, 255, 0.04);
 }
 .stashboard-spotlight-image {
   position: absolute;
   inset: 0;
   background-size: cover;
-  background-position: center 30%;
+  background-position: center;
 }
 .stashboard-spotlight-shade {
   position: absolute;
   inset: 0;
-  background: linear-gradient(90deg, rgba(0, 0, 0, 0.88) 0%, rgba(0, 0, 0, 0.6) 45%, rgba(0, 0, 0, 0.05) 100%);
+  background:
+    linear-gradient(90deg, rgba(10, 14, 18, 0.92) 0%, rgba(10, 14, 18, 0.55) 45%, rgba(10, 14, 18, 0) 78%),
+    linear-gradient(0deg, rgba(10, 14, 18, 0.7), rgba(10, 14, 18, 0) 45%);
 }
 .stashboard-spotlight-content {
   position: relative;
-  max-width: 640px;
-  padding: 2.25rem 2.5rem;
-  color: #fff;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  height: 100%;
+  min-height: 380px;
+  max-width: 560px;
+  padding: 28px 32px;
 }
 .stashboard-spotlight-reason {
-  display: inline-block;
-  padding: 0.15rem 0.6rem;
-  margin-bottom: 0.75rem;
-  font-size: 0.75rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  align-self: flex-start;
+  padding: 2px 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--stashboard-discover);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.18);
+  background: rgba(224, 165, 38, 0.18);
 }
-.stashboard-spotlight-title {
-  margin: 0 0 0.4rem;
-  font-size: 2rem;
-  line-height: 1.15;
+.stashboard .stashboard-spotlight-title {
+  margin: 0.3rem 0 0;
+  font-size: 2.1rem;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: 0;
+  text-transform: none;
+  color: #fff;
+  text-wrap: balance;
 }
 .stashboard-spotlight-title a {
   color: inherit;
 }
-.stashboard-spotlight-meta,
-.stashboard-spotlight-performers {
-  opacity: 0.85;
+.stashboard-spotlight-meta {
+  font-size: 0.85rem;
+  opacity: 0.8;
 }
 .stashboard-spotlight-details {
   display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  margin: 0.25rem 0 0.5rem;
   overflow: hidden;
-  margin: 0.75rem 0 0;
-  opacity: 0.8;
+  color: rgba(255, 255, 255, 0.85);
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 .stashboard-spotlight-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
-  margin-top: 1.25rem;
+  margin-top: 0.4rem;
+}
+.stashboard-spotlight .stashboard-chip {
+  background: rgba(255, 255, 255, 0.14);
 }
 
-/* Rows */
-.stashboard-row-message {
-  padding: 0.75rem 0;
-  opacity: 0.75;
-  font-style: italic;
-}
-.stashboard-view-all {
-  white-space: nowrap;
-}
-
-.stashboard-strip-wrap {
-  position: relative;
-}
-.stashboard-strip {
-  display: flex;
-  gap: 0;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  scroll-snap-type: x proximity;
-  scrollbar-width: thin;
-  padding-bottom: 0.5rem;
-}
-.stashboard-strip > * {
-  flex: 0 0 auto;
-  scroll-snap-align: start;
-}
-.stashboard-strip-btn {
-  position: absolute;
-  top: 35%;
-  z-index: 3;
-  width: 2.25rem;
-  height: 3.5rem;
-  border: 0;
-  border-radius: 4px;
-  font-size: 1.75rem;
-  line-height: 1;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.6);
-  opacity: 0;
-  transition: opacity 0.15s ease;
-  cursor: pointer;
-}
-.stashboard-strip-left { left: 0; }
-.stashboard-strip-right { right: 0; }
-.stashboard-strip-wrap:hover .stashboard-strip-btn,
-.stashboard-strip-btn:focus-visible {
-  opacity: 1;
-}
-@media (hover: none) {
-  .stashboard-strip-btn { display: none; }
-}
-
-.stashboard-card-wrap {
+/* Up next */
+.stashboard-upnext {
   display: flex;
   flex-direction: column;
+  gap: 10px;
+}
+.stashboard-upnext-item {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+.stashboard-upnext-item .stashboard-scene-title {
+  margin-top: 0;
+}
+.stashboard-upnext-left {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--stashboard-accent);
+}
+.stashboard-upnext-label {
+  margin-top: 4px;
+  font-size: 0.78rem;
+  color: var(--stashboard-muted);
 }
 .stashboard-continue-actions {
   display: flex;
-  gap: 5px;
-  margin: 0 5px 5px;
+  flex-direction: column;
+  gap: 4px;
+}
+.stashboard-icon-button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 0.8rem;
+  color: var(--stashboard-muted);
+  border: 0;
+  border-radius: 50%;
+  background: var(--stashboard-panel-2);
+}
+.stashboard-icon-button:hover:not(:disabled) {
+  color: #fff;
+  background: var(--stashboard-accent);
+}
+.stashboard-icon-button.stashboard-remove:hover:not(:disabled),
+.stashboard-icon-button.is-error {
+  background: #c23030;
+  color: #fff;
 }
 
-.stashboard-continue-actions .btn {
-  flex: 1 1 0;
+/* Your performers */
+.stashboard-module-bubbles {
+  padding: 10px 14px 6px;
+  background: none;
 }
-
-.stashboard-skeleton {
+.stashboard-bubbles {
+  display: flex;
+  gap: 18px;
+  padding: 2px 2px 6px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.stashboard-bubble {
   flex: 0 0 auto;
-  height: 250px;
-  margin: 5px;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.06);
-  animation: stashboard-pulse 1.6s ease-in-out infinite;
+  width: 78px;
+  text-align: center;
+  color: inherit;
 }
-@keyframes stashboard-pulse {
-  50% { opacity: 0.45; }
+.stashboard-bubble:hover {
+  color: inherit;
+  text-decoration: none;
 }
-@media (prefers-reduced-motion: reduce) {
-  .stashboard-skeleton,
-  .stashboard-spotlight-loading { animation: none; }
+.stashboard-bubble-face {
+  position: relative;
+  display: block;
+  width: 70px;
+  height: 70px;
+  margin: 0 auto;
+  padding: 3px;
+  border-radius: 50%;
+  background: conic-gradient(var(--stashboard-discover), #e05b26, var(--stashboard-discover));
+}
+.stashboard-bubble.is-radar .stashboard-bubble-face {
+  background: conic-gradient(#3dcc91, var(--stashboard-accent), #3dcc91);
+}
+.stashboard-bubble.is-seen .stashboard-bubble-face {
+  background: var(--stashboard-panel-2);
+}
+.stashboard-bubble-face img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top;
+  border: 3px solid #202b33;
+  border-radius: 50%;
+  background: #30404d;
+}
+.stashboard-bubble.is-seen img {
+  filter: grayscale(0.7);
+  opacity: 0.75;
+}
+.stashboard-bubble:hover .stashboard-bubble-face {
+  transform: scale(1.06);
+}
+.stashboard-bubble-count {
+  position: absolute;
+  right: -2px;
+  bottom: 0;
+  min-width: 22px;
+  padding: 0 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 18px;
+  color: #fff;
+  border: 2px solid #202b33;
+  border-radius: 999px;
+  background: var(--stashboard-accent);
+}
+.stashboard-bubble-name {
+  display: block;
+  margin-top: 6px;
+  overflow: hidden;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-/* Stash-box cards: built to sit next to Stash's own scene cards. */
+/* Top five */
+.stashboard-top {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.stashboard-rank {
+  min-height: 170px;
+}
+.stashboard-rank-number {
+  position: absolute;
+  left: -2px;
+  bottom: -14px;
+  font-size: 7.5rem;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: -0.06em;
+  color: #202b33;
+  -webkit-text-stroke: 3px rgba(255, 255, 255, 0.45);
+  font-variant-numeric: tabular-nums;
+}
+.stashboard-thumb.stashboard-rank-thumb {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 64%;
+  height: 100%;
+  aspect-ratio: auto;
+}
+.stashboard-rank-caption,
+.stashboard-mosaic-caption {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  padding: 18px 8px 6px;
+  background: linear-gradient(0deg, rgba(0, 0, 0, 0.8), rgba(0, 0, 0, 0));
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.stashboard-thumb:hover .stashboard-rank-caption,
+.stashboard-thumb:hover .stashboard-mosaic-caption,
+.stashboard-thumb:focus-visible .stashboard-rank-caption,
+.stashboard-thumb:focus-visible .stashboard-mosaic-caption {
+  opacity: 1;
+}
+.stashboard-rank-caption .stashboard-scene-title,
+.stashboard-mosaic-caption .stashboard-scene-title {
+  margin: 0;
+  font-size: 0.78rem;
+  color: #fff;
+  white-space: normal;
+}
+
+/* Tag of the day */
+.stashboard-mosaic {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 6px;
+  height: 200px;
+}
+.stashboard-mosaic .stashboard-scene:first-child {
+  grid-row: span 2;
+}
+.stashboard-mosaic.is-1 {
+  grid-template-columns: 1fr;
+}
+.stashboard-mosaic.is-2 .stashboard-scene {
+  grid-row: span 2;
+}
+.stashboard-mosaic .stashboard-thumb {
+  height: 100%;
+  aspect-ratio: auto;
+}
+
+/* Studio spotlight */
+.stashboard-studio {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 12px;
+  color: inherit;
+}
+.stashboard-studio:hover {
+  color: inherit;
+  text-decoration: none;
+}
+.stashboard-studio > span:last-child {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.stashboard-studio-logo {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #f5f8fa;
+}
+.stashboard-studio-logo img {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  padding: 4px;
+  object-fit: contain;
+  background: #f5f8fa;
+}
+.stashboard-studio-initials {
+  position: absolute;
+  font-weight: 900;
+  font-size: 0.95rem;
+  color: #182026;
+  text-transform: uppercase;
+}
+.stashboard-studio-name {
+  overflow: hidden;
+  font-weight: 700;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.stashboard-thumbs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+/* Not watched in a while */
+.stashboard-memory {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: center;
+}
+.stashboard-memory-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+.stashboard-memory-ask {
+  font-size: 1.15rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: inherit;
+  text-wrap: balance;
+}
+
+/* Surprise me */
+.stashboard-surprise {
+  overflow: hidden;
+  justify-content: center;
+  min-height: 200px;
+  background:
+    radial-gradient(circle at 25% 15%, rgba(47, 143, 216, 0.4), rgba(47, 143, 216, 0) 60%),
+    radial-gradient(circle at 85% 90%, rgba(194, 48, 120, 0.4), rgba(194, 48, 120, 0) 55%),
+    var(--stashboard-panel);
+}
+.stashboard-surprise-image {
+  position: absolute;
+  inset: -20px;
+  background-size: cover;
+  background-position: center;
+  filter: blur(18px) saturate(1.2);
+  opacity: 0.35;
+}
+.stashboard-surprise-content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+}
+.stashboard-surprise-dice {
+  font-size: 2.6rem;
+  line-height: 1;
+}
+.stashboard .stashboard-surprise h2 {
+  font-size: 1.15rem;
+  letter-spacing: 0;
+  text-transform: none;
+  color: #fff;
+}
+.stashboard-surprise .stashboard-scene-meta {
+  margin: 0;
+  white-space: normal;
+}
+.stashboard-surprise-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* Stash-box scenes */
 .stashboard-ext-card {
   display: flex;
   flex-direction: column;
-  margin: 5px;
-  overflow: hidden;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.05);
+  min-width: 0;
   color: inherit;
-}
-.stashboard-ext-card.is-owned {
-  box-shadow: inset 0 0 0 2px rgba(40, 167, 69, 0.75);
 }
 .stashboard-ext-thumb {
   position: relative;
   display: block;
+  overflow: hidden;
   aspect-ratio: 16 / 9;
-  background: rgba(0, 0, 0, 0.4);
+  max-width: 100%;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  box-shadow: inset 0 0 0 1px rgba(224, 165, 38, 0.35);
+}
+.stashboard-ext-card.is-owned .stashboard-ext-thumb {
+  box-shadow: inset 0 0 0 2px rgba(40, 167, 69, 0.8);
 }
 .stashboard-ext-thumb img {
   width: 100%;
   height: 100%;
   object-fit: cover;
 }
-.stashboard-ext-noimg {
-  width: 100%;
-  height: 100%;
-}
-.stashboard-ext-duration {
+.stashboard-ext-ribbon {
   position: absolute;
-  right: 6px;
-  bottom: 6px;
+  top: 5px;
+  left: 5px;
   padding: 0 0.35rem;
-  font-size: 0.8rem;
-  color: #fff;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #1b1b1b;
   border-radius: 3px;
-  background: rgba(0, 0, 0, 0.7);
+  background: var(--stashboard-discover);
 }
 .stashboard-ext-body {
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
-  padding: 0.5rem 0.65rem 0.6rem;
   min-width: 0;
+  padding-top: 6px;
 }
 .stashboard-ext-title {
   overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
   font-weight: 600;
-  color: inherit;
-}
-.stashboard-ext-meta,
-.stashboard-ext-performers {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
   font-size: 0.85rem;
-  opacity: 0.75;
+  color: inherit;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
-.stashboard-ext-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  margin-top: 0.35rem;
+.stashboard-ext-meta {
+  overflow: hidden;
+  font-size: 0.78rem;
+  color: var(--stashboard-muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
-.stashboard-ext-source {
-  font-size: 0.8rem;
-  opacity: 0.7;
-}
-.stashboard-download {
-  padding: 0.1rem 0.55rem;
-  font-size: 0.8rem;
-  font-weight: 600;
+.stashboard-ext-body .stashboard-download {
+  align-self: flex-start;
+  margin-top: 6px;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.75rem;
 }
 .stashboard-badge {
   align-self: flex-start;
@@ -268,6 +732,178 @@
   color: #fff;
   text-decoration: none;
   filter: brightness(1.1);
+}
+
+/* Trending: a chart */
+.stashboard-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.stashboard-chart-item {
+  display: grid;
+  grid-template-columns: 22px 96px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+.stashboard-chart-rank {
+  font-size: 1.15rem;
+  font-weight: 800;
+  text-align: center;
+  color: var(--stashboard-discover);
+  font-variant-numeric: tabular-nums;
+}
+.stashboard-chart-item .stashboard-ext-body {
+  padding-top: 0;
+}
+.stashboard-chart-item .stashboard-badge {
+  margin: 2px 0 0;
+}
+.stashboard-chart-item .stashboard-download {
+  padding: 0.15rem 0.5rem;
+}
+
+/* Discover: what isn't in your library, set apart from what is */
+.stashboard-discover {
+  position: relative;
+  margin: 2.25rem 0 1rem;
+  padding: 1rem 1rem 1rem;
+  border: 1px solid rgba(224, 165, 38, 0.28);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(224, 165, 38, 0.12), rgba(224, 165, 38, 0.02) 60%);
+}
+.stashboard-discover:not(.is-hidden):not(:has(.stashboard-module)) {
+  display: none;
+}
+.stashboard-discover-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.9rem;
+}
+.stashboard-discover-title {
+  margin: 0;
+  font-size: 1.35rem;
+  color: var(--stashboard-discover);
+}
+.stashboard-discover-sub {
+  margin: 0.15rem 0 0;
+  opacity: 0.75;
+}
+.stashboard-discover .stashboard-module {
+  background: rgba(20, 26, 31, 0.55);
+}
+
+/* Radar */
+.stashboard-radar-profile {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 14px;
+}
+.stashboard-radar-portrait {
+  position: relative;
+  display: block;
+  height: 150px;
+  overflow: hidden;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35);
+}
+.stashboard-radar-portrait img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top;
+}
+.stashboard-radar-about {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.stashboard-radar-name {
+  overflow: hidden;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: inherit;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.stashboard-radar-bar {
+  font-size: 0.8rem;
+  color: var(--stashboard-muted);
+}
+.stashboard-radar-bar.is-due {
+  padding: 0.35rem 0.5rem;
+  color: #fff;
+  border-radius: 6px;
+  background: rgba(47, 111, 208, 0.3);
+}
+.stashboard-radar-stats {
+  display: flex;
+  gap: 14px;
+  margin: 4px 0;
+}
+.stashboard-radar-stats span {
+  font-size: 0.7rem;
+  color: var(--stashboard-muted);
+}
+.stashboard-radar-stats b {
+  display: block;
+  font-size: 1.1rem;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+.stashboard-radar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.stashboard-radar-scenes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 12px;
+}
+.stashboard-radar-scenes .stashboard-ext-card {
+  position: relative;
+}
+.stashboard-radar-scenes .stashboard-ext-body {
+  padding: 0;
+}
+.stashboard-radar-scenes .stashboard-ext-title,
+.stashboard-radar-scenes .stashboard-ext-meta,
+.stashboard-radar-scenes .stashboard-badge {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+.stashboard-radar-scenes .stashboard-ext-ribbon {
+  font-size: 0.55rem;
+}
+.stashboard-radar-scenes .is-local .stashboard-thumb::before {
+  content: "✓";
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 2;
+  padding: 0 4px;
+  font-size: 0.65rem;
+  font-weight: 800;
+  color: #062;
+  border-radius: 3px;
+  background: #3dcc91;
+}
+.stashboard-radar-scenes .stashboard-ext-body .stashboard-download {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  z-index: 2;
+  margin: 0;
+  padding: 0 0.35rem;
+  font-size: 0.7rem;
 }
 
 /* Radar: the toggle on performer cards sits under Stash's heart and, like
@@ -301,112 +937,6 @@
 }
 .stashboard-radar-page {
   margin: 0.25rem 0 0.75rem;
-}
-.stashboard-radar-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-  margin: -0.25rem 0 0.6rem;
-  opacity: 0.85;
-}
-.stashboard-radar-bar.is-due {
-  padding: 0.5rem 0.75rem;
-  border-radius: 6px;
-  background: rgba(47, 111, 208, 0.18);
-  opacity: 1;
-}
-.stashboard-radar-actions {
-  display: flex;
-  gap: 0.4rem;
-}
-.stashboard-radar-since {
-  flex: 1 1 auto;
-}
-.stashboard-radar-avatar img {
-  display: block;
-  width: 44px;
-  height: 44px;
-  object-fit: cover;
-  object-position: top;
-  border-radius: 50%;
-  box-shadow: 0 0 0 2px var(--stashboard-discover);
-}
-
-/* Discover: what isn't in your library, set apart from what is */
-.stashboard {
-  --stashboard-discover: #e0a526;
-}
-.stashboard-discover {
-  position: relative;
-  margin: 2.5rem 0 1rem;
-  padding: 1rem 0.75rem 0.25rem;
-  border-top: 3px solid var(--stashboard-discover);
-  border-radius: 10px;
-  background:
-    linear-gradient(180deg, rgba(224, 165, 38, 0.13), rgba(224, 165, 38, 0.03) 320px),
-    repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.015) 0 12px, transparent 12px 24px);
-}
-.stashboard-discover:not(.is-hidden):not(:has(.recommendation-row)) {
-  display: none;
-}
-.stashboard-discover-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  margin-bottom: 0.75rem;
-}
-.stashboard-discover-title {
-  margin: 0;
-  font-size: 1.5rem;
-  color: var(--stashboard-discover);
-}
-.stashboard-discover-sub {
-  margin: 0.15rem 0 0;
-  opacity: 0.75;
-}
-.stashboard-discover.is-hidden {
-  padding-bottom: 0.25rem;
-}
-.stashboard-discover .stashboard-ext-card:not(.is-owned) {
-  box-shadow: inset 0 0 0 1px rgba(224, 165, 38, 0.35);
-}
-.stashboard-ext-ribbon {
-  position: absolute;
-  top: 6px;
-  left: 6px;
-  padding: 0 0.4rem;
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-  color: #1b1b1b;
-  border-radius: 3px;
-  background: var(--stashboard-discover);
-}
-.stashboard-strip-divider {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  gap: 0.25rem;
-  width: 64px;
-  margin: 5px 6px;
-  border-left: 2px dashed var(--stashboard-discover);
-  color: var(--stashboard-discover);
-  text-align: center;
-}
-.stashboard-strip-divider span {
-  writing-mode: vertical-rl;
-  transform: rotate(180deg);
-  font-weight: 600;
-  white-space: nowrap;
-}
-.stashboard-strip-divider small {
-  opacity: 0.8;
 }
 
 /* Customise dialog */

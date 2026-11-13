@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.0.0 — 2026-11-13
+
+### Changed
+
+- **A new front page: modules instead of rows.** Inspired by streaming apps, the dashboard is now a
+  grid of modules that each show a handful of scenes, several side by side, instead of rows of a
+  dozen cards across the whole width. Hovered pictures play their preview.
+  - **Spotlight** with the scene's performers, tags and studio, and **↻ Another pick**.
+  - **Up next** right next to it: the scenes you started with progress bar and minutes left, ✓ and
+    ✕ as small buttons, then what's new in your library.
+  - **Your performers**: favourites and radar performers as round faces with their unwatched count.
+  - **Curator: your top 5 today** with big numbers, **Tag of the day** as a mosaic with chips to
+    switch tags, **Studio spotlight** with logo and counts, **Watched … days ago** as a single
+    question, and **Surprise me**: one random scene you haven't started, revealed on ▶ Go.
+  - In Discover: **📡 On your radar** as a profile with portrait, numbers and four scenes,
+    **Trending on StashDB** as a top-five chart, and **New from your StashDB favourites** as four
+    cards.
+- Off by default now, and still there in Customise: Recently added, Unwatched with your favourites,
+  Top rated, Curator's other lanes, New on StashDB with your performers, New on StashDB.
+- The layout is stored under a new name (`modules`), so the row layout of 1.x isn't carried over:
+  everyone starts from the new default.
+
+### Removed
+
+- The setting **Scenes per row**: each module shows as many scenes as fit its design.
+
 ## 1.3.0 — 2026-11-13
 
 ### Added

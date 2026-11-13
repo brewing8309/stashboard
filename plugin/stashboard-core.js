@@ -70,27 +70,53 @@
   const CURATOR_LANES = ["for_you", "best_bets", "revisit", "stretch", "blind_spots", "dormant"];
   const BOX_ROWS = ["favorites", "trending", "performers", "new"];
 
-  // Rows on by default, in this order. Rows of other kinds are available but
-  // start switched off. Box rows apply to the first usable stash-box only.
-  // The radar and stash-box rows go below, in the Discover zone (rowZone).
+  // Modules on by default, in this order. Modules of other kinds are
+  // available but start switched off. Box modules apply to the first usable
+  // stash-box only. The radar and stash-box modules go below, in the
+  // Discover zone (rowZone).
   const DEFAULT_ON = [
     "spotlight",
     "local:continue",
+    "bubbles",
     "curator:for_you",
-    "local:recently_added",
-    "local:unwatched_favorites",
-    "curator:best_bets",
     "local:tag_of_the_day",
-    "local:rediscover",
     "local:studio_spotlight",
-    "curator:revisit",
-    "local:top_rated",
+    "local:rediscover",
     "local:random",
     "radar",
-    "box:*:favorites",
     "box:*:trending",
-    "box:*:performers"
+    "box:*:favorites"
   ];
+
+  // How wide a module is (in twelfths of the page; modules in a line grow
+  // to fill it when a neighbour has nothing to show) and how many scenes it
+  // shows. Anything not listed is a plain tile of four.
+  const MODULES = {
+    spotlight: { span: 8, count: 5 },
+    "local:continue": { span: 4, count: 3 },
+    bubbles: { span: 12, count: 16 },
+    "curator:for_you": { span: 7, count: 5 },
+    "local:tag_of_the_day": { span: 5, count: 3 },
+    "local:studio_spotlight": { span: 4, count: 3 },
+    "local:rediscover": { span: 5, count: 1 },
+    "local:random": { span: 3, count: 1 },
+    radar: { span: 4, count: 4 },
+    "box:trending": { span: 4, count: 5 }
+  };
+  const TILE = { span: 6, count: 4 };
+  const BOX_TILE = { span: 4, count: 4 };
+
+  function moduleSize(id) {
+    const row = parseRowId(id);
+    if (!row) return TILE;
+    if (row.source === "box") return MODULES[`box:${row.kind}`] || BOX_TILE;
+    return MODULES[id] || TILE;
+  }
+
+  // Up next: up to this many scenes to continue, filled up to UPNEXT_TOTAL
+  // with what's new in the library (at least one).
+  const UPNEXT_TOTAL = 4;
+  const TAG_CHIPS = 4;
 
   // The front page has two zones: what's in your library (with Curator's
   // picks from it) on top, and Discover below it, for what isn't (yet).
@@ -110,7 +136,7 @@
 
   // Every row id that can be shown with what's available right now.
   function availableRows(env) {
-    const ids = ["spotlight", "radar", ...LOCAL_ROWS.map((r) => `local:${r}`)];
+    const ids = ["spotlight", "bubbles", "radar", ...LOCAL_ROWS.map((r) => `local:${r}`)];
     if (env.curator) ids.push(...CURATOR_LANES.map((l) => `curator:${l}`));
     if (!env.disableExternal) {
       for (const box of env.boxes || []) ids.push(...BOX_ROWS.map((k) => `box:${box.host}:${k}`));
@@ -122,6 +148,7 @@
     const parts = String(id).split(":");
     if (parts[0] === "spotlight" && parts.length === 1) return { source: "spotlight" };
     if (parts[0] === "radar" && parts.length === 1) return { source: "radar" };
+    if (parts[0] === "bubbles" && parts.length === 1) return { source: "bubbles" };
     if (parts[0] === "local" && parts.length === 2 && LOCAL_ROWS.includes(parts[1])) return { source: "local", kind: parts[1] };
     if (parts[0] === "curator" && parts.length === 2 && CURATOR_LANES.includes(parts[1])) return { source: "curator", lane: parts[1] };
     if (parts[0] === "box" && parts.length === 3 && BOX_ROWS.includes(parts[2])) return { source: "box", host: parts[1], kind: parts[2] };
@@ -184,13 +211,14 @@
   }
 
   // Stash's plugin settings map for this plugin → settings with defaults.
-  // `layout` is written by the customise dialog as a JSON string.
+  // `modules` is written by the customise dialog as a JSON string. (Before
+  // 2.0 it was `layout`, for rows; that one is left alone and unused.)
   function readSettings(map) {
     const m = map || {};
     let layout = null;
-    if (typeof m.layout === "string" && m.layout.trim()) {
+    if (typeof m.modules === "string" && m.modules.trim()) {
       try {
-        const parsed = JSON.parse(m.layout);
+        const parsed = JSON.parse(m.modules);
         if (Array.isArray(parsed)) layout = parsed;
       } catch (e) { /* broken value: fall back to the default layout */ }
     }
@@ -200,7 +228,6 @@
       hideOwned: m.hideOwned === true,
       cacheHours: clampNumber(m.cacheHours, 6, 0, 168),
       radarDecisionDays: Math.round(clampNumber(m.radarDecisionDays, 30, 1, 365)),
-      itemsPerRow: Math.round(clampNumber(m.itemsPerRow, 12, 4, 40)),
       watchedPercent: Math.round(clampNumber(m.watchedPercent, 80, 0, 98)),
       layout
     };
@@ -282,8 +309,10 @@
       case "top_rated":
         return { filter: { per_page: per, sort: random },
           scene_filter: { rating100: { value: 79, modifier: "GREATER_THAN" } } };
+      // Surprise me: something not started yet.
       case "random":
-        return { filter: { per_page: per, sort: random } };
+        return { filter: { per_page: per, sort: random },
+          scene_filter: { play_count: { value: 0, modifier: "EQUALS" }, resume_time: { value: 0, modifier: "EQUALS" } } };
       case "tag_of_the_day":
         if (!ctx.pickedId) return null;
         return { filter: { per_page: per, sort: random },
@@ -302,15 +331,15 @@
 
   // The query that picks the day's tag or studio: one random entity with
   // enough scenes, the same all day.
-  function pickQuery(kind, seed) {
-    const filter = { per_page: 1, sort: `random_${seed}` };
+  function pickQuery(kind, seed, many) {
+    const filter = { per_page: many || 1, sort: `random_${seed}` };
     const count = { scene_count: { value: PICK_MIN_SCENES - 1, modifier: "GREATER_THAN" } };
     if (kind === "tag_of_the_day") {
-      return { query: "query StashboardPickTag($filter: FindFilterType, $f: TagFilterType) { findTags(filter: $filter, tag_filter: $f) { tags { id name } } }",
+      return { query: "query StashboardPickTag($filter: FindFilterType, $f: TagFilterType) { findTags(filter: $filter, tag_filter: $f) { tags { id name image_path } } }",
         variables: { filter, f: count }, path: ["findTags", "tags"] };
     }
     if (kind === "studio_spotlight") {
-      return { query: "query StashboardPickStudio($filter: FindFilterType, $f: StudioFilterType) { findStudios(filter: $filter, studio_filter: $f) { studios { id name } } }",
+      return { query: "query StashboardPickStudio($filter: FindFilterType, $f: StudioFilterType) { findStudios(filter: $filter, studio_filter: $f) { studios { id name image_path scene_count } } }",
         variables: { filter, f: count }, path: ["findStudios", "studios"] };
     }
     return null;
@@ -603,9 +632,10 @@
   const STRINGS = {
     en: {
       "row.spotlight": "Spotlight",
-      "row.radar": "More from performers on your radar",
+      "row.radar": "📡 On your radar",
+      "row.bubbles": "Your performers",
       "row.radar.one": "More from {name}",
-      "row.local.continue": "Continue watching",
+      "row.local.continue": "Up next",
       "row.local.recently_added": "Recently added",
       "row.local.unwatched_favorites": "Unwatched with your favourites",
       "row.local.tag_of_the_day": "Tag of the day: {name}",
@@ -614,8 +644,8 @@
       "row.local.studio_spotlight": "Studio spotlight: {name}",
       "row.local.studio_spotlight.plain": "Studio spotlight",
       "row.local.top_rated": "Top rated",
-      "row.local.random": "Random picks",
-      "row.curator.for_you": "For you",
+      "row.local.random": "Surprise me",
+      "row.curator.for_you": "Curator: your top 5 today",
       "row.curator.best_bets": "Best bets",
       "row.curator.revisit": "Revisit",
       "row.curator.stretch": "Stretch",
@@ -640,6 +670,31 @@
       "action.down": "Move down",
       "action.play": "Play",
       "action.details": "Details",
+      "action.nextPick": "↻ Another pick",
+      "action.again": "▶ Play again",
+      "action.go": "▶ Go",
+      "action.reroll": "🎲 Another one",
+      "action.otherTag": "🎲",
+      "action.otherTag.title": "Other tags",
+      "upnext.left": "{minutes} min left",
+      "upnext.started": "Started",
+      "upnext.new": "New in your library",
+      "upnext.added": "Added {when}",
+      "when.today": "today",
+      "when.yesterday": "yesterday",
+      "when.days": "{days} days ago",
+      "tile.scenes": "{count} scenes",
+      "studio.counts": "{scenes} scenes · {unwatched} unwatched",
+      "memory.ago": "Watched {when}",
+      "memory.ask": "{title} – again?",
+      "memory.plays": "watched {count}×",
+      "surprise.title": "Surprise me",
+      "surprise.sub": "A random scene you haven't started yet",
+      "bubble.unwatched": "{count} unwatched",
+      "bubble.none": "Nothing new",
+      "radar.stat.here": "in your library",
+      "radar.stat.unwatched": "unwatched",
+      "radar.stat.since": "watched since 📡",
       "action.scrollLeft": "Scroll left",
       "action.scrollRight": "Scroll right",
       "action.watched": "✓ Watched",
@@ -676,7 +731,7 @@
       "spotlight.local": "From your top rated",
       "spotlight.random": "Today's pick",
       "customise.title": "Customise Stashboard",
-      "customise.hint": "Choose rows and their order. Saved in Stash, so it applies to every browser.",
+      "customise.hint": "Choose what's on the front page and in which order. Saved in Stash, so it applies to every browser.",
       "customise.unsupported": "Not supported here (only {known}): {names}",
       "customise.noBoxes": "Add StashDB under Settings → Metadata Providers → Stash-box Endpoints to get its rows.",
       "customise.noCurator": "Install the Stash Curator plugin for personal recommendation rows.",
@@ -686,9 +741,10 @@
     },
     de: {
       "row.spotlight": "Im Rampenlicht",
-      "row.radar": "Mehr von Performern auf deinem Radar",
+      "row.radar": "📡 Auf deinem Radar",
+      "row.bubbles": "Deine Performer",
       "row.radar.one": "Mehr von {name}",
-      "row.local.continue": "Weiterschauen",
+      "row.local.continue": "Als Nächstes",
       "row.local.recently_added": "Neu hinzugefügt",
       "row.local.unwatched_favorites": "Ungesehen mit deinen Favoriten",
       "row.local.tag_of_the_day": "Tag des Tages: {name}",
@@ -697,8 +753,8 @@
       "row.local.studio_spotlight": "Studio im Rampenlicht: {name}",
       "row.local.studio_spotlight.plain": "Studio im Rampenlicht",
       "row.local.top_rated": "Bestbewertet",
-      "row.local.random": "Zufallsauswahl",
-      "row.curator.for_you": "Für dich",
+      "row.local.random": "Überrasch mich",
+      "row.curator.for_you": "Curator: deine Top 5 heute",
       "row.curator.best_bets": "Beste Treffer",
       "row.curator.revisit": "Wiedersehen",
       "row.curator.stretch": "Mal was anderes",
@@ -723,6 +779,31 @@
       "action.down": "Nach unten",
       "action.play": "Abspielen",
       "action.details": "Details",
+      "action.nextPick": "↻ Anderer Tipp",
+      "action.again": "▶ Nochmal",
+      "action.go": "▶ Los",
+      "action.reroll": "🎲 Andere",
+      "action.otherTag": "🎲",
+      "action.otherTag.title": "Andere Tags",
+      "upnext.left": "noch {minutes} Min",
+      "upnext.started": "Angefangen",
+      "upnext.new": "Neu in deiner Bibliothek",
+      "upnext.added": "Hinzugefügt {when}",
+      "when.today": "heute",
+      "when.yesterday": "gestern",
+      "when.days": "vor {days} Tagen",
+      "tile.scenes": "{count} Szenen",
+      "studio.counts": "{scenes} Szenen · {unwatched} ungesehen",
+      "memory.ago": "Gesehen {when}",
+      "memory.ask": "{title} – mal wieder?",
+      "memory.plays": "{count}× gesehen",
+      "surprise.title": "Überrasch mich",
+      "surprise.sub": "Eine zufällige Szene, die du noch nicht angefangen hast",
+      "bubble.unwatched": "{count} ungesehen",
+      "bubble.none": "Nichts Neues",
+      "radar.stat.here": "bei dir",
+      "radar.stat.unwatched": "ungesehen",
+      "radar.stat.since": "gesehen seit 📡",
       "action.scrollLeft": "Nach links",
       "action.scrollRight": "Nach rechts",
       "action.watched": "✓ Gesehen",
@@ -759,7 +840,7 @@
       "spotlight.local": "Aus deinen Bestbewerteten",
       "spotlight.random": "Tipp des Tages",
       "customise.title": "Stashboard anpassen",
-      "customise.hint": "Zeilen und Reihenfolge wählen. Wird in Stash gespeichert und gilt in jedem Browser.",
+      "customise.hint": "Wähle, was auf der Startseite steht und in welcher Reihenfolge. Wird in Stash gespeichert und gilt in jedem Browser.",
       "customise.unsupported": "Hier nicht unterstützt (nur {known}): {names}",
       "customise.noBoxes": "Trage StashDB unter Einstellungen → Metadatenanbieter → Stash-Box-Endpunkte ein, um dessen Zeilen zu bekommen.",
       "customise.noCurator": "Installiere das Plugin Stash Curator für persönliche Empfehlungszeilen.",
@@ -784,7 +865,8 @@
     const row = parseRowId(id);
     if (!row) return id;
     if (row.source === "spotlight") return t(lang, "row.spotlight");
-    if (row.source === "radar") return picked ? t(lang, "row.radar.one", { name: picked.name }) : t(lang, "row.radar");
+    if (row.source === "radar") return t(lang, "row.radar");
+    if (row.source === "bubbles") return t(lang, "row.bubbles");
     if (row.source === "local") {
       if ((row.kind === "tag_of_the_day" || row.kind === "studio_spotlight") && !picked) return t(lang, `row.local.${row.kind}.plain`);
       return t(lang, `row.local.${row.kind}`, { name: picked && picked.name });
@@ -792,6 +874,75 @@
     if (row.source === "curator") return t(lang, `row.curator.${row.lane}`);
     const box = (env.boxes || []).find((b) => b.host === row.host);
     return t(lang, `row.box.${row.kind}`, { box: box ? box.name : row.host });
+  }
+
+  function sceneTitle(scene) {
+    const file = scene && scene.files && scene.files[0];
+    return (scene && scene.title) || (file && file.basename) || `#${scene && scene.id}`;
+  }
+
+  // How far into the scene playback stopped (0–1), and the minutes left.
+  function sceneProgress(scene) {
+    const duration = scene && scene.files && scene.files[0] && scene.files[0].duration;
+    if (!duration || !(scene.resume_time > 0)) return null;
+    return Math.min(1, scene.resume_time / duration);
+  }
+
+  function minutesLeft(scene) {
+    const duration = scene && scene.files && scene.files[0] && scene.files[0].duration;
+    if (!duration || !(scene.resume_time > 0)) return null;
+    return Math.max(1, Math.round((duration - scene.resume_time) / 60));
+  }
+
+  // Whole local days between a timestamp and now.
+  function daysAgo(time, now) {
+    if (!time) return null;
+    const then = new Date(time);
+    if (Number.isNaN(then.getTime())) return null;
+    const day = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    return Math.max(0, Math.round((day(new Date(now)) - day(then)) / 86400000));
+  }
+
+  function whenText(lang, time, now) {
+    const days = daysAgo(time, now);
+    if (days == null) return "";
+    if (days === 0) return t(lang, "when.today");
+    if (days === 1) return t(lang, "when.yesterday");
+    return t(lang, "when.days", { days });
+  }
+
+  // Ratings are stored out of 100 and shown out of 5, like Stash does.
+  function stars(rating100) {
+    return rating100 ? String(Math.round(rating100 / 2) / 10) : "";
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Performer bubbles                                                   *
+   * ------------------------------------------------------------------ */
+
+  const BUBBLES_MAX = 16;
+
+  // One request for every performer's unwatched scene count, as aliases
+  // p0, p1, … (performer ids are digits; JSON keeps them quoted anyway).
+  function unwatchedCountsQuery(ids) {
+    const parts = ids.map((id, i) =>
+      `p${i}: findScenes(scene_filter: { performers: { value: [${JSON.stringify(String(id))}], modifier: INCLUDES }, play_count: { value: 0, modifier: EQUALS } }, filter: { per_page: 1 }) { count }`);
+    return `query StashboardUnwatched {\n  ${parts.join("\n  ")}\n}`;
+  }
+
+  // Favourites and radar performers, once each (favourites first), with
+  // their unwatched counts: the ones with something new first, most first.
+  function bubbleOrder(favourites, radar, counts) {
+    const seen = new Set();
+    const people = [];
+    for (const p of [...(favourites || []), ...(radar || [])]) {
+      if (!p || seen.has(p.id)) continue;
+      seen.add(p.id);
+      people.push(p);
+    }
+    return people.slice(0, BUBBLES_MAX)
+      .map((p, i) => ({ ...p, radar: !!radarSince(p), unwatched: (counts && counts[`p${i}`] && counts[`p${i}`].count) || 0, order: i }))
+      .sort((a, b) => (b.unwatched > 0) - (a.unwatched > 0) || b.unwatched - a.unwatched || a.order - b.order);
   }
 
   function formatDuration(seconds) {
@@ -805,7 +956,7 @@
 
   const api = {
     PLUGIN_ID, CURATOR_PLUGIN_ID, KNOWN_BOXES, boxFromConfig, usableBoxes,
-    LOCAL_ROWS, CURATOR_LANES, BOX_ROWS, DEFAULT_ON, ZONES, rowZone, byZone, availableRows, parseRowId, defaultLayout,
+    LOCAL_ROWS, CURATOR_LANES, BOX_ROWS, DEFAULT_ON, MODULES, moduleSize, UPNEXT_TOTAL, TAG_CHIPS, ZONES, rowZone, byZone, availableRows, parseRowId, defaultLayout,
     resolveLayout, visibleRows, readSettings, serializeLayout,
     dayKey, hashSeed, rowSeed, isoDate,
     REDISCOVER_DAYS, CONTINUE_OVERFETCH, pastWatched, localRowQuery, PICK_MIN_SCENES, pickQuery, localRowLink,
@@ -815,7 +966,8 @@
     radarDecisionDue, radarLocalQuery, radarBoxInput, radarBox, curatorHuntCards,
     CACHE_PREFIX, cacheGet, cacheSet, cacheClear,
     curatorAvailable, curatorSceneIds, orderByIds,
-    STRINGS, langOf, t, rowTitle, formatDuration
+    STRINGS, langOf, t, rowTitle, formatDuration, sceneTitle, sceneProgress, minutesLeft, daysAgo, whenText, stars,
+    BUBBLES_MAX, unwatchedCountsQuery, bubbleOrder
   };
 
   if (typeof module !== "undefined" && module.exports) module.exports = api;

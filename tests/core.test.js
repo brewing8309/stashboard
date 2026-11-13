@@ -29,13 +29,14 @@ test("usableBoxes keeps one box per host and names the unsupported ones", () => 
 test("the default layout turns on the default rows that are available", () => {
   const plain = c.defaultLayout(env({ boxes: [] }));
   assert.deepEqual(plain.filter((r) => r.on).map((r) => r.id), [
-    "spotlight", "local:continue", "local:recently_added", "local:unwatched_favorites",
-    "local:tag_of_the_day", "local:rediscover", "local:studio_spotlight", "local:top_rated", "local:random", "radar"
+    "spotlight", "local:continue", "bubbles", "local:tag_of_the_day", "local:studio_spotlight", "local:rediscover", "local:random", "radar"
   ]);
   const full = c.defaultLayout(env({ curator: true }));
   const on = full.filter((r) => r.on).map((r) => r.id);
-  assert.deepEqual(on.slice(0, 4), ["spotlight", "local:continue", "curator:for_you", "local:recently_added"]);
-  assert.deepEqual(on.slice(-4), ["radar", "box:stashdb.org:favorites", "box:stashdb.org:trending", "box:stashdb.org:performers"]);
+  assert.deepEqual(on.slice(0, 4), ["spotlight", "local:continue", "bubbles", "curator:for_you"]);
+  assert.deepEqual(on.slice(-3), ["radar", "box:stashdb.org:trending", "box:stashdb.org:favorites"]);
+  assert.ok(full.some((r) => r.id === "local:recently_added" && !r.on), "the other library modules are offered, switched off");
+  assert.ok(full.some((r) => r.id === "box:stashdb.org:performers" && !r.on));
   assert.ok(full.some((r) => r.id === "curator:dormant" && !r.on), "other Curator lanes are offered, switched off");
   assert.ok(full.some((r) => r.id === "box:stashdb.org:new" && !r.on));
 });
@@ -60,8 +61,8 @@ test("a saved layout keeps its order and choices, and new rows join in their def
     { id: "local:random", on: false }
   ];
   const layout = c.resolveLayout(saved, env({ curator: true }));
-  assert.deepEqual(layout.slice(0, 4).map((r) => [r.id, r.on]), [["local:random", true], ["radar", true], ["box:stashdb.org:favorites", true], ["box:stashdb.org:trending", true]]);
-  assert.deepEqual(layout.slice(layout.findIndex((r) => r.id === "local:continue")).slice(0, 2).map((r) => r.id), ["local:continue", "curator:for_you"]);
+  assert.deepEqual(layout.slice(0, 4).map((r) => [r.id, r.on]), [["local:random", true], ["radar", true], ["box:stashdb.org:trending", true], ["box:stashdb.org:favorites", true]]);
+  assert.deepEqual(layout.slice(layout.findIndex((r) => r.id === "local:continue")).slice(0, 3).map((r) => r.id), ["local:continue", "bubbles", "curator:for_you"]);
   assert.ok(!layout.some((r) => r.id === "bogus:row"));
   assert.equal(layout.filter((r) => r.id === "local:random").length, 1);
   assert.equal(new Set(layout.map((r) => r.id)).size, layout.length);
@@ -76,21 +77,21 @@ test("rows of a missing source stay in the saved layout but aren't shown, and re
 });
 
 test("settings fall back to defaults and clamp numbers", () => {
-  assert.deepEqual(c.readSettings(undefined), { hideNativeRows: false, disableExternal: false, hideOwned: false, cacheHours: 6, radarDecisionDays: 30, itemsPerRow: 12, watchedPercent: 80, layout: null });
+  assert.deepEqual(c.readSettings(undefined), { hideNativeRows: false, disableExternal: false, hideOwned: false, cacheHours: 6, radarDecisionDays: 30, watchedPercent: 80, layout: null });
   assert.equal(c.readSettings({ radarDecisionDays: 0 }).radarDecisionDays, 1);
-  const s = c.readSettings({ hideOwned: true, cacheHours: 500, itemsPerRow: "2", layout: "[{\"id\":\"spotlight\",\"on\":true}]" });
+  const s = c.readSettings({ hideOwned: true, cacheHours: 500, modules: "[{\"id\":\"spotlight\",\"on\":true}]" });
   assert.equal(s.hideOwned, true);
   assert.equal(s.cacheHours, 168);
-  assert.equal(s.itemsPerRow, 4);
   assert.deepEqual(s.layout, [{ id: "spotlight", on: true }]);
-  assert.equal(c.readSettings({ layout: "{broken" }).layout, null);
-  assert.equal(c.readSettings({ layout: "{\"a\":1}" }).layout, null);
+  assert.equal(c.readSettings({ layout: "[{\"id\":\"spotlight\",\"on\":true}]" }).layout, null, "the rows of 1.x don't carry over");
+  assert.equal(c.readSettings({ modules: "{broken" }).layout, null);
+  assert.equal(c.readSettings({ modules: "{\"a\":1}" }).layout, null);
   assert.equal(c.readSettings({ hideNativeRows: "true" }).hideNativeRows, false, "only a real boolean counts");
 });
 
 test("serializeLayout round-trips through readSettings", () => {
   const layout = c.defaultLayout(env());
-  assert.deepEqual(c.readSettings({ layout: c.serializeLayout(layout) }).layout, layout);
+  assert.deepEqual(c.readSettings({ modules: c.serializeLayout(layout) }).layout, layout);
 });
 
 test("seeds are stable per day, row and mix, and fit Stash's random sort", () => {
@@ -229,7 +230,7 @@ test("texts: German and English, fallbacks, placeholders", () => {
   assert.equal(c.rowTitle("en", "local:tag_of_the_day", env(), { id: "1", name: "Outdoor" }), "Tag of the day: Outdoor");
   assert.equal(c.rowTitle("en", "local:tag_of_the_day", env(), null), "Tag of the day");
   assert.equal(c.rowTitle("de", "box:stashdb.org:favorites", env()), "Neu von deinen StashDB-Favoriten");
-  assert.equal(c.rowTitle("en", "curator:for_you", env()), "For you");
+  assert.equal(c.rowTitle("en", "curator:for_you", env()), "Curator: your top 5 today");
 });
 
 test("every text exists in both languages", () => {
@@ -345,9 +346,50 @@ test("followed performers: favourites, then the radar, then the rest", () => {
   assert.deepEqual(c.followedPerformerIds([p("rest"), p("radar", { custom_fields: { radar: "2026-10-01" } }), p("fav", { favorite: true })], ep), ["fav", "radar", "rest"]);
 });
 
-test("radar row titles", () => {
-  assert.equal(c.rowTitle("de", "radar", env(), { name: "Jane Doe" }), "Mehr von Jane Doe");
-  assert.equal(c.rowTitle("en", "radar", env(), null), "More from performers on your radar");
+test("module titles for the radar and your performers", () => {
+  assert.equal(c.rowTitle("de", "radar", env(), { name: "Jane Doe" }), "📡 Auf deinem Radar");
+  assert.equal(c.rowTitle("en", "bubbles", env(), null), "Your performers");
+});
+
+test("modules: sizes, and plain tiles for the rest", () => {
+  assert.equal(c.moduleSize("spotlight").span + c.moduleSize("local:continue").span, 12, "spotlight and up next share a line");
+  assert.equal(c.moduleSize("box:stashdb.org:trending").count, 5);
+  assert.deepEqual(c.moduleSize("box:fansdb.cc:new"), { span: 4, count: 4 });
+  assert.deepEqual(c.moduleSize("local:top_rated"), { span: 6, count: 4 });
+  assert.deepEqual(c.parseRowId("bubbles"), { source: "bubbles" });
+  assert.ok(c.availableRows(env()).includes("bubbles"));
+});
+
+test("scene helpers: titles, progress, minutes left, days ago", () => {
+  const scene = { id: "7", title: "", resume_time: 600, files: [{ duration: 2400, basename: "clip.mp4" }] };
+  assert.equal(c.sceneTitle(scene), "clip.mp4");
+  assert.equal(c.sceneTitle({ id: "7", files: [] }), "#7");
+  assert.equal(c.sceneProgress(scene), 0.25);
+  assert.equal(c.minutesLeft(scene), 30);
+  assert.equal(c.minutesLeft({ resume_time: 0, files: [{ duration: 100 }] }), null);
+  assert.equal(c.sceneProgress({ resume_time: 10, files: [] }), null);
+  const now = new Date(2026, 10, 13, 9, 0);
+  assert.equal(c.daysAgo(new Date(2026, 10, 12, 23, 0).toISOString(), now), 1);
+  assert.equal(c.whenText("de", new Date(2026, 10, 13, 1, 0).toISOString(), now), "heute");
+  assert.equal(c.whenText("en", new Date(2026, 9, 14).toISOString(), now), "30 days ago");
+  assert.equal(c.whenText("en", "nonsense", now), "");
+  assert.equal(c.whenText("en", null, now), "", "never played: nothing, not 1970");
+  assert.equal(c.stars(90), "4.5");
+  assert.equal(c.stars(null), "");
+});
+
+test("performer bubbles: favourites then radar, once each, with something new first", () => {
+  const fav = [{ id: "1", name: "A" }, { id: "2", name: "B" }, { id: "3", name: "C" }];
+  const radar = [{ id: "2", name: "B" }, { id: "9", name: "R", custom_fields: { radar: "2026-11-01" } }];
+  const asked = c.bubbleOrder(fav, radar, null);
+  assert.deepEqual(asked.map((p) => p.id), ["1", "2", "3", "9"], "without counts, in the order asked");
+  const counts = { p0: { count: 0 }, p1: { count: 2 }, p2: { count: 5 }, p3: { count: 2 } };
+  const people = c.bubbleOrder(fav, radar, counts);
+  assert.deepEqual(people.map((p) => [p.id, p.unwatched]), [["3", 5], ["2", 2], ["9", 2], ["1", 0]]);
+  assert.equal(people.find((p) => p.id === "9").radar, true);
+  const query = c.unwatchedCountsQuery(["1", "2"]);
+  assert.ok(/p0: findScenes\(scene_filter: \{ performers: \{ value: \["1"\]/.test(query) && /p1: /.test(query));
+  assert.equal(c.bubbleOrder(Array.from({ length: 30 }, (_, i) => ({ id: String(i) })), [], null).length, c.BUBBLES_MAX);
 });
 
 test("pastWatched: resume point past the watched percentage", () => {

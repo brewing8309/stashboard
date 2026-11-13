@@ -38,39 +38,33 @@ pick up where you left off, the day's tag and studio, what's trending on
 
 ## What's on it
 
-Rows of scenes, each scrolling sideways, with Stash's own scene cards for everything in your
-library. Rows with nothing to show stay hidden; your own front page rows stay below the
-dashboard unless you switch them off.
+A grid of modules in the spirit of streaming apps: each shows a handful of scenes, several sit
+side by side, and the ones in a line grow to fill it when a neighbour has nothing to show. Pictures
+play their preview while you hover them. Your own front page rows stay below the dashboard unless
+you switch them off.
 
-The page has two parts. On top, what's **in your library**: the spotlight, your rows and
-Curator's. Below, set apart in its own colour, **🧭 Discover**: everything that isn't in your
-library (yet) — the StashDB rows, with a **StashDB** label on each scene you don't have, and
-**More from …** for a performer on your radar. **▴ Hide** folds Discover away; that's
-remembered.
+The page has two parts. On top, what's **in your library**. Below, set apart in its own colour,
+**🧭 Discover**: everything that isn't in your library (yet), with a **StashDB** label on each
+scene you don't have. **▴ Hide** folds Discover away; that's remembered.
 
-| Row | Source | What's in it |
+| Module | Source | What's in it |
 |---|---|---|
-| **Spotlight** | Curator, or your library | One big pick: Curator's best bet, else one of your top rated, else a random scene. **▶ Play** starts it. |
-| **More from …** | Library + StashDB | One performer from your [📡 radar](#-on-your-radar), a different one each visit: their unwatched scenes, then StashDB scenes you're missing. In Discover. |
-| **Continue watching** | Library | Scenes you started and didn't finish. Past 80% (setting **Watched from**) a scene counts as watched and leaves the row by itself; **✓ Watched** under a card does the same for the others; **✕ Remove** deletes the unfinished viewing from the scene's history instead. |
-| **Recently added** | Library | The newest scenes in Stash. |
-| **Unwatched with your favourites** | Library | Scenes with a favourite performer you haven't played or started. |
-| **Tag of the day** · **Studio spotlight** | Library | One tag and one studio with at least four scenes, a different one every day. |
-| **Not watched in a while** | Library | Played before, but not in the last 90 days. |
-| **Top rated** · **Random picks** | Library | Rated 4 stars or more · anything at all. |
-| **For you** · **Best bets** · **Revisit** | Curator | Curator's lanes, in Curator's order. **Stretch**, **Blind spots** and **Dormant** can be switched on. |
-| **New from your StashDB favourites** | StashDB | Released scenes of the performers and studios you favourited on StashDB. |
-| **Trending on StashDB** | StashDB | What's trending there right now. |
-| **New on StashDB with your performers** | StashDB | New releases with the performers in your library (favourites first). |
-| **New on StashDB** | StashDB | Everything just released; off by default. |
+| **Spotlight** | Curator, or your library | One big pick: Curator's best bet, else one of your top rated, else a random scene, with its performers, tags and studio. **▶ Play** starts it, **↻ Another pick** shows the next one. |
+| **Up next** | Library | Next to the spotlight: the scenes you started, with a progress bar and the minutes left, then what's new in your library. Past 80% (setting **Watched from**) a scene counts as watched and leaves by itself; **✓** does the same for the others, **✕** deletes the unfinished viewing from the scene's history instead. |
+| **Your performers** | Library | Your favourites and the performers on your [📡 radar](#-on-your-radar) as round faces; the number is how many of their scenes you haven't watched. Grey: nothing new. |
+| **Curator: your top 5 today** | Curator | Curator's For you, ranked with big numbers. |
+| **Tag of the day** | Library | A picture mosaic of a tag with at least four scenes, a different one every day; the chips switch to other tags, 🎲 draws new ones. |
+| **Studio spotlight** | Library | A studio of the day with its logo, how many of its scenes you haven't watched, and three of them. |
+| **Watched … days ago** | Library | One scene you played before, but not in the last 90 days: again? |
+| **Surprise me** | Library | One random scene you haven't started, kept secret until **▶ Go**; 🎲 draws another. |
+| **📡 On your radar** | Library + StashDB | One performer from your radar, a different one each visit: portrait, numbers, two of their unwatched scenes and two StashDB scenes you're missing. In Discover. |
+| **Trending on StashDB** | StashDB | The top five there right now, as a chart. In Discover. |
+| **New from your StashDB favourites** | StashDB | Released scenes of the performers and studios you favourited on StashDB. In Discover. |
 
-Everything "random" is random **per day**: the same all day, different tomorrow. **🔀 New mix**
-draws again. StashDB scenes you already have are marked **✓ In your library** and open your
-copy; the rest open on StashDB.
-
-![StashDB rows with scenes already in the library marked, and Download buttons from stasharr](docs/stashdb-rows.png)
-
-### Download with stasharr
+Off by default, and there to switch on in **⚙ Customise**: **Recently added**, **Unwatched with
+your favourites**, **Top rated**, Curator's **Best bets**, **Revisit**, **Stretch**, **Blind
+spots** and **Dormant**, **New on StashDB with your performers** (new releases with the performers
+in your library, favourites first) and **New on StashDB**. Each shows four scenes.
 
 With [stasharr](https://github.com/brewing8309/stasharr) 1.6 or newer in Firefox, every StashDB tile
 you don't have yet gets **⬇ Download**. It opens the scene on StashDB with stasharr's Prowlarr
@@ -82,21 +76,21 @@ button, just the link to StashDB.
 
 Someone caught your eye, but a favourite feels like too much? Click **📡** on their performer
 card — on a scene's page, in the performer lists — or **📡 Radar** on their performer page. From
-then on the front page has a row **More from …** for them: their scenes in your library you
+then they can turn up in **📡 On your radar** in Discover: their scenes in your library you
 haven't watched yet, then their most popular StashDB scenes you don't have (with
 [Curator](#curator-rows), the ones that fit your taste best), each with **⬇ Download** if
 stasharr is around.
 
-After 30 days on the radar, or once you've watched three of their scenes since, the row asks:
+After 30 days on the radar, or once you've watched three of their scenes since, it asks:
 **★ Favourite** or **✕ Off the radar**. Nothing is taken off by itself. Performers on the radar
 also follow right after your favourites in **New on StashDB with your performers**.
 
 The radar is a custom field on the performer in Stash (`radar: 2026-10-27`, the day it was set),
-so it's yours, it shows on the performer's page, and anything can filter by it. The row shows
+so it's yours, it shows on the performer's page, and anything can filter by it. The module shows
 one of them at a time, picked at random each time the page loads (never the same one twice in a
 row); **🎲 Someone else** picks another right away.
 
-![Discover: More from a radar performer, then the StashDB rows](docs/discover.png)
+![Discover: a radar performer's profile, trending on StashDB as a chart, new from your StashDB favourites](docs/discover.png)
 
 ## Install
 
@@ -126,13 +120,14 @@ to the hosts its manifest lists — and are named in the Customise dialog.
 ### Curator rows
 
 If [Stash Curator](https://github.com/mrx-31415/stash-curator) is installed and enabled, its
-lanes appear as rows and the Spotlight becomes Curator's best bet. Nothing to set up: Stashboard
+For you becomes the top 5, its other lanes can be switched on, and the Spotlight becomes
+Curator's best bet. Nothing to set up: Stashboard
 asks Curator through Stash, the way Curator's own page does. Curator needs to have built its model
 first (**Sync and build recommendations** in Curator).
 
 ## Make it yours
 
-**⚙ Customise** on the dashboard: switch rows on and off and change their order within the
+**⚙ Customise** on the dashboard: switch modules on and off and change their order within the
 library part and within Discover. The layout is
 saved in Stash, so it's the same in every browser. **⟳ Refresh** asks StashDB again right away.
 
@@ -143,8 +138,7 @@ More in **Settings → Plugins → Stashboard**:
 | **Hide Stash's own front page rows** | off | Show only Stashboard on the front page. |
 | **Hide stash-box scenes you already have** | off | Leave owned scenes out of the StashDB rows instead of marking them. |
 | **Don't contact stash-boxes** | off | Library and Curator rows only; StashDB is never asked for anything. |
-| **Scenes per row** | 12 | 4 to 40. |
-| **Watched from (%)** | 80 | Scenes stopped past this point leave Continue watching and count as watched. 0 turns it off. |
+| **Watched from (%)** | 80 | Scenes stopped past this point leave Up next and count as watched. 0 turns it off. |
 | **Stash-box cache (hours)** | 6 | How long StashDB rows are kept before asking again; 0 turns the cache off. |
 | **Radar decision after (days)** | 30 | When a radar row asks "favourite or off the radar?" (or after three of their scenes watched). |
 
@@ -158,8 +152,8 @@ Stash's interface language decides the dashboard's: German and English so far.
   each StashDB row: trending, your StashDB favourites, new releases. The **New on StashDB with
   your performers** row sends the StashDB IDs of up to 50 performers from your library; switch
   that row off if you'd rather not. Answers are cached in your browser (6 hours by default).
-- **Writes** — its own settings and layout (in Stash's plugin settings); scenes in Continue
-  watching past **Watched from (%)** are marked watched by themselves (resume time reset, a play
+- **Writes** — its own settings and layout (in Stash's plugin settings); scenes in Up next
+  past **Watched from (%)** are marked watched by themselves (resume time reset, a play
   if Stash hasn't counted one). Everything else only when you click: **✓ Watched** (the scene's
   resume time and a play), **✕ Remove** (the resume time and the newest play), **📡** (the
   performer's `radar` field) and **★ Favourite** in a radar row (the performer's favourite flag).

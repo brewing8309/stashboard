@@ -175,9 +175,9 @@ function rowInfo(page, id) {
     return {
       title: title ? title.textContent.trim() : "",
       message: (el.querySelector(".stashboard-row-message") || {}).textContent || "",
-      scenes: [...el.querySelectorAll(".scene-card")].map((c) => {
+      scenes: [...el.querySelectorAll(".stashboard-scene")].map((c) => {
         const a = c.querySelector("a[href*='/scenes/']");
-        return { title: (c.querySelector(".card-section-title, .TruncatedText, h5") || c).textContent.trim(), href: a ? a.getAttribute("href") : "" };
+        return { id: c.getAttribute("data-scene"), title: (c.querySelector(".stashboard-scene-title") || c).textContent.trim(), href: a ? a.getAttribute("href") : "" };
       }),
       external: [...el.querySelectorAll(".stashboard-ext-card")].map((c) => ({
         title: c.querySelector(".stashboard-ext-title").textContent.trim(),
@@ -252,58 +252,95 @@ async function main() {
     console.log("Dashboard");
     await openDashboard(page, base);
     const rows = await rowsOnPage(page);
-    check("default rows, in order", JSON.stringify(rows.slice(0, 8)) === JSON.stringify([
-      "spotlight", "local:continue", "curator:for_you", "local:recently_added",
-      "local:unwatched_favorites", "curator:best_bets", "local:tag_of_the_day", "local:rediscover"
+    check("default modules, in order", JSON.stringify(rows) === JSON.stringify([
+      "spotlight", "local:continue", "bubbles", "curator:for_you", "local:tag_of_the_day", "local:studio_spotlight", "local:rediscover", "local:random",
+      "box:stashdb.org:trending", "box:stashdb.org:favorites"
     ]), rows);
-    const discoverRows = await page.evaluate(() => [...document.querySelectorAll('[data-zone="discover"] [data-row]')].map((r) => r.getAttribute("data-row")).filter((id) => !id.startsWith("radar")));
-    check("Discover, below the library, has the StashDB rows and nothing from the library",
-      discoverRows.length > 0 && JSON.stringify(discoverRows) === JSON.stringify(rows.filter((id) => id.startsWith("box:"))) &&
-      rows.indexOf(discoverRows[0]) > rows.indexOf("local:random"), { discoverRows, rows });
-    check("all default rows with content are shown",
-      ["local:tag_of_the_day", "box:stashdb.org:performers", "local:rediscover", "local:studio_spotlight", "curator:revisit", "local:top_rated", "local:random"].every((id) => rows.includes(id)), rows);
+    const discoverRows = await page.evaluate(() => [...document.querySelectorAll('[data-zone="discover"] [data-row]')].map((r) => r.getAttribute("data-row")));
+    check("Discover, below the library, has the StashDB modules and nothing from the library",
+      JSON.stringify(discoverRows) === JSON.stringify(["box:stashdb.org:trending", "box:stashdb.org:favorites"]), discoverRows);
+    const lines = await page.evaluate(() => {
+      const top = (id) => Math.round(document.querySelector(`[data-row="${id}"]`).getBoundingClientRect().top);
+      return { spotlight: top("spotlight"), upNext: top("local:continue"), trending: top("box:stashdb.org:trending"), favourites: top("box:stashdb.org:favorites") };
+    });
+    check("modules share lines: the spotlight next to Up next, the StashDB ones side by side",
+      lines.spotlight === lines.upNext && lines.trending === lines.favourites, lines);
 
     const spotlight = await page.evaluate(() => {
       const s = document.querySelector(".stashboard-spotlight");
-      return s && { reason: s.querySelector(".stashboard-spotlight-reason").textContent, title: s.querySelector(".stashboard-spotlight-title").textContent, play: s.querySelector(".btn-primary").getAttribute("href") };
+      return s && {
+        reason: s.querySelector(".stashboard-spotlight-reason").textContent,
+        title: s.querySelector(".stashboard-spotlight-title").textContent,
+        play: s.querySelector(".btn-primary").getAttribute("href"),
+        chips: s.querySelectorAll(".stashboard-chip").length
+      };
     });
-    check("spotlight shows Curator's best bet with a Play link", spotlight && spotlight.reason === "Curator's best bet" && spotlight.title === "Fictional Scene 07" && /\/scenes\/7\?autoplay=true$/.test(spotlight.play), spotlight);
+    check("spotlight shows Curator's best bet with a Play link and what it's about", spotlight && spotlight.reason === "Curator's best bet" && spotlight.title === "Fictional Scene 07" &&
+      /\/scenes\/7\?autoplay=true$/.test(spotlight.play) && spotlight.chips > 0, spotlight);
+    await page.click(".stashboard-spotlight-next");
+    const nextPick = await page.locator(".stashboard-spotlight-title").textContent();
+    check("↻ Another pick shows Curator's next best bet", nextPick !== spotlight.title && /^Fictional Scene/.test(nextPick), nextPick);
 
     const cont = await rowInfo(page, "local:continue");
-    check("continue watching: the half-watched scene", cont.scenes.length === 1 && /Fictional Scene 03/.test(cont.scenes[0].title), cont);
+    const upNext = await page.evaluate(() => {
+      const el = document.querySelector('[data-row="local:continue"]');
+      return { watched: el.querySelectorAll(".stashboard-watched").length, left: [...el.querySelectorAll(".stashboard-upnext-left")].map((e) => e.textContent), label: !!el.querySelector(".stashboard-upnext-label") };
+    });
+    check("Up next: the half-watched scene with ✓ and ✕, then what's new", cont.title === "Up next" && /Fictional Scene 03/.test(cont.scenes[0].title) &&
+      upNext.watched === 1 && JSON.stringify(upNext.left) === JSON.stringify(["Started"]) && upNext.label && cont.scenes.length === 4, { cont, upNext });
+
+    const jane = (await gql(base, "{ findPerformers(filter: { q: \"Jane Doe\" }) { performers { id } } }")).findPerformers.performers[0].id;
+    const janeUnwatched = (await gql(base, "query($id: ID!) { findScenes(scene_filter: { performers: { value: [$id], modifier: INCLUDES }, play_count: { value: 0, modifier: EQUALS } }) { count } }", { id: jane })).findScenes.count;
+    const bubble = await page.evaluate((id) => {
+      const b = document.querySelector(`[data-row="bubbles"] [data-performer="${id}"]`);
+      return b && { count: (b.querySelector(".stashboard-bubble-count") || {}).textContent, href: b.getAttribute("href") };
+    }, jane);
+    check("your performers: Jane, a favourite, with her unwatched scenes counted", bubble && bubble.count === String(janeUnwatched) && bubble.href === `/performers/${jane}`, { bubble, janeUnwatched });
+
     const forYou = await rowInfo(page, "curator:for_you");
-    check("Curator row keeps Curator's order", JSON.stringify(forYou.scenes.map((s) => s.title.match(/\d+/)[0])) === JSON.stringify(["30", "29", "28", "05", "11"]), forYou.scenes);
-    const recent = await rowInfo(page, "local:recently_added");
-    const viewAll = await page.locator('[data-row="local:recently_added"] .stashboard-view-all').getAttribute("href");
-    check("recently added: 12 native scene cards and a View all link", recent.scenes.length === 12 && /sortby=created_at/.test(viewAll || ""), { cards: recent.scenes.length, viewAll });
+    check("top 5 keeps Curator's order", JSON.stringify(forYou.scenes.map((s) => s.title.match(/\d+/)[0])) === JSON.stringify(["30", "29", "28", "05", "11"]), forYou.scenes);
     const rediscover = await rowInfo(page, "local:rediscover");
-    check("not watched in a while: the four played 200 days ago", rediscover.scenes.length === 4, rediscover.scenes);
+    check("not watched in a while: one of the four played 200 days ago, as a question",
+      rediscover.scenes.length === 1 && /Scene (04|08|12|16)$/.test(rediscover.scenes[0].title) && rediscover.title === "Watched 200 days ago", rediscover);
     const tag = await rowInfo(page, "local:tag_of_the_day");
-    check("tag of the day names the tag", /^Tag of the day: (Outdoor|Romantic|Classic)$/.test(tag.title) && tag.scenes.length === 10, tag.title);
-    const unwatched = await rowInfo(page, "local:unwatched_favorites");
-    check("unwatched with favourites: Jane's scenes, none played or started, capped at 12",
-      unwatched.scenes.length === 12 && !unwatched.scenes.some((s) => /Scene 03$/.test(s.title)), unwatched.scenes.map((s) => s.title));
+    const chips = await page.locator('[data-row="local:tag_of_the_day"] .stashboard-chip:not(.stashboard-tag-roll)').allTextContents();
+    check("tag of the day names the tag, shows three scenes and the other tags", /^Tag of the day: (Outdoor|Romantic|Classic)$/.test(tag.title) && tag.scenes.length === 3 && chips.length === 3, { title: tag.title, chips });
+    const otherTag = chips.find((c) => !tag.title.endsWith(c));
+    await page.click(`[data-row="local:tag_of_the_day"] .stashboard-chip:text-is("${otherTag}")`);
+    await page.waitForFunction((name) => document.querySelector('[data-row="local:tag_of_the_day"] h2').textContent.endsWith(name), otherTag, { timeout: 10000 });
+    check("a tag chip switches the tile to that tag", true);
+    const studio = await page.evaluate(() => {
+      const el = document.querySelector('[data-row="local:studio_spotlight"]');
+      return { name: el.querySelector(".stashboard-studio-name").textContent, scenes: el.querySelectorAll(".stashboard-scene").length, counts: el.querySelector(".stashboard-studio .stashboard-scene-meta").textContent };
+    });
+    check("studio spotlight: the studio, its counts and three scenes", /^(Acme Studio|Beta Films)$/.test(studio.name) && studio.scenes === 3 && /\d+ scenes · \d+ unwatched/.test(studio.counts), studio);
+    const surprise = await page.locator('[data-row="local:random"] .stashboard-surprise-go').getAttribute("href");
+    const surpriseId = (surprise.match(/\/scenes\/(\d+)\?autoplay=true$/) || [])[1];
+    const surpriseScene = surpriseId && (await gql(base, "query($id: ID!) { findScene(id: $id) { play_count resume_time } }", { id: surpriseId })).findScene;
+    check("surprise me plays a scene you haven't started", surpriseScene && surpriseScene.play_count === 0 && !surpriseScene.resume_time, { surprise, surpriseScene });
 
     const trending = await rowInfo(page, "box:stashdb.org:trending");
-    check("trending on StashDB: 12 cards", trending.external.length === 12, trending.external.length);
+    check("trending on StashDB: a chart of five", trending.external.length === 5 && await page.locator('[data-row="box:stashdb.org:trending"] .stashboard-chart-rank').count() === 5, trending.external.length);
     check("scenes already in the library are marked and link to the local scene",
       trending.external[0].owned && trending.external[0].href === "/scenes/1" && trending.external[3].owned && trending.external[3].href === "/scenes/2" && /In your library/.test(trending.external[0].badge),
       trending.external.slice(0, 4));
     check("other StashDB scenes link to StashDB", !trending.external[1].owned && trending.external[1].href === "https://stashdb.org/scenes/t2", trending.external[1]);
     const favs = await rowInfo(page, "box:stashdb.org:favorites");
-    check("favourites row marks sdb-scene-3", favs.external.some((c) => c.owned && c.href === "/scenes/3"), favs.external);
+    check("favourites: four cards, sdb-scene-3 marked", favs.external.length === 4 && favs.external.some((c) => c.owned && c.href === "/scenes/3"), favs.external);
 
     check("every StashDB request carries the API key", boxRequests.length > 0 && boxRequests.every((r) => r.apiKey === API_KEY), boxRequests.map((r) => r.apiKey));
-    check("StashDB is asked once per row, not per card", boxRequests.length === 3, boxRequests.map((r) => r.kind));
+    check("StashDB is asked once per module, not per card", boxRequests.length === 2, boxRequests.map((r) => r.kind));
     const favReq = boxRequests.find((r) => r.kind === "favorites");
     check("favourites ask for released scenes only", favReq && favReq.input.favorites === "ALL" && favReq.input.date && favReq.input.date.modifier === "LESS_THAN", favReq);
-    const perfReq = boxRequests.find((r) => r.kind === "performers");
-    check("performers row follows the library's performers, favourite first",
-      perfReq && JSON.stringify(perfReq.input.performers) === JSON.stringify({ value: ["sdb-perf-jane", "sdb-perf-mary"], modifier: "INCLUDES" }), perfReq && perfReq.input.performers);
 
     const nativeRows = await page.locator(".stashboard-native .recommendation-row").count();
     check("Stash's own front page rows stay below", nativeRows > 0, nativeRows);
-    if (shots) await page.screenshot({ path: path.join(shots, "dashboard.png") });
+    if (shots) {
+      // Without Stash's fixed navbar over the top of it.
+      await page.addStyleTag({ content: ".navbar { visibility: hidden !important; }" });
+      await page.locator(".stashboard").screenshot({ path: path.join(shots, "dashboard.png") });
+      await page.addStyleTag({ content: ".navbar { visibility: visible !important; }" });
+    }
 
     console.log("stasharr");
     check("without stasharr there are no download buttons", await page.locator(".stashboard-download").count() === 0);
@@ -319,7 +356,7 @@ async function main() {
     }));
     check("with stasharr every StashDB scene you don't have gets a download button",
       downloads.filter((d) => !d.owned).every((d) => /^https:\/\/stashdb\.org\/scenes\/[^#]+#stasharr-search$/.test(d.href) && d.target === "_blank") &&
-      downloads.filter((d) => d.owned).every((d) => d.href === null) && downloads.filter((d) => d.href).length === 10, downloads);
+      downloads.filter((d) => d.owned).every((d) => d.href === null) && downloads.filter((d) => d.href).length === 3, downloads);
     const [tab] = await Promise.all([context.waitForEvent("page"), page.click('[data-row="box:stashdb.org:trending"] .stashboard-download >> nth=0')]);
     await tab.waitForLoadState("domcontentloaded").catch(() => {});
     check("Download opens the scene on StashDB with stasharr's search hash", tab.url() === "https://stashdb.org/scenes/t2#stasharr-search", tab.url());
@@ -338,13 +375,23 @@ async function main() {
     check("Refresh asks StashDB again", boxRequests.length > before, { before, after: boxRequests.length });
 
     console.log("New mix");
-    const randomBefore = JSON.stringify((await rowInfo(page, "local:random")).scenes.map((s) => s.title));
+    const surpriseNow = () => page.locator('[data-row="local:random"] .stashboard-surprise-go').getAttribute("href");
+    const surpriseBefore = await surpriseNow();
     const boxBefore = boxRequests.length;
-    await page.click(".stashboard-mix");
-    await settle(page);
-    const randomAfter = JSON.stringify((await rowInfo(page, "local:random")).scenes.map((s) => s.title));
-    check("New mix draws the random rows again", randomBefore !== randomAfter);
+    let surpriseAfter = surpriseBefore;
+    for (let i = 0; i < 4 && surpriseAfter === surpriseBefore; i++) {
+      await page.click(".stashboard-mix");
+      await settle(page);
+      surpriseAfter = await surpriseNow();
+    }
+    check("New mix draws the random modules again", surpriseBefore !== surpriseAfter, { surpriseBefore, surpriseAfter });
     check("New mix doesn't ask StashDB again", boxRequests.length === boxBefore, { before: boxBefore, after: boxRequests.length });
+    await page.click('[data-row="local:random"] .stashboard-surprise-roll');
+    await page.waitForFunction((before) => {
+      const a = document.querySelector('[data-row="local:random"] .stashboard-surprise-go');
+      return a && a.getAttribute("href") !== before;
+    }, surpriseAfter, { timeout: 10000 }).catch(() => {});
+    check("🎲 in Surprise me draws another", (await surpriseNow()) !== surpriseAfter);
 
     console.log("Customise");
     await page.evaluate(() => window.scrollTo(0, 0));
@@ -353,18 +400,23 @@ async function main() {
     check("the customise dialog shows the Required Notices",
       await page.locator(".stashboard-customise .stashboard-notice").filter({ hasText: "This software is vibecoded." }).count() === 1);
     await page.click('.stashboard-customise-list li[data-row="local:random"] label');
-    check("the dialog groups the rows by zone", await page.locator('.stashboard-customise-list[data-zone="discover"] li[data-row="box:stashdb.org:trending"]').count() === 1 &&
+    await page.click('.stashboard-customise-list li[data-row="box:stashdb.org:performers"] label');
+    check("the dialog groups the modules by zone", await page.locator('.stashboard-customise-list[data-zone="discover"] li[data-row="box:stashdb.org:trending"]').count() === 1 &&
       await page.locator('.stashboard-customise-list[data-zone="library"] li[data-row="box:stashdb.org:trending"]').count() === 0);
-    // Past For you and Continue watching, to right under the spotlight.
-    for (let i = 0; i < 2; i++) await page.click('.stashboard-customise-list li[data-row="local:recently_added"] button[aria-label="Move up"]');
+    // Past the top 5, your performers and Up next, to right after the spotlight.
+    for (let i = 0; i < 4; i++) await page.click('.stashboard-customise-list li[data-row="local:studio_spotlight"] button[aria-label="Move up"]');
     await page.click(".stashboard-save");
     await page.waitForSelector(".stashboard-customise", { state: "detached" });
     const saved = await pluginSettings(base);
-    check("Save stores the layout in Stash's plugin settings", typeof saved.layout === "string" && saved.layout.includes("local:random"), saved);
+    check("Save stores the layout in Stash's plugin settings", typeof saved.modules === "string" && saved.modules.includes("local:random"), saved);
+    const asked = boxRequests.length;
     await openDashboard(page, base);
     const customised = await rowsOnPage(page);
-    check("the saved layout applies: row moved up, row switched off",
-      customised[1] === "local:recently_added" && !customised.includes("local:random"), customised.slice(0, 4));
+    check("the saved layout applies: module moved up, one switched off, one switched on",
+      customised[1] === "local:studio_spotlight" && !customised.includes("local:random") && customised.includes("box:stashdb.org:performers"), customised);
+    const perfReq = boxRequests.slice(asked).find((r) => r.kind === "performers");
+    check("new with your performers follows the library's performers, favourite first",
+      perfReq && JSON.stringify(perfReq.input.performers) === JSON.stringify({ value: ["sdb-perf-jane", "sdb-perf-mary"], modifier: "INCLUDES" }), perfReq && perfReq.input.performers);
 
     console.log("Remove from Continue watching");
     // A second scene in progress, with the play Stash records when playback starts.
@@ -373,9 +425,9 @@ async function main() {
     await gql(base, "mutation($id: ID!) { sceneSaveActivity(id: $id, resume_time: 120, playDuration: 60) }", { id: started.id });
     await openDashboard(page, base);
     const card = (sceneId) => page.locator(`[data-row="local:continue"] [data-scene="${sceneId}"]`);
-    check("each Continue watching card has Watched and Remove", await page.locator('[data-row="local:continue"] .stashboard-watched').count() === 2 &&
+    check("each scene to continue has ✓ and ✕", await page.locator('[data-row="local:continue"] .stashboard-watched').count() === 2 &&
       await page.locator('[data-row="local:continue"] .stashboard-remove').count() === 2);
-    check("other rows don't", await page.locator('[data-row="local:recently_added"] .stashboard-watched, [data-row="local:recently_added"] .stashboard-remove').count() === 0);
+    check("what's new under it doesn't", await page.locator(".stashboard-watched").count() === 2);
     await card(started.id).locator(".stashboard-remove").click();
     await card(started.id).waitFor({ state: "detached", timeout: 10000 });
     const removed = (await gql(base, "query($id: ID!) { findScene(id: $id) { resume_time play_count } }", { id: started.id })).findScene;
@@ -383,14 +435,15 @@ async function main() {
 
     console.log("Mark as watched");
     const resumed = (await gql(base, "{ findScenes(scene_filter: { resume_time: { value: 0, modifier: GREATER_THAN } }) { scenes { id play_count } } }")).findScenes.scenes;
-    check("one scene left in Continue watching", resumed.length === 1 && await page.locator('[data-row="local:continue"] .stashboard-watched').count() === 1, resumed);
+    check("one scene left to continue", resumed.length === 1 && await page.locator('[data-row="local:continue"] .stashboard-watched').count() === 1, resumed);
     await page.click('[data-row="local:continue"] .stashboard-watched');
     await page.waitForSelector('[data-row="local:continue"] .stashboard-watched', { state: "detached", timeout: 10000 });
     const after = (await gql(base, "query($id: ID!) { findScene(id: $id) { resume_time play_count } }", { id: resumed[0].id })).findScene;
-    check("Watched forgets the position and counts a play; the row goes", after.resume_time === 0 && after.play_count === resumed[0].play_count + 1 &&
-      await page.locator('[data-row="local:continue"]:not(.stashboard-row-empty)').count() === 0, after);
+    check("Watched forgets the position and counts a play; the scene goes", after.resume_time === 0 && after.play_count === resumed[0].play_count + 1 &&
+      await page.locator(`[data-row="local:continue"] [data-scene="${resumed[0].id}"]`).count() === 0, after);
     await openDashboard(page, base);
-    check("…and stays gone after a reload", !(await rowsOnPage(page)).includes("local:continue"));
+    check("…and stays gone after a reload, leaving what's new", await page.locator('[data-row="local:continue"] .stashboard-watched').count() === 0 &&
+      (await rowInfo(page, "local:continue")).scenes.length === 4);
 
     console.log("Radar");
     const performer = async (id) => (await gql(base, "query($id: ID!) { findPerformer(id: $id) { favorite custom_fields } }", { id })).findPerformer;
@@ -423,13 +476,13 @@ async function main() {
     const radarRow = (id) => page.evaluate((rowId) => {
       const el = document.querySelector(`[data-row="${rowId}"]`);
       return el && {
-        title: el.querySelector("h2").textContent.trim(),
+        title: el.querySelector(".stashboard-radar-name").textContent.trim(),
         bar: el.querySelector(".stashboard-radar-bar").textContent,
         due: el.querySelector(".stashboard-radar-bar").classList.contains("is-due"),
         next: !!el.querySelector(".stashboard-radar-next"),
-        divider: !!el.querySelector(".stashboard-strip-divider"),
         inDiscover: !!el.closest('[data-zone="discover"]'),
-        local: el.querySelectorAll(".scene-card").length,
+        stats: [...el.querySelectorAll(".stashboard-radar-stats b")].map((b) => b.textContent),
+        local: el.querySelectorAll(".stashboard-scene.is-local").length,
         external: [...el.querySelectorAll(".stashboard-ext-card .stashboard-ext-title")].map((t) => t.textContent.trim()),
         message: (el.querySelector(".stashboard-row-message") || {}).textContent || ""
       };
@@ -438,8 +491,9 @@ async function main() {
     check("one performer from the radar, not the one shown last", JSON.stringify(radarIds) === JSON.stringify(["radar:2"]), radarIds);
     const maryUnwatched = (await gql(base, "{ findScenes(scene_filter: { performers: { value: [\"2\"], modifier: INCLUDES }, play_count: { value: 0, modifier: EQUALS } }) { count } }")).findScenes.count;
     const mary = await radarRow("radar:2");
-    check("Mary's row: her unwatched scenes from the library", mary.title.toLowerCase() === "more from mary major" && mary.local === Math.min(12, maryUnwatched) && /since today/.test(mary.bar) && !mary.due, mary);
-    check("…in Discover, with 🎲 and a divider before what's not in the library", mary.inDiscover && mary.next && mary.divider, mary);
+    check("Mary's profile: since today, her unwatched count, two of them from the library", mary.title === "Mary Major" && mary.local === Math.min(2, maryUnwatched) &&
+      mary.stats[1] === String(maryUnwatched) && /since today/.test(mary.bar) && !mary.due, mary);
+    check("…in Discover, with 🎲", mary.inDiscover && mary.next, mary);
     check("…then Curator's hunt for her, best match first, without what Curator found locally",
       JSON.stringify(mary.external) === JSON.stringify(["Hunt Two", "Hunt One"]), mary.external);
     await page.evaluate(() => { document.documentElement.setAttribute("data-stasharr", "1.7.0"); window.dispatchEvent(new CustomEvent("stasharr:ready")); });
@@ -500,23 +554,22 @@ async function main() {
     check("…and opens again", await page.locator('[data-zone="discover"] [data-row^="box:"]').count() > 0);
 
     console.log("Settings");
-    await setPluginSettings(base, { hideNativeRows: true, hideOwned: true, itemsPerRow: 6 });
+    await setPluginSettings(base, { hideNativeRows: true, hideOwned: true });
     await openDashboard(page, base);
     check("hideNativeRows hides Stash's own rows", await page.locator(".stashboard-native").count() === 0);
     const trendingHidden = await rowInfo(page, "box:stashdb.org:trending");
-    check("hideOwned leaves owned scenes out", trendingHidden.external.length === 6 && trendingHidden.external.every((c) => !c.owned), trendingHidden.external.map((c) => c.title));
-    check("itemsPerRow applies to local rows", (await rowInfo(page, "local:unwatched_favorites")).scenes.length === 6);
+    check("hideOwned leaves owned scenes out", trendingHidden.external.length === 5 && trendingHidden.external.every((c) => !c.owned), trendingHidden.external.map((c) => c.title));
     await setPluginSettings(base, { disableExternal: true });
     await openDashboard(page, base);
     check("disableExternal drops the StashDB rows", !(await rowsOnPage(page)).some((id) => id.startsWith("box:")));
-    await setPluginSettings(base, { disableExternal: false, hideOwned: false, hideNativeRows: false, itemsPerRow: 12 });
+    await setPluginSettings(base, { disableExternal: false, hideOwned: false, hideNativeRows: false });
 
     console.log("German");
     await gql(base, "mutation { configureInterface(input: { language: \"de-DE\" }) { language } }");
     await openDashboard(page, base);
     const toolbar = await page.locator(".stashboard-toolbar").textContent();
     check("German texts when Stash is set to German", /Neu mischen/.test(toolbar) && /Anpassen/.test(toolbar), toolbar);
-    check("German row titles", (await rowInfo(page, "local:recently_added")).title.toLowerCase() === "neu hinzugefügt");
+    check("German module titles", (await rowInfo(page, "local:continue")).title.toLowerCase() === "als nächstes");
     if (shots) await page.screenshot({ path: path.join(shots, "dashboard-de.png") });
     await gql(base, "mutation { configureInterface(input: { language: \"en-US\" }) { language } }");
 
@@ -530,12 +583,16 @@ async function main() {
     const fit = await phone.evaluate(() => {
       const view = window.innerWidth;
       const wide = [...document.querySelectorAll(".stashboard *")]
-        .filter((el) => !el.closest(".stashboard-strip") && el.getBoundingClientRect().right > view + 0.5)
+        .filter((el) => !el.closest(".stashboard-bubbles") && el.getBoundingClientRect().right > view + 0.5)
         .map((el) => el.className);
-      const strip = document.querySelector('[data-row="local:recently_added"] .stashboard-strip');
-      return { view, wide, stripScrolls: !!strip && strip.scrollWidth > strip.clientWidth };
+      // Within each zone (Discover's sit inside its frame), all as wide as each other.
+      const stacked = [...document.querySelectorAll(".stashboard-grid")].every((grid) => {
+        const widths = [...grid.querySelectorAll(":scope > .stashboard-module")].map((m) => Math.round(m.getBoundingClientRect().width));
+        return widths.every((w) => w === widths[0]);
+      });
+      return { view, wide, stacked };
     });
-    check("on a phone Stashboard fits the screen and its rows scroll sideways", !fit.wide.length && fit.stripScrolls, fit);
+    check("on a phone Stashboard fits the screen, one module under the other", !fit.wide.length && fit.stacked, fit);
     if (shots) await phone.screenshot({ path: path.join(shots, "phone.png") });
     await phone.close();
 

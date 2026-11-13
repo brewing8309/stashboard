@@ -1,8 +1,8 @@
 /*
- * Stashboard: a dashboard for Stash's front page. Rows of scenes from the
- * library (continue watching, recently added, the day's tag, …), from the
- * Stash Curator plugin when it's installed, and from the stash-boxes set
- * up in Stash (trending on StashDB, new from your favourites, …).
+ * Stashboard: a dashboard for Stash's front page. A grid of modules from
+ * the library (up next, your performers, the day's tag, …), from the Stash
+ * Curator plugin when it's installed, and from the stash-boxes set up in
+ * Stash (trending on StashDB, new from your favourites, …).
  *
  * The logic lives in stashboard-core.js (window.StashboardCore); this file
  * does the talking (Stash GraphQL, stash-boxes, Curator) and the React UI.
@@ -29,7 +29,6 @@
   const { Link } = Api.libraries.ReactRouterDOM;
   const { Button, Modal, Form } = Api.libraries.Bootstrap;
 
-  const CARD_WIDTH = 300;
   const LOG = "[Stashboard]";
 
   /* ------------------------------------------------------------------ *
@@ -54,13 +53,23 @@
     return json.data;
   }
 
-  // Scenes for SceneCard come through Stash's own client and FindScenes
-  // document, so they always carry exactly the fields this Stash version's
-  // cards expect.
-  async function findSlimScenes(variables) {
-    const client = Api.utils.StashService.getClient();
-    const res = await client.query({ query: Api.GQL.FindScenesDocument, variables, fetchPolicy: "network-only" });
-    return res.data.findScenes;
+  // Just what the modules show of a scene.
+  const SCENES_QUERY = `query StashboardScenes($filter: FindFilterType, $scene_filter: SceneFilterType, $ids: [ID!]) {
+  findScenes(filter: $filter, scene_filter: $scene_filter, ids: $ids) {
+    count
+    scenes {
+      id title date details rating100 resume_time play_count last_played_at created_at
+      paths { screenshot preview }
+      files { duration basename }
+      studio { id name }
+      performers { id name }
+      tags { id name }
+    }
+  }
+}`;
+
+  async function findScenes(variables) {
+    return (await stashQuery(SCENES_QUERY, variables)).findScenes;
   }
 
   class CodedError extends Error {
@@ -168,8 +177,8 @@
     const count = continuing ? ctx.count * Core.CONTINUE_OVERFETCH : ctx.count;
     const variables = Core.localRowQuery(row.kind, { count, seed: ctx.seed, now: ctx.now, pickedId: picked && picked.id });
     if (!variables) return { scenes: [], picked };
-    const result = await findSlimScenes(variables);
-    if (!continuing) return { scenes: result.scenes, picked };
+    const result = await findScenes(variables);
+    if (!continuing) return { scenes: result.scenes, picked, count: result.count };
     const done = result.scenes.filter((s) => Core.pastWatched(s, ctx.watchedPercent));
     done.forEach(markWatched);
     return { scenes: result.scenes.filter((s) => !done.includes(s)).slice(0, ctx.count), picked };
@@ -187,7 +196,7 @@
     const output = await curatorOperation({ operation: "get_slate", lane, count: ctx.count, page: 1, draw_seed: `stashboard-${ctx.seed}` });
     const ids = Core.curatorSceneIds(output);
     if (!ids.length) return { scenes: [] };
-    const result = await findSlimScenes({ filter: { per_page: ids.length }, scene_ids: ids.map(Number) });
+    const result = await findScenes({ filter: { per_page: ids.length }, ids: ids.map(String) });
     return { scenes: Core.orderByIds(result.scenes, ids) };
   }
 
@@ -247,21 +256,75 @@
     return { cards: Core.applyOwnership(cards, owned, ctx.hideOwned).slice(0, ctx.count) };
   }
 
+  // A few picks, for ↻ Another pick.
   async function loadSpotlight(env, ctx) {
+    const count = Core.moduleSize("spotlight").count;
     if (env.curator) {
       try {
-        const { scenes } = await loadCuratorRow("best_bets", { ...ctx, count: 1 });
-        if (scenes[0]) return { scene: scenes[0], reason: "spotlight.curator" };
+        const { scenes } = await loadCuratorRow("best_bets", { ...ctx, count });
+        if (scenes.length) return { scenes, reason: "spotlight.curator" };
       } catch (e) {
         console.warn(LOG, "Curator spotlight unavailable:", e.message);
       }
     }
     for (const [kind, reason] of [["top_rated", "spotlight.local"], ["random", "spotlight.random"]]) {
-      const variables = Core.localRowQuery(kind, { count: 1, seed: ctx.seed, now: ctx.now });
-      const result = await findSlimScenes(variables);
-      if (result.scenes[0]) return { scene: result.scenes[0], reason };
+      const result = await findScenes(Core.localRowQuery(kind, { count, seed: ctx.seed, now: ctx.now }));
+      if (result.scenes.length) return { scenes: result.scenes, reason };
     }
-    return { scene: null };
+    return { scenes: [] };
+  }
+
+  async function loadUpNext(ctx) {
+    const [started, recent] = await Promise.all([
+      loadLocalRow({ kind: "continue" }, { ...ctx, count: Core.moduleSize("local:continue").count }),
+      findScenes(Core.localRowQuery("recently_added", { count: Core.UPNEXT_TOTAL, seed: ctx.seed, now: ctx.now }))
+    ]);
+    const ids = new Set(started.scenes.map((s) => s.id));
+    const fresh = recent.scenes.filter((s) => !ids.has(s.id)).slice(0, Math.max(1, Core.UPNEXT_TOTAL - started.scenes.length));
+    return { scenes: started.scenes, fresh };
+  }
+
+  // The day's tags (the first is the tag of the day) and scenes of the one
+  // chosen.
+  async function loadTagTile(ctx, chosenId) {
+    const pick = Core.pickQuery("tag_of_the_day", ctx.seed, Core.TAG_CHIPS);
+    const tags = dig(await stashQuery(pick.query, pick.variables), pick.path) || [];
+    const picked = tags.find((t) => t.id === chosenId) || tags[0] || null;
+    if (!picked) return { tags, picked, scenes: [], count: 0 };
+    const count = Core.moduleSize("local:tag_of_the_day").count;
+    const result = await findScenes(Core.localRowQuery("tag_of_the_day", { count, seed: ctx.seed, now: ctx.now, pickedId: picked.id }));
+    return { tags, picked, scenes: result.scenes, count: result.count };
+  }
+
+  async function loadStudioTile(ctx) {
+    const pick = Core.pickQuery("studio_spotlight", ctx.seed);
+    const picked = (dig(await stashQuery(pick.query, pick.variables), pick.path) || [])[0] || null;
+    if (!picked) return { picked, scenes: [] };
+    const query = Core.localRowQuery("studio_spotlight", { count: Core.moduleSize("local:studio_spotlight").count, seed: ctx.seed, now: ctx.now, pickedId: picked.id });
+    const [result, unwatched] = await Promise.all([
+      findScenes(query),
+      findScenes({ filter: { per_page: 1 }, scene_filter: { ...query.scene_filter, play_count: { value: 0, modifier: "EQUALS" } } })
+    ]);
+    return { picked, scenes: result.scenes, unwatched: unwatched.count };
+  }
+
+  const BUBBLES_QUERY = `query StashboardBubbles($favourites: PerformerFilterType, $radar: PerformerFilterType, $filter: FindFilterType) {
+  favourites: findPerformers(performer_filter: $favourites, filter: $filter) { performers { id name image_path custom_fields } }
+  radar: findPerformers(performer_filter: $radar, filter: $filter) { performers { id name image_path custom_fields } }
+}`;
+
+  async function loadBubbles() {
+    const data = await stashQuery(BUBBLES_QUERY, {
+      favourites: { filter_favorites: true },
+      radar: { custom_fields: [{ field: Core.RADAR_FIELD, modifier: "NOT_NULL" }] },
+      filter: { per_page: Core.BUBBLES_MAX, sort: "scenes_count", direction: "DESC" }
+    });
+    // Without counts the order is the one asked in, which the counts' aliases
+    // (p0, p1, …) then follow.
+    const people = Core.bubbleOrder(data.favourites.performers, data.radar.performers, null);
+    if (!people.length) return { people };
+    const counts = await stashQuery(Core.unwatchedCountsQuery(people.map((p) => p.id)));
+    return { people: Core.bubbleOrder(data.favourites.performers, data.radar.performers, counts) };
   }
 
   /* ------------------------------------------------------------------ *
@@ -290,7 +353,7 @@
 
   const RADAR_QUERY = `query StashboardRadar($f: PerformerFilterType) {
   findPerformers(performer_filter: $f, filter: { per_page: -1 }) {
-    performers { id name image_path favorite custom_fields stash_ids { endpoint stash_id } }
+    performers { id name image_path scene_count favorite custom_fields stash_ids { endpoint stash_id } }
   }
 }`;
 
@@ -344,7 +407,7 @@
   async function loadRadarRow(performer, env, ctx) {
     const since = Core.radarSince(performer);
     const [local, played] = await Promise.all([
-      findSlimScenes(Core.radarLocalQuery(performer.id, ctx)),
+      findScenes(Core.radarLocalQuery(performer.id, ctx)),
       stashQuery(PLAYED_SINCE_QUERY, { f: {
         performers: { value: [performer.id], modifier: "INCLUDES" },
         last_played_at: { value: since, modifier: "GREATER_THAN" }
@@ -361,7 +424,7 @@
         boxError = e;
       }
     }
-    return { scenes: local.scenes, cards, box: linked && linked.box, boxError, playedSince: played.findScenes.count };
+    return { scenes: local.scenes, unwatched: local.count, cards, box: linked && linked.box, boxError, playedSince: played.findScenes.count };
   }
 
   // Stash's interface language, for components outside the dashboard.
@@ -474,39 +537,70 @@
     }
   }
 
-  function RowFrame({ id, title, href, label, children }) {
-    const linkEl = href ? h(Link, { to: href, className: "stashboard-view-all" }, label) : h("span");
-    const Native = Api.components.RecommendationRow;
-    const className = `stashboard-row stashboard-row-${id.replace(/[^a-z0-9]+/gi, "-")}`;
-    if (Native) return h(Native, { className, header: title, link: linkEl }, children);
-    return h("div", { className: `recommendation-row ${className}` },
-      h("div", { className: "recommendation-row-head" }, h("div", null, h("h2", null, title)), linkEl),
+  // A module: a tile on the page, as wide as Core.moduleSize says. Modules
+  // in a line grow to fill it when a neighbour has nothing to show.
+  function Module({ id, sizeOf, title, href, label, extra, className, innerRef, children }) {
+    const link = href ? h(Link, { to: href, className: "stashboard-view-all" }, label) : null;
+    return h("section", {
+      ref: innerRef,
+      className: `stashboard-module stashboard-module-${id.replace(/[^a-z0-9]+/gi, "-")} ${className || ""}`,
+      "data-row": id,
+      style: { "--span": Core.moduleSize(sizeOf || id).span }
+    },
+      title || extra || link
+        ? h("header", { className: "stashboard-module-head" },
+          title ? h("h2", null, title) : h("span"),
+          h("span", { className: "stashboard-module-extra" }, extra || null, link))
+        : null,
       children);
   }
 
-  function Strip({ lang, children }) {
-    const ref = useRef(null);
-    const scroll = (dir) => {
-      const el = ref.current;
-      if (el) el.scrollBy({ left: dir * Math.max(CARD_WIDTH, el.clientWidth * 0.8), behavior: "smooth" });
-    };
-    return h("div", { className: "stashboard-strip-wrap" },
-      h("button", { type: "button", className: "stashboard-strip-btn stashboard-strip-left", title: Core.t(lang, "action.scrollLeft"), "aria-label": Core.t(lang, "action.scrollLeft"), onClick: () => scroll(-1) }, "‹"),
-      h("div", { className: "stashboard-strip", ref }, children),
-      h("button", { type: "button", className: "stashboard-strip-btn stashboard-strip-right", title: Core.t(lang, "action.scrollRight"), "aria-label": Core.t(lang, "action.scrollRight"), onClick: () => scroll(1) }, "›"));
+  // Nothing to show: takes no room.
+  function Empty({ id, innerRef }) {
+    return h("div", { ref: innerRef, className: "stashboard-row-empty", "data-row": id });
   }
 
-  function Skeletons({ count }) {
-    return Array.from({ length: Math.min(count, 6) }, (_, i) =>
-      h("div", { key: `s${i}`, className: "stashboard-skeleton", style: { width: CARD_WIDTH } }));
+  function Skeleton({ className }) {
+    return h("div", { className: `stashboard-skeleton ${className || ""}` });
   }
 
-  function LocalCard({ scene, index }) {
-    const Card = Api.components.SceneCard;
-    if (Card) return h(Card, { scene, index, width: CARD_WIDTH, zoomIndex: 1 });
-    return h(Link, { to: `/scenes/${scene.id}`, className: "stashboard-ext-card", style: { width: CARD_WIDTH } },
-      h("div", { className: "stashboard-ext-thumb" }, scene.paths && scene.paths.screenshot ? h("img", { src: scene.paths.screenshot, alt: "", loading: "lazy" }) : null),
-      h("div", { className: "stashboard-ext-body" }, h("div", { className: "stashboard-ext-title" }, scene.title || `#${scene.id}`)));
+  function sceneDuration(scene) {
+    const file = (scene.files || [])[0];
+    return file && file.duration;
+  }
+
+  function hideBroken(e) {
+    e.currentTarget.style.visibility = "hidden";
+  }
+
+  // A scene's picture. Its preview plays while hovered, like on Stash's cards.
+  function SceneThumb({ scene, className, autoplay, children }) {
+    const [hover, setHover] = useState(false);
+    const paths = scene.paths || {};
+    const progress = Core.sceneProgress(scene);
+    return h(Link, {
+      to: `/scenes/${scene.id}${autoplay ? "?autoplay=true" : ""}`,
+      className: `stashboard-thumb ${className || ""}`,
+      onMouseEnter: () => setHover(true),
+      onMouseLeave: () => setHover(false)
+    },
+      paths.screenshot ? h("img", { src: paths.screenshot, alt: "", loading: "lazy", onError: hideBroken }) : null,
+      hover && paths.preview ? h("video", { src: paths.preview, autoPlay: true, muted: true, loop: true, playsInline: true }) : null,
+      children,
+      progress != null ? h("span", { className: "stashboard-progress" }, h("i", { style: { width: `${Math.round(progress * 100)}%` } })) : null);
+  }
+
+  function Duration({ seconds }) {
+    return seconds ? h("span", { className: "stashboard-duration" }, Core.formatDuration(seconds)) : null;
+  }
+
+  // A scene from the library, small: picture, title, studio and date.
+  function MiniScene({ scene, meta }) {
+    const line = meta != null ? meta : [scene.studio && scene.studio.name, scene.date].filter(Boolean).join(" · ");
+    return h("div", { className: "stashboard-scene", "data-scene": scene.id },
+      h(SceneThumb, { scene }, h(Duration, { seconds: sceneDuration(scene) })),
+      h(Link, { to: `/scenes/${scene.id}`, className: "stashboard-scene-title", title: Core.sceneTitle(scene) }, Core.sceneTitle(scene)),
+      line ? h("div", { className: "stashboard-scene-meta" }, line) : null);
   }
 
   // stasharr's version, once it has marked the page (it may do so after
@@ -548,8 +642,9 @@
 }`;
 
   const CONTINUE_ACTIONS = {
-    watched: { query: () => WATCHED_MUTATION, className: "stashboard-watched", failed: "Couldn't mark the scene as watched:" },
+    watched: { icon: "✓", query: () => WATCHED_MUTATION, className: "stashboard-watched", failed: "Couldn't mark the scene as watched:" },
     remove: {
+      icon: "✕",
       query: (scene) => (scene.play_count > 0 ? REMOVE_MUTATION : RESET_RESUME_MUTATION),
       className: "stashboard-remove",
       failed: "Couldn't remove the scene from Continue watching:"
@@ -569,40 +664,62 @@
         setState({ busy: false, error: e.message || String(e) });
       }
     };
-    return h(Button, {
-      variant: state.error ? "danger" : "secondary",
-      size: "sm",
-      className: spec.className,
+    return h("button", {
+      type: "button",
+      className: `stashboard-icon-button ${spec.className}${state.error ? " is-error" : ""}`,
       disabled: state.busy,
       title: state.error ? Core.t(lang, "error.row", { message: state.error }) : Core.t(lang, `action.${action}.title`),
+      "aria-label": Core.t(lang, `action.${action}`),
       onClick: run
-    }, state.error ? Core.t(lang, "action.failed") : Core.t(lang, `action.${action}`));
+    }, state.error ? "!" : spec.icon);
   }
 
-  function BoxCard({ card, box, lang, stasharr }) {
+  // A stash-box scene. One you have links to your copy and says so; one
+  // you don't carries the stash-box's label and, with stasharr, ⬇.
+  function BoxCard({ card, box, lang, stasharr, compact }) {
     const owned = !!card.localId;
-    const download = stasharr ? Core.downloadLink(card, box) : null;
-    const meta = [card.studio, card.date].filter(Boolean).join(" · ");
+    const download = stasharr && !owned ? Core.downloadLink(card, box) : null;
+    const meta = [card.performers.slice(0, 2).join(", "), card.date].filter(Boolean).join(" · ");
+    const external = { href: card.url, target: "_blank", rel: "noopener noreferrer" };
     const thumb = [
-      card.image ? h("img", { key: "i", src: card.image, alt: "", loading: "lazy", referrerPolicy: "no-referrer" }) : h("div", { key: "i", className: "stashboard-ext-noimg" }),
-      card.duration ? h("span", { key: "d", className: "stashboard-ext-duration" }, Core.formatDuration(card.duration)) : null,
+      card.image ? h("img", { key: "i", src: card.image, alt: "", loading: "lazy", referrerPolicy: "no-referrer", onError: hideBroken }) : null,
+      h(Duration, { key: "d", seconds: card.duration }),
       owned ? null : h("span", { key: "r", className: "stashboard-ext-ribbon" }, box.name)
     ];
-    const external = { href: card.url, target: "_blank", rel: "noopener noreferrer" };
-    return h("div", { className: `stashboard-ext-card${owned ? " is-owned" : ""}`, style: { width: CARD_WIDTH } },
+    return h("div", { className: `stashboard-ext-card${owned ? " is-owned" : ""}` },
       owned
         ? h(Link, { to: `/scenes/${card.localId}`, className: "stashboard-ext-thumb" }, thumb)
         : h("a", { ...external, className: "stashboard-ext-thumb" }, thumb),
       h("div", { className: "stashboard-ext-body" },
         owned ? h(Link, { to: `/scenes/${card.localId}`, className: "stashboard-badge stashboard-badge-owned" }, Core.t(lang, "badge.owned")) : null,
         h("a", { ...external, className: "stashboard-ext-title", title: card.title }, card.title || "—"),
-        meta ? h("div", { className: "stashboard-ext-meta" }, meta) : null,
-        card.performers.length ? h("div", { className: "stashboard-ext-performers", title: card.performers.join(", ") }, card.performers.join(", ")) : null,
-        h("div", { className: "stashboard-ext-actions" },
-          download
-            ? h("a", { href: download, target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-sm stashboard-download", title: Core.t(lang, "action.download.title") }, `⬇ ${Core.t(lang, "action.download")}`)
-            : null,
-          h("a", { ...external, className: "stashboard-ext-source" }, `↗ ${box.name}`))));
+        meta ? h("div", { className: "stashboard-ext-meta", title: card.performers.join(", ") }, meta) : null,
+        download
+          ? h("a", { href: download, target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-sm stashboard-download", title: Core.t(lang, "action.download.title"), "aria-label": Core.t(lang, "action.download") },
+            compact ? "⬇" : `⬇ ${Core.t(lang, "action.download")}`)
+          : null));
+  }
+
+  // A line in a chart: place, picture, title, and ⬇ or ✓.
+  function ChartItem({ card, rank, box, lang, stasharr }) {
+    const owned = !!card.localId;
+    const download = stasharr && !owned ? Core.downloadLink(card, box) : null;
+    const external = { href: card.url, target: "_blank", rel: "noopener noreferrer" };
+    const meta = [card.studio, card.performers.slice(0, 2).join(", ")].filter(Boolean).join(" · ");
+    const thumb = card.image ? h("img", { src: card.image, alt: "", loading: "lazy", referrerPolicy: "no-referrer", onError: hideBroken }) : null;
+    return h("div", { className: `stashboard-ext-card stashboard-chart-item${owned ? " is-owned" : ""}` },
+      h("span", { className: "stashboard-chart-rank" }, rank),
+      owned
+        ? h(Link, { to: `/scenes/${card.localId}`, className: "stashboard-ext-thumb" }, thumb)
+        : h("a", { ...external, className: "stashboard-ext-thumb" }, thumb),
+      h("div", { className: "stashboard-ext-body" },
+        h("a", { ...external, className: "stashboard-ext-title", title: card.title }, card.title || "—"),
+        owned
+          ? h(Link, { to: `/scenes/${card.localId}`, className: "stashboard-badge stashboard-badge-owned" }, Core.t(lang, "badge.owned"))
+          : meta ? h("div", { className: "stashboard-ext-meta" }, meta) : null),
+      download
+        ? h("a", { href: download, target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-sm stashboard-download", title: Core.t(lang, "action.download.title"), "aria-label": Core.t(lang, "action.download") }, "⬇")
+        : h("span"));
   }
 
   function RowMessage({ text }) {
@@ -617,58 +734,277 @@
   }
 
   /* ------------------------------------------------------------------ *
-   * Rows                                                                *
+   * Modules                                                             *
    * ------------------------------------------------------------------ */
 
-  function Row({ id, env, ctx }) {
+  // Loads once the module comes near the screen.
+  function useModuleData(load, key) {
     const ref = useRef(null);
-    const stasharr = useStasharr();
-    // Scenes marked as watched here, left out without reloading the row.
-    const [watched, setWatched] = useState([]);
     const near = useNearScreen(ref);
-    const row = Core.parseRowId(id);
-    const box = row.source === "box" ? env.boxes.find((b) => b.host === row.host) : null;
-    const seed = Core.rowSeed(ctx.day, id, ctx.mix);
-    const rowCtx = { ...ctx, seed };
-    const state = useRowData(() => {
-      if (row.source === "local") return loadLocalRow(row, rowCtx);
-      if (row.source === "curator") return loadCuratorRow(row.lane, rowCtx);
-      return loadBoxRow(row, box, rowCtx);
-    }, `${id}|${seed}|${ctx.refresh}|${ctx.count}|${ctx.hideOwned}`, near);
-
-    const data = state.data || {};
-    const items = row.source === "box" ? data.cards : (data.scenes || []).filter((s) => !watched.includes(s.id));
-    const markable = row.source === "local" && row.kind === "continue";
-    // An empty row says nothing; hide it. Errors are shown, the row was asked for.
-    if (state.status === "done" && (!items || !items.length)) return h("div", { ref, className: "stashboard-row-empty", "data-row": id });
-
-    const title = Core.rowTitle(env.lang, id, env, data.picked);
-    const href = row.source === "local" ? Core.localRowLink(row.kind, data.picked) : null;
-    let body;
-    if (state.status === "error") body = h(RowMessage, { text: errorText(state.error, env.lang, box) });
-    else if (state.status !== "done") body = h(Strip, { lang: env.lang }, h(Skeletons, { count: ctx.count }));
-    else if (row.source === "box") body = h(Strip, { lang: env.lang }, items.map((card) => h(BoxCard, { key: card.id, card, box, lang: env.lang, stasharr })));
-    else if (markable) {
-      body = h(Strip, { lang: env.lang }, items.map((scene, i) => h("div", { key: scene.id, className: "stashboard-card-wrap", "data-scene": scene.id },
-        h(LocalCard, { scene, index: i }),
-        h("div", { className: "stashboard-continue-actions" },
-          ["watched", "remove"].map((action) => h(ContinueButton, { key: action, action, scene, lang: env.lang, onDone: (id) => setWatched((list) => [...list, id]) }))))));
-    } else body = h(Strip, { lang: env.lang }, items.map((scene, i) => h(LocalCard, { key: scene.id, scene, index: i })));
-
-    return h("div", { ref, "data-row": id },
-      h(RowFrame, { id, title, href, label: Core.t(env.lang, "action.viewAll") }, body));
+    return { ref, state: useRowData(load, key, near) };
   }
 
-  function RadarRow({ performer, count, env, ctx, decisionDays, onGone, onNext }) {
-    const ref = useRef(null);
-    const near = useNearScreen(ref);
+  // The usual three states; `render` gets the data once there is some.
+  function moduleBody(state, lang, box, render, skeleton) {
+    if (state.status === "error") return h(RowMessage, { text: errorText(state.error, lang, box) });
+    if (state.status !== "done") return h(Skeleton, { className: skeleton });
+    return render(state.data);
+  }
+
+  // The big one on top: Curator's best bet, else one of your top rated,
+  // else a random scene. ↻ goes to the next of a few picks.
+  function Spotlight({ env, ctx }) {
+    const seed = Core.rowSeed(ctx.day, "spotlight", ctx.mix);
+    const state = useRowData(() => loadSpotlight(env, { ...ctx, seed }), `spotlight|${seed}|${ctx.refresh}`, true);
+    const [index, setIndex] = useState(0);
+    const scenes = (state.data && state.data.scenes) || [];
+    const style = { "--span": Core.moduleSize("spotlight").span };
+    if (state.status === "error" || (state.status === "done" && !scenes.length)) return h(Empty, { id: "spotlight" });
+    if (!scenes.length) return h("section", { className: "stashboard-module stashboard-spotlight stashboard-spotlight-loading", "data-row": "spotlight", style });
+
+    const lang = env.lang;
+    const scene = scenes[index % scenes.length];
+    const meta = [scene.studio && scene.studio.name, scene.date, Core.formatDuration(sceneDuration(scene))].filter(Boolean).join(" · ");
+    const chips = [
+      ...(scene.performers || []).slice(0, 2).map((p) => ({ key: `p${p.id}`, to: `/performers/${p.id}`, text: p.name })),
+      ...(scene.tags || []).slice(0, 2).map((t) => ({ key: `t${t.id}`, to: `/tags/${t.id}`, text: t.name })),
+      ...(scene.studio ? [{ key: "s", to: `/studios/${scene.studio.id}`, text: scene.studio.name }] : [])
+    ];
+    const image = scene.paths && scene.paths.screenshot;
+    return h("section", { className: "stashboard-module stashboard-spotlight", "data-row": "spotlight", "data-scene": scene.id, style },
+      image ? h("div", { className: "stashboard-spotlight-image", style: { backgroundImage: `url("${String(image).replace(/"/g, "%22")}")` } }) : null,
+      h("div", { className: "stashboard-spotlight-shade" }),
+      h("div", { className: "stashboard-spotlight-content" },
+        h("span", { className: "stashboard-spotlight-reason" }, Core.t(lang, state.data.reason)),
+        h("h2", { className: "stashboard-spotlight-title" }, h(Link, { to: `/scenes/${scene.id}` }, Core.sceneTitle(scene))),
+        meta ? h("div", { className: "stashboard-spotlight-meta" }, meta) : null,
+        scene.details ? h("p", { className: "stashboard-spotlight-details" }, scene.details) : null,
+        h("div", { className: "stashboard-spotlight-actions" },
+          h(Link, { to: `/scenes/${scene.id}?autoplay=true`, className: "btn btn-primary" }, `▶ ${Core.t(lang, "action.play")}`),
+          h(Link, { to: `/scenes/${scene.id}`, className: "btn btn-secondary" }, Core.t(lang, "action.details")),
+          scenes.length > 1
+            ? h(Button, { variant: "secondary", className: "stashboard-spotlight-next", onClick: () => setIndex(index + 1) }, Core.t(lang, "action.nextPick"))
+            : null),
+        chips.length
+          ? h("div", { className: "stashboard-chips" }, chips.map((c) => h(Link, { key: c.key, to: c.to, className: "stashboard-chip" }, c.text)))
+          : null));
+  }
+
+  function UpNextItem({ scene, lang, now, children, sub }) {
+    return h("div", { className: "stashboard-upnext-item stashboard-scene", "data-scene": scene.id },
+      h(SceneThumb, { scene }, h(Duration, { seconds: children ? null : sceneDuration(scene) })),
+      h("div", { className: "stashboard-upnext-text" },
+        h(Link, { to: `/scenes/${scene.id}`, className: "stashboard-scene-title", title: Core.sceneTitle(scene) }, Core.sceneTitle(scene)),
+        sub ? h("div", { className: "stashboard-upnext-left" }, sub) : null,
+        h("div", { className: "stashboard-scene-meta" },
+          children
+            ? Core.whenText(lang, scene.last_played_at, now)
+            : Core.t(lang, "upnext.added", { when: Core.whenText(lang, scene.created_at, now) }))),
+      children ? h("div", { className: "stashboard-continue-actions" }, children) : null);
+  }
+
+  // Continue watching, short: where you stopped and how long is left, with
+  // ✓ and ✕; then what's new in the library.
+  function UpNext({ id, env, ctx }) {
+    const lang = env.lang;
+    const [done, setDone] = useState([]);
+    const { ref, state } = useModuleData(() => loadUpNext(ctx), `${id}|${ctx.refresh}|${ctx.watchedPercent}`);
+    const data = state.data || {};
+    const scenes = (data.scenes || []).filter((s) => !done.includes(s.id));
+    const fresh = data.fresh || [];
+    if (state.status === "done" && !scenes.length && !fresh.length) return h(Empty, { id, innerRef: ref });
+    const onDone = (sceneId) => setDone((list) => [...list, sceneId]);
+    return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, null), href: "/scenes?sortby=last_played_at&sortdir=desc", label: Core.t(lang, "action.viewAll") },
+      moduleBody(state, lang, null, () => h("div", { className: "stashboard-upnext" },
+        scenes.map((scene) => {
+          const left = Core.minutesLeft(scene);
+          return h(UpNextItem, { key: scene.id, scene, lang, now: ctx.now, sub: left ? Core.t(lang, "upnext.left", { minutes: left }) : Core.t(lang, "upnext.started") },
+            ["watched", "remove"].map((action) => h(ContinueButton, { key: action, action, scene, lang, onDone })));
+        }),
+        fresh.length ? h("div", { className: "stashboard-upnext-label" }, Core.t(lang, "upnext.new")) : null,
+        fresh.map((scene) => h(UpNextItem, { key: `n${scene.id}`, scene, lang, now: ctx.now })))));
+  }
+
+  // Favourites and radar performers as round faces; the number is how many
+  // of their scenes you haven't watched.
+  function Bubbles({ id, env, ctx }) {
+    const lang = env.lang;
+    const { ref, state } = useModuleData(loadBubbles, `${id}|${ctx.refresh}`);
+    const people = (state.data && state.data.people) || [];
+    if (state.status === "done" && !people.length) return h(Empty, { id, innerRef: ref });
+    return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, null), href: "/performers?sortby=scenes_count&sortdir=desc", label: Core.t(lang, "action.viewAll") },
+      moduleBody(state, lang, null, () => h("div", { className: "stashboard-bubbles" },
+        people.map((p) => h(Link, {
+          key: p.id,
+          to: `/performers/${p.id}`,
+          className: `stashboard-bubble${p.radar ? " is-radar" : ""}${p.unwatched ? "" : " is-seen"}`,
+          "data-performer": p.id,
+          title: p.unwatched ? Core.t(lang, "bubble.unwatched", { count: p.unwatched }) : Core.t(lang, "bubble.none")
+        },
+          h("span", { className: "stashboard-bubble-face" },
+            p.image_path ? h("img", { src: p.image_path, alt: "", loading: "lazy", onError: hideBroken }) : null,
+            p.unwatched ? h("span", { className: "stashboard-bubble-count" }, p.unwatched) : null),
+          h("span", { className: "stashboard-bubble-name" }, `${p.radar ? "📡 " : ""}${p.name}`)))), "is-bubbles"));
+  }
+
+  // Curator's For you, as a top five with big numbers.
+  function TopFive({ id, env, ctx }) {
+    const lang = env.lang;
+    const seed = Core.rowSeed(ctx.day, id, ctx.mix);
+    const { ref, state } = useModuleData(() => loadCuratorRow("for_you", { ...ctx, seed, count: Core.moduleSize(id).count }), `${id}|${seed}|${ctx.refresh}`);
+    const scenes = (state.data && state.data.scenes) || [];
+    if (state.status === "done" && !scenes.length) return h(Empty, { id, innerRef: ref });
+    return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, null) },
+      moduleBody(state, lang, null, () => h("ol", { className: "stashboard-top" },
+        scenes.map((scene, i) => h("li", { key: scene.id, className: "stashboard-scene stashboard-rank", "data-scene": scene.id },
+          h("span", { className: "stashboard-rank-number", "aria-hidden": true }, i + 1),
+          h(SceneThumb, { scene, className: "stashboard-rank-thumb" },
+            h("span", { className: "stashboard-rank-caption" },
+              h("span", { className: "stashboard-scene-title" }, Core.sceneTitle(scene)))))))));
+  }
+
+  // The tag of the day as a picture mosaic, with a few other tags to switch
+  // to and 🎲 for others still.
+  function TagTile({ id, env, ctx }) {
+    const lang = env.lang;
+    const [roll, setRoll] = useState(0);
+    const [chosen, setChosen] = useState(null);
+    const seed = Core.rowSeed(ctx.day, id, ctx.mix + roll * 1000);
+    const { ref, state } = useModuleData(() => loadTagTile({ ...ctx, seed }, chosen), `${id}|${seed}|${chosen}|${ctx.refresh}`);
+    const data = state.data || {};
+    if (state.status === "done" && (!data.picked || !data.scenes.length)) return h(Empty, { id, innerRef: ref });
+    return h(Module, {
+      id, innerRef: ref,
+      title: Core.rowTitle(lang, id, env, data.picked || null),
+      href: data.picked ? `/tags/${data.picked.id}` : null,
+      label: Core.t(lang, "tile.scenes", { count: data.count })
+    },
+      moduleBody(state, lang, null, () => h(React.Fragment, null,
+        h("div", { className: `stashboard-mosaic is-${data.scenes.length}` },
+          data.scenes.map((scene, i) => h("div", { key: scene.id, className: "stashboard-scene", "data-scene": scene.id },
+            h(SceneThumb, { scene }, i === 0 ? h(Duration, { seconds: sceneDuration(scene) }) : null,
+              h("span", { className: "stashboard-mosaic-caption" }, h("span", { className: "stashboard-scene-title" }, Core.sceneTitle(scene))))))),
+        h("div", { className: "stashboard-chips" },
+          data.tags.map((t) => h("button", {
+            key: t.id, type: "button",
+            className: `stashboard-chip${t.id === data.picked.id ? " is-on" : ""}`,
+            onClick: () => setChosen(t.id)
+          }, t.name)),
+          h("button", {
+            type: "button", className: "stashboard-chip stashboard-tag-roll",
+            title: Core.t(lang, "action.otherTag.title"), "aria-label": Core.t(lang, "action.otherTag.title"),
+            onClick: () => { setChosen(null); setRoll(roll + 1); }
+          }, Core.t(lang, "action.otherTag"))))));
+  }
+
+  function StudioTile({ id, env, ctx }) {
+    const lang = env.lang;
+    const seed = Core.rowSeed(ctx.day, id, ctx.mix);
+    const { ref, state } = useModuleData(() => loadStudioTile({ ...ctx, seed }), `${id}|${seed}|${ctx.refresh}`);
+    const data = state.data || {};
+    if (state.status === "done" && (!data.picked || !data.scenes.length)) return h(Empty, { id, innerRef: ref });
+    const studio = data.picked;
+    return h(Module, { id, innerRef: ref },
+      moduleBody(state, lang, null, () => h(React.Fragment, null,
+        h(Link, { to: `/studios/${studio.id}`, className: "stashboard-studio" },
+          h("span", { className: "stashboard-studio-logo" },
+            studio.image_path ? h("img", { src: studio.image_path, alt: "", loading: "lazy", onError: hideBroken }) : null,
+            h("span", { className: "stashboard-studio-initials", "aria-hidden": true }, String(studio.name).slice(0, 4))),
+          h("span", null,
+            h("h2", null, Core.rowTitle(lang, id, env, null)),
+            h("span", { className: "stashboard-studio-name" }, studio.name),
+            h("span", { className: "stashboard-scene-meta" }, Core.t(lang, "studio.counts", { scenes: studio.scene_count, unwatched: data.unwatched })))),
+        h("div", { className: "stashboard-thumbs" },
+          data.scenes.map((scene) => h("div", { key: scene.id, className: "stashboard-scene", "data-scene": scene.id },
+            h(SceneThumb, { scene }, h(Duration, { seconds: sceneDuration(scene) })),
+            h("span", { className: "stashboard-scene-title stashboard-sr" }, Core.sceneTitle(scene))))))));
+  }
+
+  // Not watched in a while: one scene, as a question.
+  function Memory({ id, env, ctx }) {
+    const lang = env.lang;
+    const seed = Core.rowSeed(ctx.day, id, ctx.mix);
+    const { ref, state } = useModuleData(() => loadLocalRow({ kind: "rediscover" }, { ...ctx, seed, count: Core.moduleSize(id).count }), `${id}|${seed}|${ctx.refresh}`);
+    const scene = state.data && state.data.scenes[0];
+    if (state.status === "done" && !scene) return h(Empty, { id, innerRef: ref });
+    return h(Module, { id, innerRef: ref, title: scene ? Core.t(lang, "memory.ago", { when: Core.whenText(lang, scene.last_played_at, ctx.now) }) : Core.rowTitle(lang, id, env, null) },
+      moduleBody(state, lang, null, () => h("div", { className: "stashboard-memory stashboard-scene", "data-scene": scene.id },
+        h(SceneThumb, { scene }, h(Duration, { seconds: sceneDuration(scene) })),
+        h("div", { className: "stashboard-memory-text" },
+          h(Link, { to: `/scenes/${scene.id}`, className: "stashboard-memory-ask" }, Core.t(lang, "memory.ask", { title: Core.sceneTitle(scene) })),
+          h("span", { className: "stashboard-scene-title stashboard-sr" }, Core.sceneTitle(scene)),
+          h("div", { className: "stashboard-scene-meta" },
+            [scene.studio && scene.studio.name, scene.rating100 ? `★ ${Core.stars(scene.rating100)}` : null, Core.t(lang, "memory.plays", { count: scene.play_count })].filter(Boolean).join(" · ")),
+          h(Link, { to: `/scenes/${scene.id}?autoplay=true`, className: "btn btn-primary btn-sm" }, Core.t(lang, "action.again"))))));
+  }
+
+  // One random scene you haven't started, kept secret until you press Go.
+  function Surprise({ id, env, ctx }) {
+    const lang = env.lang;
+    const [roll, setRoll] = useState(0);
+    const seed = Core.rowSeed(ctx.day, id, ctx.mix + roll * 1000);
+    const { ref, state } = useModuleData(() => loadLocalRow({ kind: "random" }, { ...ctx, seed, count: 1 }), `${id}|${seed}|${ctx.refresh}`);
+    const scene = state.data && state.data.scenes[0];
+    if (state.status === "done" && !scene) return h(Empty, { id, innerRef: ref });
+    const image = scene && scene.paths && scene.paths.screenshot;
+    return h(Module, { id, innerRef: ref, className: "stashboard-surprise" },
+      image ? h("div", { className: "stashboard-surprise-image", style: { backgroundImage: `url("${String(image).replace(/"/g, "%22")}")` } }) : null,
+      moduleBody(state, lang, null, () => h("div", { className: "stashboard-surprise-content", "data-scene": scene.id },
+        h("span", { className: "stashboard-surprise-dice", "aria-hidden": true }, "🎲"),
+        h("h2", null, Core.t(lang, "surprise.title")),
+        h("p", { className: "stashboard-scene-meta" }, Core.t(lang, "surprise.sub")),
+        h("div", { className: "stashboard-surprise-actions" },
+          h(Link, { to: `/scenes/${scene.id}?autoplay=true`, className: "btn btn-primary stashboard-surprise-go" }, Core.t(lang, "action.go")),
+          h(Button, { variant: "secondary", className: "stashboard-surprise-roll", onClick: () => setRoll(roll + 1) }, Core.t(lang, "action.reroll"))))));
+  }
+
+  // Every other library or Curator module: four scenes.
+  function SceneTile({ id, env, ctx }) {
+    const lang = env.lang;
+    const row = Core.parseRowId(id);
+    const seed = Core.rowSeed(ctx.day, id, ctx.mix);
+    const count = Core.moduleSize(id).count;
+    const { ref, state } = useModuleData(
+      () => (row.source === "curator" ? loadCuratorRow(row.lane, { ...ctx, seed, count }) : loadLocalRow(row, { ...ctx, seed, count })),
+      `${id}|${seed}|${ctx.refresh}`);
+    const data = state.data || {};
+    if (state.status === "done" && !data.scenes.length) return h(Empty, { id, innerRef: ref });
+    const href = row.source === "local" ? Core.localRowLink(row.kind, data.picked) : null;
+    return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, data.picked || null), href, label: Core.t(lang, "action.viewAll") },
+      moduleBody(state, lang, null, () => h("div", { className: "stashboard-tile" }, data.scenes.map((scene) => h(MiniScene, { key: scene.id, scene })))));
+  }
+
+  // Stash-box modules: trending as a chart, the others as four cards.
+  function BoxModule({ id, env, ctx }) {
+    const lang = env.lang;
+    const row = Core.parseRowId(id);
+    const box = env.boxes.find((b) => b.host === row.host);
+    const stasharr = useStasharr();
+    const count = Core.moduleSize(id).count;
+    const { ref, state } = useModuleData(() => loadBoxRow(row, box, { ...ctx, count }), `${id}|${ctx.day}|${ctx.refresh}|${ctx.hideOwned}`);
+    if (!box) return null;
+    const cards = (state.data && state.data.cards) || [];
+    if (state.status === "done" && !cards.length) return h(Empty, { id, innerRef: ref });
+    const site = { href: box.site, target: "_blank", rel: "noopener noreferrer", className: "stashboard-view-all" };
+    const chart = row.kind === "trending";
+    return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, null), extra: h("a", site, `↗ ${box.name}`) },
+      moduleBody(state, lang, box, () => (chart
+        ? h("div", { className: "stashboard-chart" }, cards.map((card, i) => h(ChartItem, { key: card.id, card, rank: i + 1, box, lang, stasharr })))
+        : h("div", { className: "stashboard-tile" }, cards.map((card) => h(BoxCard, { key: card.id, card, box, lang, stasharr }))))));
+  }
+
+  // A radar performer: portrait, how they're doing, and four scenes (first
+  // what's in the library, then what isn't).
+  function RadarProfile({ performer, count, env, ctx, decisionDays, onGone, onNext }) {
+    const lang = env.lang;
     const stasharr = useStasharr();
     const Toast = Api.hooks.useToast();
     const [busy, setBusy] = useState(false);
-    const lang = env.lang;
+    const id = `radar:${performer.id}`;
     const since = Core.radarSince(performer);
-    const seed = Core.rowSeed(ctx.day, `radar:${performer.id}`, ctx.mix);
-    const state = useRowData(() => loadRadarRow(performer, env, { ...ctx, seed }), `radar:${performer.id}|${seed}|${ctx.refresh}|${ctx.count}`, near);
+    const seed = Core.rowSeed(ctx.day, id, ctx.mix);
+    const size = Core.moduleSize("radar").count;
+    const { ref, state } = useModuleData(() => loadRadarRow(performer, env, { ...ctx, seed, count: size }), `${id}|${seed}|${ctx.refresh}`);
     if (!since) return null;
 
     const data = state.data || {};
@@ -677,7 +1013,6 @@
     const sinceText = decide
       ? Core.t(lang, "radar.decide", { date: since, plays: data.playedSince })
       : days === 0 ? Core.t(lang, "radar.since.today") : days === 1 ? Core.t(lang, "radar.since.one") : Core.t(lang, "radar.since", { days });
-
     const act = (fn, message) => async () => {
       setBusy(true);
       try {
@@ -689,37 +1024,36 @@
         setBusy(false);
       }
     };
-    const bar = h("div", { className: `stashboard-radar-bar${decide ? " is-due" : ""}` },
-      performer.image_path
-        ? h(Link, { to: `/performers/${performer.id}`, className: "stashboard-radar-avatar" }, h("img", { src: performer.image_path, alt: performer.name, loading: "lazy" }))
-        : null,
-      h("span", { className: "stashboard-radar-since" }, sinceText),
-      h("span", { className: "stashboard-radar-actions" },
-        count > 1
-          ? h(Button, { variant: "secondary", size: "sm", disabled: busy, className: "stashboard-radar-next", title: Core.t(lang, "radar.next.title", { count }), onClick: onNext }, Core.t(lang, "radar.next"))
-          : null,
-        h(Button, { variant: decide ? "primary" : "secondary", size: "sm", disabled: busy, className: "stashboard-radar-favourite", onClick: act(makeFavourite, "radar.favourited") }, Core.t(lang, "radar.favourite")),
-        h(Button, { variant: "secondary", size: "sm", disabled: busy, className: "stashboard-radar-remove", onClick: act((id) => setRadar(id, false), "radar.removed") }, Core.t(lang, "radar.remove"))));
+    const next = count > 1
+      ? h("button", { type: "button", className: "stashboard-view-all stashboard-radar-next", disabled: busy, title: Core.t(lang, "radar.next.title", { count }), onClick: onNext }, Core.t(lang, "radar.next"))
+      : null;
 
-    let body;
-    if (state.status === "error") body = h(RowMessage, { text: errorText(state.error, lang, null) });
-    else if (state.status !== "done") body = h(Strip, { lang }, h(Skeletons, { count: ctx.count }));
-    else {
-      // Library first; a divider where what you don't have begins.
-      const missing = data.cards.filter((card) => !card.localId);
-      const items = [
-        ...data.scenes.map((scene, i) => h(LocalCard, { key: `l${scene.id}`, scene, index: i })),
-        missing.length && data.scenes.length
-          ? h("div", { key: "divider", className: "stashboard-strip-divider" }, h("span", null, Core.t(lang, "radar.divider")), h("small", null, data.box.name))
-          : null,
-        ...data.cards.map((card) => h(BoxCard, { key: `b${card.id}`, card, box: data.box, lang, stasharr }))
-      ].filter(Boolean);
-      body = items.length ? h(Strip, { lang }, items) : h(RowMessage, { text: Core.t(lang, "radar.empty") });
-      if (data.boxError) body = h(React.Fragment, null, body, h(RowMessage, { text: errorText(data.boxError, lang, data.box) }));
-    }
-    return h("div", { ref, "data-row": `radar:${performer.id}`, className: "stashboard-radar-row" },
-      h(RowFrame, { id: "radar", title: Core.rowTitle(lang, "radar", env, performer), href: `/performers/${performer.id}`, label: Core.t(lang, "action.viewAll") },
-        bar, body));
+    return h(Module, { id, sizeOf: "radar", innerRef: ref, title: Core.rowTitle(lang, "radar", env, performer), extra: next, className: `stashboard-radar-row${decide ? " is-due" : ""}` },
+      h("div", { className: "stashboard-radar" },
+        h("div", { className: "stashboard-radar-profile" },
+          h(Link, { to: `/performers/${performer.id}`, className: "stashboard-radar-portrait" },
+            performer.image_path ? h("img", { src: performer.image_path, alt: "", loading: "lazy", onError: hideBroken }) : null),
+          h("div", { className: "stashboard-radar-about" },
+            h(Link, { to: `/performers/${performer.id}`, className: "stashboard-radar-name" }, performer.name),
+            h("div", { className: `stashboard-radar-bar${decide ? " is-due" : ""}` }, sinceText),
+            h("div", { className: "stashboard-radar-stats" },
+              [[performer.scene_count, "radar.stat.here"], [data.unwatched, "radar.stat.unwatched"], [data.playedSince, "radar.stat.since"]].map(([n, key]) =>
+                h("span", { key }, h("b", null, n == null ? "–" : n), Core.t(lang, key)))),
+            h("div", { className: "stashboard-radar-actions" },
+              h(Button, { variant: decide ? "primary" : "secondary", size: "sm", disabled: busy, className: "stashboard-radar-favourite", onClick: act(makeFavourite, "radar.favourited") }, Core.t(lang, "radar.favourite")),
+              h(Button, { variant: "secondary", size: "sm", disabled: busy, className: "stashboard-radar-remove", onClick: act((pid) => setRadar(pid, false), "radar.removed") }, Core.t(lang, "radar.remove"))))),
+        moduleBody(state, lang, data.box, () => {
+          const missing = data.cards.filter((card) => !card.localId);
+          const local = data.scenes.slice(0, missing.length ? Math.max(size - missing.length, size / 2) : size);
+          const cards = missing.slice(0, size - local.length);
+          if (!local.length && !cards.length) return h(RowMessage, { text: Core.t(lang, "radar.empty") });
+          return h(React.Fragment, null,
+            h("div", { className: "stashboard-radar-scenes" },
+              local.map((scene) => h("div", { key: `l${scene.id}`, className: "stashboard-scene is-local", "data-scene": scene.id },
+                h(SceneThumb, { scene }), h("span", { className: "stashboard-scene-title stashboard-sr" }, Core.sceneTitle(scene)))),
+              cards.map((card) => h(BoxCard, { key: `b${card.id}`, card, box: data.box, lang, stasharr, compact: true }))),
+            data.boxError ? h(RowMessage, { text: errorText(data.boxError, lang, data.box) }) : null);
+        })));
   }
 
   const RADAR_LAST_KEY = "stashboard:radar-last";
@@ -742,7 +1076,7 @@
 
   // One performer from the radar, a different one each time the page loads
   // (and on 🎲). The one shown last is remembered across visits.
-  function RadarRows({ env, ctx, decisionDays }) {
+  function RadarModule({ env, ctx, decisionDays }) {
     const state = useRowData(radarPerformers, `radar|${ctx.refresh}`, true);
     const [current, setCurrent] = useState(null);
     const [gone, setGone] = useState([]);
@@ -758,37 +1092,23 @@
     }, [state.status, performer, left.length]);
     if (!performer) return null;
     return h(Boundary, { key: performer.id, name: `radar ${performer.id}` },
-      h(RadarRow, {
+      h(RadarProfile, {
         performer, count: left.length, env, ctx, decisionDays,
-        onGone: (id) => setGone((list) => [...list, id]),
+        onGone: (pid) => setGone((list) => [...list, pid]),
         onNext: () => pick(performer.id)
       }));
   }
 
-  function Spotlight({ env, ctx }) {
-    const seed = Core.rowSeed(ctx.day, "spotlight", ctx.mix);
-    const state = useRowData(() => loadSpotlight(env, { ...ctx, seed }), `spotlight|${seed}|${ctx.refresh}`, true);
-    const scene = state.data && state.data.scene;
-    if (state.status === "error" || (state.status === "done" && !scene)) return null;
-    if (!scene) return h("div", { className: "stashboard-spotlight stashboard-spotlight-loading", "data-row": "spotlight" });
-
-    const lang = env.lang;
-    const file = (scene.files || [])[0];
-    const meta = [scene.studio && scene.studio.name, scene.date, file && Core.formatDuration(file.duration)].filter(Boolean).join(" · ");
-    const performers = (scene.performers || []).map((p) => p.name).join(", ");
-    const image = scene.paths && scene.paths.screenshot;
-    return h("section", { className: "stashboard-spotlight", "data-row": "spotlight" },
-      image ? h("div", { className: "stashboard-spotlight-image", style: { backgroundImage: `url("${String(image).replace(/"/g, "%22")}")` } }) : null,
-      h("div", { className: "stashboard-spotlight-shade" }),
-      h("div", { className: "stashboard-spotlight-content" },
-        h("span", { className: "stashboard-spotlight-reason" }, Core.t(lang, state.data.reason)),
-        h("h2", { className: "stashboard-spotlight-title" }, h(Link, { to: `/scenes/${scene.id}` }, scene.title || `#${scene.id}`)),
-        meta ? h("div", { className: "stashboard-spotlight-meta" }, meta) : null,
-        performers ? h("div", { className: "stashboard-spotlight-performers" }, performers) : null,
-        scene.details ? h("p", { className: "stashboard-spotlight-details" }, scene.details) : null,
-        h("div", { className: "stashboard-spotlight-actions" },
-          h(Link, { to: `/scenes/${scene.id}?autoplay=true`, className: "btn btn-primary" }, `▶ ${Core.t(lang, "action.play")}`),
-          h(Link, { to: `/scenes/${scene.id}`, className: "btn btn-secondary" }, Core.t(lang, "action.details")))));
+  function moduleFor(id, env, ctx, settings) {
+    const row = Core.parseRowId(id);
+    if (row.source === "spotlight") return h(Spotlight, { env, ctx });
+    if (row.source === "radar") return h(RadarModule, { env, ctx, decisionDays: settings.radarDecisionDays });
+    if (row.source === "bubbles") return h(Bubbles, { id, env, ctx });
+    if (row.source === "box") return h(BoxModule, { id, env, ctx });
+    if (id === "curator:for_you") return h(TopFive, { id, env, ctx });
+    const special = { continue: UpNext, tag_of_the_day: TagTile, studio_spotlight: StudioTile, rediscover: Memory, random: Surprise };
+    if (row.source === "local" && special[row.kind]) return h(special[row.kind], { id, env, ctx });
+    return h(SceneTile, { id, env, ctx });
   }
 
   /* ------------------------------------------------------------------ *
@@ -929,7 +1249,6 @@
       now,
       mix,
       refresh,
-      count: settings.itemsPerRow,
       hideOwned: settings.hideOwned,
       cacheHours: settings.cacheHours,
       watchedPercent: settings.watchedPercent
@@ -944,16 +1263,13 @@
       setRefresh(refresh + 1);
     };
     const saveLayout = async (rows) => {
-      await saveSettings(state.raw, { layout: Core.serializeLayout(rows) });
+      await saveSettings(state.raw, { modules: Core.serializeLayout(rows) });
       setCustomising(false);
       reload();
     };
 
     const zones = Core.byZone(Core.visibleRows(state.layout, env));
-    const renderRow = (id) => h(Boundary, { key: `${id}|${mix}|${refresh}`, name: id },
-      id === "spotlight" ? h(Spotlight, { env, ctx })
-        : id === "radar" ? h(RadarRows, { env, ctx, decisionDays: settings.radarDecisionDays })
-          : h(Row, { id, env, ctx }));
+    const renderRow = (id) => h(Boundary, { key: `${id}|${mix}|${refresh}`, name: id }, moduleFor(id, env, ctx, settings));
     return h("div", { className: "stashboard" },
       h("div", { className: "stashboard-toolbar" },
         h("span", { className: "stashboard-brand" }, "Stashboard"),
@@ -961,8 +1277,8 @@
           h(Button, { variant: "secondary", size: "sm", onClick: newMix, className: "stashboard-mix" }, `🔀 ${Core.t(lang, "action.mix")}`),
           h(Button, { variant: "secondary", size: "sm", onClick: refreshAll, className: "stashboard-refresh" }, `⟳ ${Core.t(lang, "action.refresh")}`),
           h(Button, { variant: "secondary", size: "sm", onClick: () => setCustomising(true), className: "stashboard-customise-open" }, `⚙ ${Core.t(lang, "action.customise")}`))),
-      zones.library.map(renderRow),
-      zones.discover.length ? h(DiscoverZone, { lang }, zones.discover.map(renderRow)) : null,
+      zones.library.length ? h("div", { className: "stashboard-grid", "data-zone": "library" }, zones.library.map(renderRow)) : null,
+      zones.discover.length ? h(DiscoverZone, { lang }, h("div", { className: "stashboard-grid" }, zones.discover.map(renderRow))) : null,
       customising ? h(Customise, { state, onClose: () => setCustomising(false), onSave: saveLayout }) : null);
   }
 
