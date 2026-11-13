@@ -360,10 +360,24 @@ async function main() {
     check("the saved layout applies: row moved up, row switched off",
       customised[1] === "local:recently_added" && !customised.includes("local:random"), customised.slice(0, 4));
 
+    console.log("Remove from Continue watching");
+    // A second scene in progress, with the play Stash records when playback starts.
+    const started = (await gql(base, "{ findScenes(filter: { q: \"Fictional Scene 10\" }) { scenes { id play_count } } }")).findScenes.scenes[0];
+    await gql(base, "mutation($id: ID!) { sceneAddPlay(id: $id) { count } }", { id: started.id });
+    await gql(base, "mutation($id: ID!) { sceneSaveActivity(id: $id, resume_time: 120, playDuration: 60) }", { id: started.id });
+    await openDashboard(page, base);
+    const card = (sceneId) => page.locator(`[data-row="local:continue"] [data-scene="${sceneId}"]`);
+    check("each Continue watching card has Watched and Remove", await page.locator('[data-row="local:continue"] .stashboard-watched').count() === 2 &&
+      await page.locator('[data-row="local:continue"] .stashboard-remove').count() === 2);
+    check("other rows don't", await page.locator('[data-row="local:recently_added"] .stashboard-watched, [data-row="local:recently_added"] .stashboard-remove').count() === 0);
+    await card(started.id).locator(".stashboard-remove").click();
+    await card(started.id).waitFor({ state: "detached", timeout: 10000 });
+    const removed = (await gql(base, "query($id: ID!) { findScene(id: $id) { resume_time play_count } }", { id: started.id })).findScene;
+    check("Remove deletes the unfinished viewing: no position, its play gone", removed.resume_time === 0 && removed.play_count === started.play_count, removed);
+
     console.log("Mark as watched");
     const resumed = (await gql(base, "{ findScenes(scene_filter: { resume_time: { value: 0, modifier: GREATER_THAN } }) { scenes { id play_count } } }")).findScenes.scenes;
-    check("the Continue watching cards have a Watched button", await page.locator('[data-row="local:continue"] .stashboard-watched').count() === resumed.length && resumed.length === 1, resumed);
-    check("other rows don't", await page.locator('[data-row="local:recently_added"] .stashboard-watched').count() === 0);
+    check("one scene left in Continue watching", resumed.length === 1 && await page.locator('[data-row="local:continue"] .stashboard-watched').count() === 1, resumed);
     await page.click('[data-row="local:continue"] .stashboard-watched');
     await page.waitForSelector('[data-row="local:continue"] .stashboard-watched', { state: "detached", timeout: 10000 });
     const after = (await gql(base, "query($id: ID!) { findScene(id: $id) { resume_time play_count } }", { id: resumed[0].id })).findScene;

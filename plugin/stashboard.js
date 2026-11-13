@@ -539,26 +539,44 @@
   sceneResetActivity(id: $id, reset_resume: true, reset_duration: false)
 }`;
 
-  function WatchedButton({ scene, lang, onDone }) {
+  // Undoes the unfinished viewing: drops the play Stash recorded when it
+  // started (the newest one) and where it stopped, so the scene is back to
+  // how it was before. The play time added stays.
+  const REMOVE_MUTATION = `mutation StashboardRemoveResume($id: ID!) {
+  sceneResetActivity(id: $id, reset_resume: true, reset_duration: false)
+  sceneDeletePlay(id: $id) { count }
+}`;
+
+  const CONTINUE_ACTIONS = {
+    watched: { query: () => WATCHED_MUTATION, className: "stashboard-watched", failed: "Couldn't mark the scene as watched:" },
+    remove: {
+      query: (scene) => (scene.play_count > 0 ? REMOVE_MUTATION : RESET_RESUME_MUTATION),
+      className: "stashboard-remove",
+      failed: "Couldn't remove the scene from Continue watching:"
+    }
+  };
+
+  function ContinueButton({ action, scene, lang, onDone }) {
+    const spec = CONTINUE_ACTIONS[action];
     const [state, setState] = useState({ busy: false, error: null });
-    const mark = async () => {
+    const run = async () => {
       setState({ busy: true, error: null });
       try {
-        await stashQuery(WATCHED_MUTATION, { id: scene.id });
+        await stashQuery(spec.query(scene), { id: scene.id });
         onDone(scene.id);
       } catch (e) {
-        console.warn(LOG, "Couldn't mark the scene as watched:", e);
+        console.warn(LOG, spec.failed, e);
         setState({ busy: false, error: e.message || String(e) });
       }
     };
     return h(Button, {
       variant: state.error ? "danger" : "secondary",
       size: "sm",
-      className: "stashboard-watched",
+      className: spec.className,
       disabled: state.busy,
-      title: state.error ? Core.t(lang, "error.row", { message: state.error }) : Core.t(lang, "action.watched.title"),
-      onClick: mark
-    }, state.error ? Core.t(lang, "action.failed") : Core.t(lang, "action.watched"));
+      title: state.error ? Core.t(lang, "error.row", { message: state.error }) : Core.t(lang, `action.${action}.title`),
+      onClick: run
+    }, state.error ? Core.t(lang, "action.failed") : Core.t(lang, `action.${action}`));
   }
 
   function BoxCard({ card, box, lang, stasharr }) {
@@ -632,7 +650,8 @@
     else if (markable) {
       body = h(Strip, { lang: env.lang }, items.map((scene, i) => h("div", { key: scene.id, className: "stashboard-card-wrap", "data-scene": scene.id },
         h(LocalCard, { scene, index: i }),
-        h(WatchedButton, { scene, lang: env.lang, onDone: (id) => setWatched((list) => [...list, id]) }))));
+        h("div", { className: "stashboard-continue-actions" },
+          ["watched", "remove"].map((action) => h(ContinueButton, { key: action, action, scene, lang: env.lang, onDone: (id) => setWatched((list) => [...list, id]) }))))));
     } else body = h(Strip, { lang: env.lang }, items.map((scene, i) => h(LocalCard, { key: scene.id, scene, index: i })));
 
     return h("div", { ref, "data-row": id },

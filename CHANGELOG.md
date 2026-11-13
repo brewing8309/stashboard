@@ -8,6 +8,10 @@
   stopped during the last minutes stayed in "Continue watching". Scenes stopped past 80% (new
   setting **Watched from (%)**, 0 turns it off) now leave the row and count as watched: Stashboard
   resets their resume time and records a play unless Stash already counted one.
+- **✕ Remove in Continue watching**, next to ✓ Watched: for scenes you started but don't want to
+  finish. It deletes that unfinished viewing from the scene's history (the play Stash recorded when
+  playback started, and where you stopped), so the scene leaves the row and is back to unwatched
+  if that was its only play.
 
 ## 1.2.0 — 2026-10-27
 

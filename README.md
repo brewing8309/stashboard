@@ -46,7 +46,7 @@ dashboard unless you switch them off.
 |---|---|---|
 | **Spotlight** | Curator, or your library | One big pick: Curator's best bet, else one of your top rated, else a random scene. **▶ Play** starts it. |
 | **More from …** | Library + StashDB | One row per performer on your [📡 radar](#-on-your-radar): their unwatched scenes, then StashDB scenes you're missing. |
-| **Continue watching** | Library | Scenes you started and didn't finish. Past 80% (setting **Watched from**) a scene counts as watched and leaves the row by itself; **✓ Watched** under a card does the same for the others. |
+| **Continue watching** | Library | Scenes you started and didn't finish. Past 80% (setting **Watched from**) a scene counts as watched and leaves the row by itself; **✓ Watched** under a card does the same for the others; **✕ Remove** deletes the unfinished viewing from the scene's history instead. |
 | **Recently added** | Library | The newest scenes in Stash. |
 | **Unwatched with your favourites** | Library | Scenes with a favourite performer you haven't played or started. |
 | **Tag of the day** · **Studio spotlight** | Library | One tag and one studio with at least four scenes, a different one every day. |
