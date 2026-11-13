@@ -26,7 +26,7 @@
   const React = Api.React;
   const h = React.createElement;
   const { useState, useEffect, useRef, useCallback } = React;
-  const { Link } = Api.libraries.ReactRouterDOM;
+  const { Link, useHistory, useLocation } = Api.libraries.ReactRouterDOM;
   const { Button, Modal, Form } = Api.libraries.Bootstrap;
 
   const LOG = "[Stashboard]";
@@ -324,9 +324,19 @@
   }
 
   const BUBBLES_QUERY = `query StashboardBubbles($favourites: PerformerFilterType, $radar: PerformerFilterType, $filter: FindFilterType) {
-  favourites: findPerformers(performer_filter: $favourites, filter: $filter) { performers { id name image_path custom_fields } }
-  radar: findPerformers(performer_filter: $radar, filter: $filter) { performers { id name image_path custom_fields } }
+  favourites: findPerformers(performer_filter: $favourites, filter: $filter) { performers { id name image_path custom_fields stash_ids { endpoint stash_id } } }
+  radar: findPerformers(performer_filter: $radar, filter: $filter) { performers { id name image_path custom_fields stash_ids { endpoint stash_id } } }
 }`;
+
+  // A performer's scenes you haven't watched, newest first.
+  const PANEL_SCENES = 12;
+
+  function loadUnwatchedOf(performerId) {
+    return findScenes({
+      filter: { per_page: PANEL_SCENES, sort: "created_at", direction: "DESC" },
+      scene_filter: { performers: { value: [performerId], modifier: "INCLUDES" }, play_count: { value: 0, modifier: "EQUALS" } }
+    });
+  }
 
   async function loadBubbles() {
     const data = await stashQuery(BUBBLES_QUERY, {
@@ -442,6 +452,161 @@
     return { scenes: local.scenes, unwatched: local.count, cards, box: linked && linked.box, boxError, playedSince: played.findScenes.count };
   }
 
+  /* ------------------------------------------------------------------ *
+   * Discover: Curator's Find (Expand, Similar, Performer Hunt)          *
+   * ------------------------------------------------------------------ */
+
+  // Expand reads Curator's StashDB catalogue; the first answer of the day
+  // can take a while.
+  const EXPAND_TIMEOUT_MS = 120000;
+
+  async function expandOutput(args) {
+    const output = await withTimeout(curatorOperation({ operation: "get_expand", hide_dismissed: true, ...args }), EXPAND_TIMEOUT_MS);
+    if (!Core.expandReady(output)) throw new CodedError("expandNotReady");
+    return output;
+  }
+
+  // Curator leaves out what it matched in the library; this also catches
+  // scenes linked to StashDB since.
+  async function notOwned(box, cards) {
+    const owned = await ownedScenes(box, cards.map((c) => c.id));
+    return Core.applyOwnership(cards, owned, true);
+  }
+
+  // A page further down than the catalogue goes falls back to the first.
+  async function pagedExpand(args) {
+    const output = await expandOutput(args);
+    if (args.page > 1 && !(output.items || []).length) return expandOutput({ ...args, page: 1 });
+    return output;
+  }
+
+  async function loadExpandScenes(box, sort, page, count) {
+    const output = await pagedExpand({ entity_type: "scene", sort, page, count });
+    return { cards: await notOwned(box, Core.expandCards(output, box)), total: output.total || 0 };
+  }
+
+  async function loadExpandPerformers(box, page, count) {
+    const output = await pagedExpand({ entity_type: "performer", sort: "match", page, count });
+    return { faces: Core.expandPerformers(output, box) };
+  }
+
+  // Whether Expand has its catalogue yet; Discover says so once, on top.
+  async function expandStatus() {
+    try {
+      await expandOutput({ entity_type: "scene", sort: "match", page: 1, count: 1 });
+      return "ready";
+    } catch (e) {
+      return e.code === "expandNotReady" ? "building" : "ready";
+    }
+  }
+
+  function startExpandRefresh() {
+    return stashQuery(`mutation StashboardExpandRefresh { runPluginTask(plugin_id: "${CURATOR_BACKEND}", task_name: "Refresh Expand cache") }`);
+  }
+
+  const PLAYED_QUERY = { filter: { per_page: 24, sort: "last_played_at", direction: "DESC" }, scene_filter: { play_count: { value: 0, modifier: "GREATER_THAN" } } };
+
+  // A scene you watched lately, and what's like it: in the library
+  // (Similar) and on StashDB (Expand's Similar).
+  async function loadLike(box, seed, count) {
+    const played = await findScenes(PLAYED_QUERY);
+    const source = Core.seededPick(played.scenes, seed);
+    if (!source) return { source: null, scenes: [], cards: [] };
+    const [library, external] = await Promise.allSettled([
+      curatorOperation({ operation: "get_similar", entity_type: "scene", entity_id: String(source.id), count, exclude_scene_ids: [String(source.id)] }),
+      withTimeout(curatorOperation({ operation: "get_external_similar", entity_type: "scene", entity_id: String(source.id) }), EXPAND_TIMEOUT_MS)
+    ]);
+    let scenes = [];
+    if (library.status === "fulfilled") {
+      const ids = Core.similarSceneIds(library.value).slice(0, count);
+      if (ids.length) scenes = Core.orderByIds((await findScenes({ filter: { per_page: ids.length }, ids })).scenes, ids);
+    } else {
+      console.warn(LOG, "Curator's Similar unavailable:", library.reason && library.reason.message);
+    }
+    let cards = [];
+    if (external.status === "fulfilled") cards = await notOwned(box, Core.expandCards(external.value, box));
+    else console.warn(LOG, "Curator's Similar on StashDB unavailable:", external.reason && external.reason.message);
+    if (library.status === "rejected" && external.status === "rejected") throw library.reason;
+    return { source, scenes, cards: cards.slice(0, count) };
+  }
+
+  const HUNT_TARGETS_QUERY = `query StashboardHuntTargets($favourites: PerformerFilterType, $radar: PerformerFilterType, $filter: FindFilterType) {
+  favourites: findPerformers(performer_filter: $favourites, filter: $filter) { performers { id name image_path stash_ids { endpoint stash_id } } }
+  radar: findPerformers(performer_filter: $radar, filter: $filter) { performers { id name image_path stash_ids { endpoint stash_id } } }
+}`;
+
+  // Your favourites and radar performers that StashDB knows.
+  async function loadHuntTargets(box) {
+    const linked = { stash_id_endpoint: { endpoint: box.endpoint, modifier: "NOT_NULL" } };
+    const data = await stashQuery(HUNT_TARGETS_QUERY, {
+      favourites: { ...linked, filter_favorites: true },
+      radar: { ...linked, custom_fields: [{ field: Core.RADAR_FIELD, modifier: "NOT_NULL" }] },
+      filter: { per_page: 24, sort: "scenes_count", direction: "DESC" }
+    });
+    return Core.huntTargets([...data.favourites.performers, ...data.radar.performers], box.endpoint);
+  }
+
+  async function loadHunt(box, target, ctx) {
+    const key = `hunt:${target.id}:${ctx.day}`;
+    let cards = Core.cacheGet(storage(), key, ctx.cacheHours * 3600000, ctx.now);
+    if (!cards) {
+      const output = await withTimeout(curatorOperation({ operation: "get_performer_hunt", performer_id: target.id }), HUNT_TIMEOUT_MS);
+      cards = Core.curatorHuntCards(output, box);
+      Core.cacheSet(storage(), key, cards, ctx.now);
+    }
+    return { cards: await notOwned(box, cards) };
+  }
+
+  async function searchStashdbPerformers(box, query) {
+    const output = await curatorOperation({ operation: "get_stashdb_performer_search", query, limit: 8 });
+    return Core.expandPerformers(output, box);
+  }
+
+  async function loadShortlist(box, count) {
+    const output = await curatorOperation({ operation: "get_shortlist", page: 1, page_size: count });
+    return { cards: await notOwned(box, Core.expandCards(output, box)) };
+  }
+
+  const SHORTLIST_EVENT = "stashboard:shortlist";
+
+  // 📌 and ✕ on Curator's StashDB cards; ✕ takes the card away.
+  function useCardActions(lang) {
+    const Toast = Api.hooks.useToast();
+    const [gone, setGone] = useState([]);
+    const [kept, setKept] = useState({});
+    const shortlisted = (card) => (card.id in kept ? kept[card.id] : card.shortlisted);
+    const run = async (args, apply) => {
+      try {
+        await curatorOperation(args);
+        apply();
+      } catch (e) {
+        Toast.error(e);
+      }
+    };
+    const shortlist = (card) => {
+      const on = !shortlisted(card);
+      run({ operation: "update_shortlist", entity_type: "scene", external_id: card.id, selected: on }, () => {
+        setKept((k) => ({ ...k, [card.id]: on }));
+        window.dispatchEvent(new Event(SHORTLIST_EVENT));
+      });
+    };
+    const dismiss = (card) => run({ operation: "update_external_dismissal", external_id: card.id, kind: "not_interested" }, () => setGone((g) => [...g, card.id]));
+    const actions = (card) => (card.curated && !card.localId
+      ? h("span", { className: "stashboard-card-actions" },
+        h("button", {
+          type: "button", className: `stashboard-icon-button stashboard-shortlist${shortlisted(card) ? " is-on" : ""}`, "aria-pressed": shortlisted(card),
+          title: Core.t(lang, shortlisted(card) ? "action.unshortlist.title" : "action.shortlist.title"), "aria-label": Core.t(lang, shortlisted(card) ? "action.unshortlist.title" : "action.shortlist.title"),
+          onClick: () => shortlist(card)
+        }, "📌"),
+        h("button", {
+          type: "button", className: "stashboard-icon-button stashboard-dismiss",
+          title: Core.t(lang, "action.dismiss.title"), "aria-label": Core.t(lang, "action.dismiss.title"),
+          onClick: () => dismiss(card)
+        }, "✕"))
+      : null);
+    return { visible: (cards) => cards.filter((c) => !gone.includes(c.id)), actions, shortlisted };
+  }
+
   // Stash's interface language, for components outside the dashboard.
   let languagePromise = null;
   function useLang() {
@@ -544,6 +709,7 @@
 
     componentDidCatch(error) {
       console.error(LOG, this.props.name || "", error);
+      if (this.props.onError) this.props.onError(error);
     }
 
     render() {
@@ -554,10 +720,10 @@
 
   // A module: a tile on the page, as wide as Core.moduleSize says. Modules
   // in a line grow to fill it when a neighbour has nothing to show.
-  function Module({ id, sizeOf, title, href, label, extra, className, innerRef, children }) {
+  function Module({ id, sizeOf, span, title, href, label, extra, className, innerRef, children }) {
     const link = href ? h(Link, { to: href, className: "stashboard-view-all" }, label) : null;
     const theme = Core.moduleTheme(sizeOf || id);
-    const style = { "--span": Core.moduleSize(sizeOf || id).span };
+    const style = { "--span": span || Core.moduleSize(sizeOf || id).span };
     if (theme) style["--hue"] = theme.hue;
     return h("section", {
       ref: innerRef,
@@ -603,16 +769,43 @@
     e.currentTarget.style.visibility = "hidden";
   }
 
+  // Hovered a moment, a picture pops out a little bigger (like a video
+  // platform's hover card), towards the inside of the page.
+  const POP_DELAY_MS = 250;
+
+  function usePop() {
+    const [pop, setPop] = useState(null);
+    const timer = useRef(null);
+    useEffect(() => () => clearTimeout(timer.current), []);
+    const enter = (e) => {
+      const el = e.currentTarget;
+      clearTimeout(timer.current);
+      timer.current = setTimeout(() => {
+        const rect = el.getBoundingClientRect();
+        const width = document.documentElement.clientWidth;
+        const x = rect.left < 40 ? "left" : rect.right > width - 40 ? "right" : "center";
+        setPop(x);
+      }, POP_DELAY_MS);
+    };
+    const leave = () => {
+      clearTimeout(timer.current);
+      setPop(null);
+    };
+    return { pop, enter, leave };
+  }
+
   // A scene's picture. Its preview plays while hovered, like on Stash's cards.
   function SceneThumb({ scene, className, autoplay, children }) {
     const [hover, setHover] = useState(false);
+    const { pop, enter, leave } = usePop();
     const paths = scene.paths || {};
     const progress = Core.sceneProgress(scene);
     return h(Link, {
       to: `/scenes/${scene.id}${autoplay ? "?autoplay=true" : ""}`,
-      className: `stashboard-thumb ${className || ""}`,
-      onMouseEnter: () => setHover(true),
-      onMouseLeave: () => setHover(false)
+      className: `stashboard-thumb ${className || ""}${pop ? " is-popped" : ""}`,
+      style: pop ? { transformOrigin: `${pop} center` } : null,
+      onMouseEnter: (e) => { setHover(true); enter(e); },
+      onMouseLeave: () => { setHover(false); leave(); }
     },
       paths.screenshot ? h("img", { src: paths.screenshot, alt: "", loading: "lazy", onError: hideBroken }) : null,
       hover && paths.preview ? h("video", { src: paths.preview, autoPlay: true, muted: true, loop: true, playsInline: true }) : null,
@@ -706,7 +899,7 @@
 
   // A stash-box scene. One you have links to your copy and says so; one
   // you don't carries the stash-box's label and, with stasharr, ⬇.
-  function BoxCard({ card, box, lang, stasharr, compact }) {
+  function BoxCard({ card, box, lang, stasharr, compact, actions }) {
     const owned = !!card.localId;
     const download = stasharr && !owned ? Core.downloadLink(card, box) : null;
     const meta = [card.performers.slice(0, 2).join(", "), card.date].filter(Boolean).join(" · ");
@@ -724,6 +917,8 @@
         owned ? h(Link, { to: `/scenes/${card.localId}`, className: "stashboard-badge stashboard-badge-owned" }, Core.t(lang, "badge.owned")) : null,
         h("a", { ...external, className: "stashboard-ext-title", title: card.title }, card.title || "—"),
         meta ? h("div", { className: "stashboard-ext-meta", title: card.performers.join(", ") }, meta) : null,
+        card.why && card.why.length ? h("div", { className: "stashboard-why", title: card.why.join(" · ") }, card.why[0]) : null,
+        actions || null,
         download
           ? h("a", { href: download, target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-sm stashboard-download", title: Core.t(lang, "action.download.title"), "aria-label": Core.t(lang, "action.download") },
             compact ? "⬇" : `⬇ ${Core.t(lang, "action.download")}`)
@@ -731,7 +926,7 @@
   }
 
   // A line in a chart: place, picture, title, and ⬇ or ✓.
-  function ChartItem({ card, rank, box, lang, stasharr }) {
+  function ChartItem({ card, rank, box, lang, stasharr, actions }) {
     const owned = !!card.localId;
     const download = stasharr && !owned ? Core.downloadLink(card, box) : null;
     const external = { href: card.url, target: "_blank", rel: "noopener noreferrer" };
@@ -746,7 +941,8 @@
         h("a", { ...external, className: "stashboard-ext-title", title: card.title }, card.title || "—"),
         owned
           ? h(Link, { to: `/scenes/${card.localId}`, className: "stashboard-badge stashboard-badge-owned" }, Core.t(lang, "badge.owned"))
-          : meta ? h("div", { className: "stashboard-ext-meta" }, meta) : null),
+          : meta ? h("div", { className: "stashboard-ext-meta" }, meta) : null,
+        actions || null),
       download
         ? h("a", { href: download, target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-sm stashboard-download", title: Core.t(lang, "action.download.title"), "aria-label": Core.t(lang, "action.download") }, "⬇")
         : h("span"));
@@ -787,6 +983,7 @@
     const seed = Core.rowSeed(ctx.day, "spotlight", ctx.mix);
     const state = useRowData(() => loadSpotlight(env, { ...ctx, seed }), `spotlight|${seed}|${ctx.refresh}`, true);
     const [index, setIndex] = useState(0);
+    const { pop, enter, leave } = usePop();
     const scenes = (state.data && state.data.scenes) || [];
     const style = { "--span": Core.moduleSize("spotlight").span };
     if (state.status === "error" || (state.status === "done" && !scenes.length)) return h(Empty, { id: "spotlight" });
@@ -801,8 +998,14 @@
       ...(scene.studio ? [{ key: "s", to: `/studios/${scene.studio.id}`, text: scene.studio.name }] : [])
     ];
     const image = scene.paths && scene.paths.screenshot;
-    return h("section", { className: "stashboard-module stashboard-spotlight", "data-row": "spotlight", "data-scene": scene.id, style },
+    const preview = scene.paths && scene.paths.preview;
+    // Hovered, it grows a little and plays the scene's preview behind the text.
+    return h("section", {
+      className: `stashboard-module stashboard-spotlight${pop ? " is-popped" : ""}`, "data-row": "spotlight", "data-scene": scene.id, style,
+      onMouseEnter: enter, onMouseLeave: leave
+    },
       image ? h("div", { className: "stashboard-spotlight-image", style: { backgroundImage: `url("${String(image).replace(/"/g, "%22")}")` } }) : null,
+      pop && preview ? h("video", { key: scene.id, className: "stashboard-spotlight-video", src: preview, autoPlay: true, muted: true, loop: true, playsInline: true }) : null,
       h("div", { className: "stashboard-spotlight-shade" }),
       h("div", { className: "stashboard-spotlight-content" },
         h("span", { className: "stashboard-spotlight-reason" }, Core.t(lang, state.data.reason)),
@@ -856,25 +1059,58 @@
   }
 
   // Favourites and radar performers as round faces; the number is how many
-  // of their scenes you haven't watched.
+  // of their scenes you haven't watched. One with some opens below the faces
+  // (the module takes the whole width and pushes the page down) to show them.
   function Bubbles({ id, env, ctx }) {
     const lang = env.lang;
+    const [open, setOpen] = useState(null);
     const { ref, state } = useModuleData(loadBubbles, `${id}|${ctx.refresh}`);
     const people = (state.data && state.data.people) || [];
     if (state.status === "done" && !people.length) return h(Empty, { id, innerRef: ref });
-    return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, null), href: "/performers?sortby=scenes_count&sortdir=desc", label: Core.t(lang, "action.viewAll") },
-      moduleBody(state, lang, null, () => h("div", { className: "stashboard-bubbles" },
-        people.map((p) => h(Link, {
-          key: p.id,
-          to: `/performers/${p.id}`,
-          className: `stashboard-bubble${p.radar ? " is-radar" : ""}${p.unwatched ? "" : " is-seen"}`,
-          "data-performer": p.id,
-          title: p.unwatched ? Core.t(lang, "bubble.unwatched", { count: p.unwatched }) : Core.t(lang, "bubble.none")
-        },
-          h("span", { className: "stashboard-bubble-face" },
-            p.image_path ? h("img", { src: p.image_path, alt: "", loading: "lazy", onError: hideBroken }) : null,
-            p.unwatched ? h("span", { className: "stashboard-bubble-count" }, p.unwatched) : null),
-          h("span", { className: "stashboard-bubble-name" }, `${p.radar ? "📡 " : ""}${p.name}`)))), "is-bubbles"));
+    const person = people.find((p) => p.id === open && p.unwatched) || null;
+    return h(Module, {
+      id, innerRef: ref, span: person ? 12 : null, className: person ? "is-open" : "",
+      title: Core.rowTitle(lang, id, env, null), href: "/performers?sortby=scenes_count&sortdir=desc", label: Core.t(lang, "action.viewAll")
+    },
+      moduleBody(state, lang, null, () => h(React.Fragment, null,
+        h("div", { className: "stashboard-bubbles" },
+          people.map((p) => h(Link, {
+            key: p.id,
+            to: `/performers/${p.id}`,
+            className: `stashboard-bubble${p.radar ? " is-radar" : ""}${p.unwatched ? "" : " is-seen"}${person && p.id === person.id ? " is-open" : ""}`,
+            "data-performer": p.id,
+            "aria-expanded": p.unwatched ? !!person && p.id === person.id : undefined,
+            title: p.unwatched ? Core.t(lang, "bubble.open.title", { count: p.unwatched }) : Core.t(lang, "bubble.none"),
+            onClick: p.unwatched ? (e) => { e.preventDefault(); setOpen(person && p.id === person.id ? null : p.id); } : undefined
+          },
+            h("span", { className: "stashboard-bubble-face" },
+              p.image_path ? h("img", { src: p.image_path, alt: "", loading: "lazy", onError: hideBroken }) : null,
+              p.unwatched ? h("span", { className: "stashboard-bubble-count" }, p.unwatched) : null),
+            h("span", { className: "stashboard-bubble-name" }, `${p.radar ? "📡 " : ""}${p.name}`)))),
+        person ? h(PerformerPanel, { key: person.id, performer: person, lang, env, ctx, onClose: () => setOpen(null) }) : null), "is-bubbles"));
+  }
+
+  function PerformerPanel({ performer, lang, env, ctx, onClose }) {
+    const ref = useRef(null);
+    const state = useRowData(() => loadUnwatchedOf(performer.id), `panel|${performer.id}|${ctx.refresh}`, true);
+    useEffect(() => {
+      if (ref.current && ref.current.scrollIntoView) ref.current.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }, []);
+    const box = Core.stashdbBox(env);
+    const target = box && ctx.huntFor ? Core.huntTargets([performer], box.endpoint)[0] : null;
+    const scenes = (state.data && state.data.scenes) || [];
+    return h("div", { ref, className: "stashboard-performer-panel", "data-panel": performer.id },
+      h("div", { className: "stashboard-performer-panel-head" },
+        h("strong", null, Core.t(lang, "bubble.panel", { name: performer.name, count: performer.unwatched })),
+        h("span", { className: "stashboard-module-extra" },
+          target ? h("button", { type: "button", className: "stashboard-view-all stashboard-panel-hunt", title: Core.t(lang, "discover.hunt.go.title"), onClick: () => ctx.huntFor(target) }, Core.t(lang, "discover.hunt.go")) : null,
+          h(Link, { to: `/performers/${performer.id}`, className: "stashboard-view-all" }, Core.t(lang, "bubble.panel.all", { name: performer.name })),
+          h("button", { type: "button", className: "stashboard-icon-button stashboard-panel-close", title: Core.t(lang, "action.close"), "aria-label": Core.t(lang, "action.close"), onClick: onClose }, "✕"))),
+      state.status === "error"
+        ? h(RowMessage, { text: errorText(state.error, lang, null) })
+        : state.status !== "done"
+          ? h(Skeleton)
+          : h("div", { className: "stashboard-tile stashboard-panel-scenes" }, scenes.map((scene) => h(MiniScene, { key: scene.id, scene }))));
   }
 
   // Curator's For you, as a top five: number one big, the next four beside
@@ -887,8 +1123,9 @@
     if (state.status === "done" && !scenes.length) return h(Empty, { id, innerRef: ref });
     return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, null) },
       moduleBody(state, lang, null, () => h("ol", { className: `stashboard-top is-${scenes.length}` },
-        scenes.map((scene, i) => h("li", { key: scene.id, className: "stashboard-scene stashboard-rank", "data-scene": scene.id },
+        scenes.map((scene, i) => h("li", { key: scene.id, className: `stashboard-scene stashboard-rank is-rank-${i + 1}`, "data-scene": scene.id },
           h(SceneThumb, { scene, className: "stashboard-rank-thumb" },
+            i === 0 ? h("span", { className: "stashboard-rank-crown", "aria-hidden": true }, "👑") : null,
             h("span", { className: "stashboard-rank-number", "aria-hidden": true }, i + 1),
             h("span", { className: "stashboard-rank-caption" },
               h("span", { className: "stashboard-scene-title" }, Core.sceneTitle(scene)))))))));
@@ -1137,8 +1374,269 @@
       }));
   }
 
+  /* ------------------------------------------------------------------ *
+   * Discover modules                                                    *
+   * ------------------------------------------------------------------ */
+
+  function Reroll({ lang, onClick }) {
+    return h("button", { type: "button", className: "stashboard-view-all stashboard-reroll", title: Core.t(lang, "discover.reroll.title"), onClick }, Core.t(lang, "discover.reroll"));
+  }
+
+  const EXTERNAL = { target: "_blank", rel: "noopener noreferrer" };
+
+  function boxImage(card) {
+    return card.image ? h("img", { src: card.image, alt: "", loading: "lazy", referrerPolicy: "no-referrer", onError: hideBroken }) : null;
+  }
+
+  // Modules that read Expand's catalogue stay away while it's being built;
+  // Discover's intro says so once.
+  function waitingForExpand(ctx) {
+    return ctx.expand === "building";
+  }
+
+  // The find of the day: one of Curator's best StashDB matches, big, with
+  // why it fits. ↻ goes on to the next.
+  function DiscoverPick({ id, env, ctx }) {
+    const lang = env.lang;
+    const box = Core.stashdbBox(env);
+    const stasharr = useStasharr();
+    const acts = useCardActions(lang);
+    const [index, setIndex] = useState(0);
+    const seed = Core.rowSeed(ctx.day, id, ctx.mix);
+    // Not the first page: that's where "Made for you" starts.
+    const page = 2 + ((seed + ctx.mix) % Core.DISCOVER_PAGES);
+    const { ref, state } = useModuleData(() => loadExpandScenes(box, "match", page, Core.moduleSize(id).count), `${id}|${page}|${ctx.refresh}`);
+    const cards = acts.visible((state.data && state.data.cards) || []);
+    if (waitingForExpand(ctx) || (state.status === "done" && !cards.length)) return h(Empty, { id, innerRef: ref });
+    const card = cards.length ? cards[(seed + index) % cards.length] : null;
+    const next = cards.length > 1
+      ? h("button", { type: "button", className: "stashboard-view-all stashboard-pick-next", onClick: () => setIndex(index + 1) }, Core.t(lang, "discover.next"))
+      : null;
+    return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, null), extra: next, className: "stashboard-pick" },
+      moduleBody(state, lang, box, () => {
+        const download = stasharr ? Core.downloadLink(card, box) : null;
+        const external = { href: card.url, ...EXTERNAL };
+        return h("div", { className: "stashboard-pick-body", "data-card": card.id },
+          h("a", { ...external, className: "stashboard-pick-image stashboard-ext-thumb" },
+            boxImage(card), h(Duration, { seconds: card.duration }), h("span", { className: "stashboard-ext-ribbon" }, box.name)),
+          h("div", { className: "stashboard-pick-text" },
+            h("a", { ...external, className: "stashboard-pick-title" }, card.title || "—"),
+            h("div", { className: "stashboard-scene-meta" }, [card.studio, card.date, Core.formatDuration(card.duration)].filter(Boolean).join(" · ")),
+            card.performers.length ? h("div", { className: "stashboard-pick-cast" }, card.performers.slice(0, 4).join(", ")) : null,
+            card.why.length ? h("ul", { className: "stashboard-pick-why" }, card.why.slice(0, 3).map((w, i) => h("li", { key: i }, w))) : null,
+            card.tags.length ? h("div", { className: "stashboard-chips" }, card.tags.map((name) => h("span", { key: name, className: "stashboard-chip" }, name))) : null,
+            h("div", { className: "stashboard-pick-actions" },
+              h("a", { ...external, className: "btn btn-primary btn-sm" }, `↗ ${box.name}`),
+              download ? h("a", { href: download, ...EXTERNAL, className: "btn btn-secondary btn-sm stashboard-download", title: Core.t(lang, "action.download.title") }, `⬇ ${Core.t(lang, "action.download")}`) : null,
+              acts.actions(card))));
+      }));
+  }
+
+  // Performers Curator thinks you'd like, from StashDB; 🏹 hunts their scenes.
+  function DiscoverFaces({ id, env, ctx }) {
+    const lang = env.lang;
+    const box = Core.stashdbBox(env);
+    const more = useMore(id, lang);
+    const [roll, setRoll] = useState(0);
+    const page = Core.discoverPage(Core.rowSeed(ctx.day, id, 0), ctx.mix + roll);
+    const { ref, state } = useModuleData(() => loadExpandPerformers(box, page, Core.moduleSize(id).more), `${id}|${page}|${ctx.refresh}`);
+    const all = (state.data && state.data.faces) || [];
+    if (waitingForExpand(ctx) || (state.status === "done" && !all.length)) return h(Empty, { id, innerRef: ref });
+    return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, null), extra: h(Reroll, { lang, onClick: () => setRoll(roll + 1) }) },
+      moduleBody(state, lang, box, () => h(React.Fragment, null,
+        h("div", { className: "stashboard-faces" },
+          all.slice(0, more.shown).map((f) => h("div", { key: f.id, className: "stashboard-face", "data-face": f.id },
+            h("a", { href: f.url, ...EXTERNAL, className: "stashboard-face-image" },
+              f.image ? h("img", { src: f.image, alt: "", loading: "lazy", referrerPolicy: "no-referrer", onError: hideBroken }) : h("span", { className: "stashboard-face-initial" }, f.name.slice(0, 1))),
+            h("a", { href: f.url, ...EXTERNAL, className: "stashboard-face-name", title: f.name }, f.name),
+            f.why ? h("div", { className: "stashboard-face-why", title: f.why }, f.why) : null,
+            ctx.huntFor
+              ? h("button", { type: "button", className: "stashboard-chip stashboard-face-hunt", title: Core.t(lang, "discover.hunt.go.title"), onClick: () => ctx.huntFor({ id: f.id, name: f.name, image: f.image }) }, Core.t(lang, "discover.hunt.go"))
+              : null))),
+        more.button(all.length))));
+  }
+
+  // Curator's best StashDB matches as cards, with 📌 and ✕; 🎲 shows others.
+  function DiscoverMatches({ id, env, ctx }) {
+    const lang = env.lang;
+    const box = Core.stashdbBox(env);
+    const stasharr = useStasharr();
+    const acts = useCardActions(lang);
+    const more = useMore(id, lang);
+    const [roll, setRoll] = useState(0);
+    const page = Core.discoverPage(Core.rowSeed(ctx.day, id, 0), ctx.mix + roll);
+    const { ref, state } = useModuleData(() => loadExpandScenes(box, "match", page, Core.moduleSize(id).more), `${id}|${page}|${ctx.refresh}`);
+    const all = acts.visible((state.data && state.data.cards) || []);
+    if (waitingForExpand(ctx) || (state.status === "done" && !all.length)) return h(Empty, { id, innerRef: ref });
+    return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, null), extra: h(Reroll, { lang, onClick: () => setRoll(roll + 1) }) },
+      moduleBody(state, lang, box, () => h(React.Fragment, null,
+        h("div", { className: "stashboard-tile" }, all.slice(0, more.shown).map((card) => h(BoxCard, { key: card.id, card, box, lang, stasharr, actions: acts.actions(card) }))),
+        more.button(all.length))));
+  }
+
+  // Newest first: what came out on StashDB lately that fits you.
+  function DiscoverFresh({ id, env, ctx }) {
+    const lang = env.lang;
+    const box = Core.stashdbBox(env);
+    const stasharr = useStasharr();
+    const acts = useCardActions(lang);
+    const more = useMore(id, lang);
+    const { ref, state } = useModuleData(() => loadExpandScenes(box, "newest", 1, Core.moduleSize(id).more), `${id}|${ctx.refresh}`);
+    const all = acts.visible((state.data && state.data.cards) || []);
+    if (waitingForExpand(ctx) || (state.status === "done" && !all.length)) return h(Empty, { id, innerRef: ref });
+    const when = (card) => {
+      const d = card.date ? new Date(`${card.date}T00:00:00`) : null;
+      return d && !Number.isNaN(d.getTime()) ? d.toLocaleDateString(lang, { day: "numeric", month: "short" }) : "–";
+    };
+    return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, null), extra: h("a", { href: `${box.site}/scenes`, ...EXTERNAL, className: "stashboard-view-all" }, `↗ ${box.name}`) },
+      moduleBody(state, lang, box, () => h(React.Fragment, null,
+        h("div", { className: "stashboard-chart stashboard-fresh" },
+          all.slice(0, more.shown).map((card) => h(ChartItem, { key: card.id, card, rank: when(card), box, lang, stasharr, actions: acts.actions(card) }))),
+        more.button(all.length))));
+  }
+
+  // A scene you watched lately and what's like it, in the library and on
+  // StashDB. 🎲 takes another one you watched.
+  function DiscoverLike({ id, env, ctx }) {
+    const lang = env.lang;
+    const box = Core.stashdbBox(env);
+    const stasharr = useStasharr();
+    const acts = useCardActions(lang);
+    const more = useMore(id, lang);
+    const [roll, setRoll] = useState(0);
+    const seed = Core.rowSeed(ctx.day, id, ctx.mix + roll * 1000);
+    const { ref, state } = useModuleData(() => loadLike(box, seed, Core.moduleSize(id).more), `${id}|${seed}|${ctx.refresh}`);
+    const data = state.data || {};
+    const cards = acts.visible(data.cards || []);
+    const scenes = data.scenes || [];
+    if (state.status === "done" && !data.source) return h(Empty, { id, innerRef: ref });
+    const source = data.source;
+    return h(Module, {
+      id, innerRef: ref,
+      title: Core.rowTitle(lang, id, env, source ? { name: Core.sceneTitle(source) } : null),
+      extra: h(Reroll, { lang, onClick: () => setRoll(roll + 1) })
+    },
+      moduleBody(state, lang, box, () => {
+        if (!scenes.length && !cards.length) return h(RowMessage, { text: Core.t(lang, "discover.like.none") });
+        return h(React.Fragment, null,
+          h("div", { className: "stashboard-like" },
+            h("div", { className: "stashboard-like-source stashboard-scene", "data-scene": source.id },
+              h(SceneThumb, { scene: source }),
+              h(Link, { to: `/scenes/${source.id}`, className: "stashboard-scene-title", title: Core.sceneTitle(source) }, Core.sceneTitle(source))),
+            h("div", { className: "stashboard-like-parts" },
+              scenes.length
+                ? h("div", { className: "stashboard-like-part", "data-part": "library" },
+                  h("h3", { className: "stashboard-like-label" }, Core.t(lang, "discover.like.library")),
+                  h("div", { className: "stashboard-tile" }, scenes.slice(0, more.shown).map((scene) => h(MiniScene, { key: scene.id, scene }))))
+                : null,
+              cards.length
+                ? h("div", { className: "stashboard-like-part", "data-part": "stashdb" },
+                  h("h3", { className: "stashboard-like-label" }, Core.t(lang, "discover.like.box")),
+                  h("div", { className: "stashboard-tile" }, cards.slice(0, more.shown).map((card) => h(BoxCard, { key: card.id, card, box, lang, stasharr, compact: true, actions: acts.actions(card) }))))
+                : null)),
+          more.button(Math.max(scenes.length, cards.length)));
+      }));
+  }
+
+  // Performer Hunt: everything of one performer on StashDB that you don't
+  // have, best match first. Your favourites and radar performers to pick
+  // from, anyone else by searching StashDB.
+  function DiscoverHunt({ id, env, ctx }) {
+    const lang = env.lang;
+    const box = Core.stashdbBox(env);
+    const stasharr = useStasharr();
+    const more = useMore(id, lang);
+    const ref = useRef(null);
+    const near = useNearScreen(ref);
+    const targetsState = useRowData(() => loadHuntTargets(box), `${id}|targets|${ctx.refresh}`, near);
+    const targets = targetsState.data || [];
+    const target = ctx.hunt || Core.seededPick(targets, Core.rowSeed(ctx.day, id, ctx.mix));
+    const hunt = useRowData(() => loadHunt(box, target, ctx), `${id}|${target && target.id}|${ctx.refresh}`, near && !!target);
+    const [query, setQuery] = useState("");
+    const [found, setFound] = useState([]);
+    useEffect(() => {
+      const q = query.trim();
+      if (q.length < 2) {
+        setFound([]);
+        return undefined;
+      }
+      let current = true;
+      const timer = setTimeout(() => {
+        searchStashdbPerformers(box, q).then((list) => current && setFound(list), (e) => console.warn(LOG, "StashDB performer search failed:", e.message));
+      }, 350);
+      return () => { current = false; clearTimeout(timer); };
+    }, [query]);
+    const choose = (t) => {
+      setQuery("");
+      setFound([]);
+      ctx.setHunt(t);
+    };
+    const chips = target && !targets.some((t) => t.id === target.id) ? [target, ...targets] : targets;
+    const cards = (hunt.data && hunt.data.cards) || [];
+    let body;
+    if (!target) body = targetsState.status === "done" ? h(RowMessage, { text: Core.t(lang, "discover.hunt.none") }) : h(Skeleton);
+    else if (hunt.status === "error") body = h(RowMessage, { text: errorText(hunt.error, lang, box) });
+    else if (hunt.status !== "done") body = h("div", { className: "stashboard-hunt-loading" }, h(Skeleton), h("p", { className: "stashboard-row-message" }, Core.t(lang, "discover.hunt.loading", { name: target.name })));
+    else if (!cards.length) body = h(RowMessage, { text: Core.t(lang, "discover.hunt.empty", { name: target.name }) });
+    else {
+      body = h(React.Fragment, null,
+        h("div", { className: "stashboard-tile" }, cards.slice(0, more.shown).map((card) => h(BoxCard, { key: card.id, card, box, lang, stasharr }))),
+        more.button(cards.length));
+    }
+    return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, null) },
+      h("div", { className: "stashboard-hunt-bar" },
+        h("div", { className: "stashboard-hunt-targets" },
+          chips.map((t) => h("button", {
+            key: t.id, type: "button", "data-target": t.id,
+            className: `stashboard-hunt-target${target && t.id === target.id ? " is-on" : ""}`,
+            "aria-pressed": !!target && t.id === target.id,
+            onClick: () => choose(t)
+          },
+            h("span", { className: "stashboard-hunt-face" }, t.image ? h("img", { src: t.image, alt: "", loading: "lazy", referrerPolicy: "no-referrer", onError: hideBroken }) : null),
+            t.name))),
+        h("div", { className: "stashboard-hunt-search" },
+          h("input", { type: "search", className: "form-control form-control-sm", placeholder: Core.t(lang, "discover.hunt.search"), "aria-label": Core.t(lang, "discover.hunt.search"), value: query, onChange: (e) => setQuery(e.target.value) }),
+          found.length
+            ? h("ul", { className: "stashboard-hunt-found" },
+              found.map((f) => h("li", { key: f.id },
+                h("button", { type: "button", onClick: () => choose({ id: f.id, name: f.name, image: f.image }) },
+                  h("span", { className: "stashboard-hunt-face" }, f.image ? h("img", { src: f.image, alt: "", loading: "lazy", referrerPolicy: "no-referrer", onError: hideBroken }) : null),
+                  h("span", null, f.name, f.disambiguation ? h("small", null, ` (${f.disambiguation})`) : null),
+                  f.sceneCount != null ? h("small", { className: "stashboard-scene-meta" }, f.sceneCount) : null))))
+            : null)),
+      body);
+  }
+
+  // What you pinned with 📌, until you take it off again.
+  function DiscoverShortlist({ id, env, ctx }) {
+    const lang = env.lang;
+    const box = Core.stashdbBox(env);
+    const stasharr = useStasharr();
+    const acts = useCardActions(lang);
+    const more = useMore(id, lang);
+    const [version, setVersion] = useState(0);
+    useEffect(() => {
+      const changed = () => setVersion((v) => v + 1);
+      window.addEventListener(SHORTLIST_EVENT, changed);
+      return () => window.removeEventListener(SHORTLIST_EVENT, changed);
+    }, []);
+    const { ref, state } = useModuleData(() => loadShortlist(box, Core.moduleSize(id).more), `${id}|${version}|${ctx.refresh}`);
+    const all = acts.visible((state.data && state.data.cards) || []).filter((c) => acts.shortlisted(c));
+    if (state.status === "done" && !all.length) return h(Empty, { id, innerRef: ref });
+    return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, null) },
+      moduleBody(state, lang, box, () => h(React.Fragment, null,
+        h("div", { className: "stashboard-tile" }, all.slice(0, more.shown).map((card) => h(BoxCard, { key: card.id, card, box, lang, stasharr, actions: acts.actions(card) }))),
+        more.button(all.length))));
+  }
+
+  const DISCOVER_MODULES = {
+    pick: DiscoverPick, faces: DiscoverFaces, matches: DiscoverMatches, like: DiscoverLike,
+    fresh: DiscoverFresh, hunt: DiscoverHunt, shortlist: DiscoverShortlist
+  };
+
   function moduleFor(id, env, ctx, settings) {
     const row = Core.parseRowId(id);
+    if (row.source === "discover") return h(DISCOVER_MODULES[row.kind], { id, env, ctx });
     if (row.source === "spotlight") return h(Spotlight, { env, ctx });
     if (row.source === "radar") return h(RadarModule, { env, ctx, decisionDays: settings.radarDecisionDays });
     if (row.source === "bubbles") return h(Bubbles, { id, env, ctx });
@@ -1157,6 +1655,7 @@
     const row = Core.parseRowId(id);
     if (row.source === "curator") return Core.t(lang, "source.curator");
     if (row.source === "radar") return Core.t(lang, "source.radar");
+    if (row.source === "discover") return Core.t(lang, "source.discover");
     if (row.source === "box") {
       const box = env.boxes.find((b) => b.host === row.host);
       return Core.t(lang, "source.box", { box: box ? box.name : row.host });
@@ -1264,32 +1763,54 @@
   }
 
   const MIX_KEY = "stashboard:mix";
-  const DISCOVER_HIDDEN_KEY = "stashboard:discover-hidden";
 
-  // Below the library: what isn't in it (yet), set apart so it doesn't mix
-  // with what's there to watch. Can be folded away; that's remembered.
-  function DiscoverZone({ lang, children }) {
-    const [hidden, setHidden] = useState(() => readStored(DISCOVER_HIDDEN_KEY) === "1");
-    const toggle = () => {
-      writeStored(DISCOVER_HIDDEN_KEY, hidden ? "0" : "1");
-      setHidden(!hidden);
-    };
-    return h("section", { className: `stashboard-discover${hidden ? " is-hidden" : ""}`, "data-zone": "discover" },
+  // On top of the Discover tab: what it is, and whether Curator still has
+  // to build its StashDB catalogue (with a button to start that).
+  function DiscoverIntro({ lang, status }) {
+    const [started, setStarted] = useState(false);
+    const [error, setError] = useState(null);
+    const start = () => startExpandRefresh().then(() => setStarted(true), (e) => setError(e));
+    return h(React.Fragment, null,
       h("header", { className: "stashboard-discover-head" },
         h("div", null,
           h("h2", { className: "stashboard-discover-title" }, Core.t(lang, "zone.discover")),
-          h("p", { className: "stashboard-discover-sub" }, Core.t(lang, "zone.discover.sub"))),
-        h(Button, { variant: "secondary", size: "sm", className: "stashboard-discover-toggle", "aria-expanded": !hidden, onClick: toggle },
-          hidden ? `▾ ${Core.t(lang, "zone.show")}` : `▴ ${Core.t(lang, "zone.hide")}`)),
-      hidden ? null : children);
+          h("p", { className: "stashboard-discover-sub" }, Core.t(lang, "zone.discover.sub")))),
+      status === "building"
+        ? h("p", { className: "stashboard-notice-bar stashboard-expand-building", role: "status" },
+          Core.t(lang, "discover.notReady"), " ",
+          started
+            ? Core.t(lang, "discover.building")
+            : h(Button, { variant: "primary", size: "sm", onClick: start, className: "stashboard-expand-build" }, Core.t(lang, "discover.build")),
+          error ? ` ${errorText(error, lang, null)}` : null)
+        : null);
   }
 
-  function Dashboard({ onSettings }) {
+  // At the end of the start page: a window into the Discover tab.
+  function DiscoverTeaser({ env, ctx }) {
+    const lang = env.lang;
+    const box = Core.stashdbBox(env);
+    const ref = useRef(null);
+    const near = useNearScreen(ref);
+    const state = useRowData(() => (box ? loadExpandScenes(box, "match", 1, 12) : Promise.resolve({ cards: [] })), `teaser|${ctx.refresh}`, near);
+    const cards = ((state.data && state.data.cards) || []).filter((c) => c.image).slice(0, 5);
+    return h(Link, { to: `/${Core.tabSearch("", "discover")}`, innerRef: ref, className: "stashboard-teaser", "data-zone": "discover-teaser" },
+      h("span", { className: "stashboard-teaser-art", "aria-hidden": true },
+        cards.map((c) => h("img", { key: c.id, src: c.image, alt: "", loading: "lazy", referrerPolicy: "no-referrer", onError: hideBroken }))),
+      h("span", { className: "stashboard-teaser-text" },
+        h("span", { className: "stashboard-teaser-title" }, Core.t(lang, "zone.discover")),
+        h("span", { className: "stashboard-teaser-sub" }, Core.t(lang, "discover.teaser")),
+        h("span", { className: "btn btn-primary btn-sm" }, Core.t(lang, "discover.teaser.open"))));
+  }
+
+  function Dashboard({ onSettings, tab }) {
+    const history = useHistory();
     const [state, setState] = useState(null);
     const [failed, setFailed] = useState(null);
     const [mix, setMix] = useState(() => sessionNumber(MIX_KEY));
     const [refresh, setRefresh] = useState(0);
     const [customising, setCustomising] = useState(false);
+    const [hunt, setHunt] = useState(null);
+    const scrollToHunt = useRef(false);
 
     const reload = useCallback(() => {
       loadEnvironment().then((loaded) => {
@@ -1298,10 +1819,22 @@
       }, (e) => {
         console.error(LOG, "Couldn't load Stashboard's settings:", e);
         setFailed(e);
+        onSettings(null);
       });
     }, []);
     useEffect(reload, []);
     useTabTitle();
+
+    const zones = state ? Core.byZone(Core.visibleRows(state.layout, state.env)) : { library: [], discover: [] };
+    const shownTab = zones.discover.length ? tab : "home";
+    const usesExpand = zones.discover.some((id) => id.startsWith("discover:"));
+    const expand = useRowData(expandStatus, `expand|${refresh}`, shownTab === "discover" && usesExpand);
+    useEffect(() => {
+      if (!scrollToHunt.current || shownTab !== "discover") return;
+      scrollToHunt.current = false;
+      const el = document.querySelector('[data-row="discover:hunt"]');
+      if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
 
     if (failed) return null;
     if (!state) return h("div", { className: "stashboard stashboard-loading" });
@@ -1309,6 +1842,7 @@
     const { env, settings } = state;
     const lang = env.lang;
     const now = Date.now();
+    const openTab = (next) => history.push(`/${Core.tabSearch("", next)}`);
     const ctx = {
       day: Core.dayKey(new Date(now)),
       now,
@@ -1316,7 +1850,18 @@
       refresh,
       hideOwned: settings.hideOwned,
       cacheHours: settings.cacheHours,
-      watchedPercent: settings.watchedPercent
+      watchedPercent: settings.watchedPercent,
+      expand: expand.data,
+      hunt,
+      setHunt,
+      // From anywhere: hunt for this performer in Discover.
+      huntFor: zones.discover.includes("discover:hunt")
+        ? (target) => {
+          setHunt(target);
+          scrollToHunt.current = true;
+          if (shownTab !== "discover") openTab("discover");
+        }
+        : null
     };
 
     const newMix = () => {
@@ -1333,18 +1878,31 @@
       reload();
     };
 
-    const zones = Core.byZone(Core.visibleRows(state.layout, env));
     const renderRow = (id) => h(Boundary, { key: `${id}|${mix}|${refresh}`, name: id }, moduleFor(id, env, ctx, settings));
-    return h("div", { className: "stashboard" },
+    const tabButton = (name) => h(Link, {
+      to: `/${Core.tabSearch("", name)}`,
+      className: `stashboard-tab${shownTab === name ? " is-on" : ""}`,
+      "data-tab": name,
+      "aria-current": shownTab === name ? "page" : undefined
+    }, Core.t(lang, `tab.${name}`));
+    const discovering = shownTab === "discover";
+    return h("div", { className: `stashboard is-${shownTab}` },
       h("div", { className: "stashboard-toolbar" },
         h("span", { className: "stashboard-brand" }, "Stashboard"),
+        zones.discover.length ? h("nav", { className: "stashboard-tabs" }, tabButton("home"), tabButton("discover")) : null,
         h("span", { className: "stashboard-toolbar-actions" },
-          h(Button, { variant: "secondary", size: "sm", onClick: newMix, className: "stashboard-mix" }, `🔀 ${Core.t(lang, "action.mix")}`),
+          h(Button, { variant: "secondary", size: "sm", onClick: newMix, className: "stashboard-mix", title: discovering ? Core.t(lang, "discover.shuffle.title") : undefined },
+            discovering ? Core.t(lang, "discover.shuffle") : `🔀 ${Core.t(lang, "action.mix")}`),
           h(Button, { variant: "secondary", size: "sm", onClick: refreshAll, className: "stashboard-refresh" }, `⟳ ${Core.t(lang, "action.refresh")}`),
           h(Button, { variant: "secondary", size: "sm", onClick: () => setCustomising(true), className: "stashboard-customise-open" }, `⚙ ${Core.t(lang, "action.customise")}`))),
       env.oldCurator ? h("p", { className: "stashboard-notice-bar", role: "status" }, Core.t(lang, "notice.oldCurator")) : null,
-      zones.library.length ? h("div", { className: "stashboard-grid", "data-zone": "library" }, zones.library.map(renderRow)) : null,
-      zones.discover.length ? h(DiscoverZone, { lang }, h("div", { className: "stashboard-grid" }, zones.discover.map(renderRow))) : null,
+      discovering
+        ? h("section", { className: "stashboard-discover", "data-zone": "discover" },
+          h(DiscoverIntro, { lang, status: usesExpand ? expand.data : null }),
+          h("div", { className: "stashboard-grid" }, zones.discover.map(renderRow)))
+        : h(React.Fragment, null,
+          zones.library.length ? h("div", { className: "stashboard-grid", "data-zone": "library" }, zones.library.map(renderRow)) : null,
+          zones.discover.length ? h(DiscoverTeaser, { env, ctx }) : null),
       customising ? h(Customise, { state, onClose: () => setCustomising(false), onSave: saveLayout }) : null);
   }
 
@@ -1354,14 +1912,18 @@
     return render(...args);
   }
 
-  // Shows Stash's own rows below the dashboard unless switched off. Until
-  // the settings are in (and if Stashboard fails) they show.
+  // Shows Stash's own rows below the dashboard (not under Discover) unless
+  // switched off. They wait for the settings, so they don't flash up before
+  // the dashboard; if Stashboard fails, they show.
   function FrontPage({ args, render }) {
-    const [hideNative, setHideNative] = useState(false);
-    const onSettings = useCallback((settings) => setHideNative(settings.hideNativeRows), []);
+    const location = useLocation();
+    const [showNative, setShowNative] = useState(false);
+    const onSettings = useCallback((settings) => setShowNative(!settings || !settings.hideNativeRows), []);
+    const failed = useCallback(() => setShowNative(true), []);
+    const tab = Core.tabOf(location.search);
     return h("div", { className: "recommendations-container stashboard-front" },
-      h(Boundary, { name: "dashboard", fallback: null }, h(Dashboard, { onSettings })),
-      hideNative ? null : h("div", { className: "stashboard-native" }, h(NativeFrontPage, { render, args })));
+      h(Boundary, { name: "dashboard", fallback: null, onError: failed }, h(Dashboard, { onSettings, tab })),
+      showNative && tab !== "discover" ? h("div", { className: "stashboard-native" }, h(NativeFrontPage, { render, args })) : null);
   }
 
   // 📡 on every performer card (scene pages, performer lists) and on the

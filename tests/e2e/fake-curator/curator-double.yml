@@ -8,3 +8,8 @@ exec:
   - python3
   - "{pluginDir}/fake_curator.py"
 interface: raw
+tasks:
+  - name: Refresh Expand cache
+    description: Marks the test double's Expand catalogue as built.
+    defaultArgs:
+      operation: refresh_expand

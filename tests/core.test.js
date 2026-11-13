@@ -61,7 +61,9 @@ test("a saved layout keeps its order and choices, and new rows join in their def
     { id: "local:random", on: false }
   ];
   const layout = c.resolveLayout(saved, env({ curator: true }));
-  assert.deepEqual(layout.slice(0, 4).map((r) => [r.id, r.on]), [["local:random", true], ["radar", true], ["box:stashdb.org:trending", true], ["box:stashdb.org:favorites", true]]);
+  assert.deepEqual(layout.slice(0, 2 + c.DISCOVER_ROWS.length).map((r) => [r.id, r.on]),
+    [["local:random", true], ...c.DISCOVER_ROWS.map((k) => [`discover:${k}`, true]), ["radar", true]]);
+  assert.deepEqual(layout.slice(2 + c.DISCOVER_ROWS.length, 4 + c.DISCOVER_ROWS.length).map((r) => r.id), ["box:stashdb.org:trending", "box:stashdb.org:favorites"]);
   assert.deepEqual(layout.slice(layout.findIndex((r) => r.id === "local:continue")).slice(0, 3).map((r) => r.id), ["local:continue", "bubbles", "curator:for_you"]);
   assert.ok(!layout.some((r) => r.id === "bogus:row"));
   assert.equal(layout.filter((r) => r.id === "local:random").length, 1);
@@ -421,4 +423,57 @@ test("modules have a colour and a symbol each, all different", () => {
   assert.equal(new Set(themes.map((t) => t.icon)).size, ids.length, "symbols differ");
   assert.equal(c.moduleTheme("spotlight"), null);
   assert.equal(c.moduleTheme("bubbles"), null);
+});
+
+test("Discover's own modules need Curator and StashDB, and live in the Discover tab", () => {
+  const ids = c.availableRows(env({ curator: true }));
+  assert.ok(c.DISCOVER_ROWS.every((k) => ids.includes(`discover:${k}`)));
+  assert.ok(!c.availableRows(env({ curator: true, disableExternal: true })).some((id) => id.startsWith("discover:")));
+  assert.ok(!c.availableRows({ curator: true, boxes: [] }).some((id) => id.startsWith("discover:")));
+  assert.equal(c.rowZone("discover:hunt"), "discover");
+  assert.deepEqual(c.parseRowId("discover:like"), { source: "discover", kind: "like" });
+  assert.equal(c.parseRowId("discover:nope"), null);
+  assert.equal(c.rowTitle("de", "discover:like", env({}), { name: "Sunset" }), "Mehr wie „Sunset“");
+  assert.equal(c.rowTitle("en", "discover:like", env({}), null), "More like this");
+  for (const k of c.DISCOVER_ROWS) assert.ok(c.moduleTheme(`discover:${k}`), k);
+});
+
+test("Expand's answers become cards and faces; not ready, dismissed and local ones are left out", () => {
+  const box = { site: "https://stashdb.org", host: "stashdb.org", name: "StashDB" };
+  assert.equal(c.expandReady({ ready: false, items: [] }), false);
+  assert.equal(c.expandReady({ ready: true, initializing: true }), false);
+  assert.equal(c.expandReady({ items: [] }), true);
+  const cards = c.expandCards({ items: [
+    { id: "a", score: 0.9, shortlisted: true, payload: { title: "A", why: ["Studio you like", ""], tags: [{ name: "Outdoor" }], images: [{ url: "u", width: 1280, height: 720 }] } },
+    { id: "b", payload: { title: "B", curator_local_match: { type: "phash" } } },
+    { id: "c", dismissed: { kind: "not_interested" }, payload: { title: "C" } },
+    { id: "d", entity_type: "performer", payload: { name: "D" } }
+  ] }, box);
+  assert.deepEqual(cards.map((x) => [x.id, x.title, x.why, x.tags, x.shortlisted, x.url]), [["a", "A", ["Studio you like"], ["Outdoor"], true, "https://stashdb.org/scenes/a"]]);
+  const faces = c.expandPerformers({ items: [
+    { id: "p1", payload: { name: "Pia", why: ["Similar to Jane"], images: [{ url: "wide", width: 800, height: 400 }, { url: "tall", width: 400, height: 600 }] } },
+    { id: "p2", name: "Search hit", scene_count: 12, images: [] },
+    { id: "p3", payload: {} }
+  ] }, box);
+  assert.deepEqual(faces.map((f) => [f.id, f.name, f.image, f.why, f.sceneCount]), [["p1", "Pia", "tall", "Similar to Jane", null], ["p2", "Search hit", null, "", 12]]);
+});
+
+test("Discover helpers: similar ids, pages, picks, hunt targets and the tab in the URL", () => {
+  assert.deepEqual(c.similarSceneIds({ items: [{ entity_id: "4" }, { entity_id: 7 }, { entity_id: "4" }, { entity_id: "x" }] }), ["4", "7"]);
+  assert.equal(c.discoverPage(123, 0), 1);
+  const pages = [1, 2, 3, 4, 5, 6, 7].map((roll) => c.discoverPage(123, roll));
+  assert.ok(pages.every((p) => p >= 2 && p <= c.DISCOVER_PAGES), pages);
+  assert.ok(pages.every((p, i) => i === 0 || p !== pages[i - 1]), pages);
+  assert.equal(c.seededPick([], 3), null);
+  assert.equal(c.seededPick(["a", "b"], 3), "b");
+  const ep = "https://stashdb.org/graphql";
+  assert.deepEqual(c.huntTargets([
+    { id: 1, name: "Jane", image_path: "j", stash_ids: [{ endpoint: ep, stash_id: "s1" }] },
+    { id: 2, name: "No id", stash_ids: [] },
+    { id: 3, name: "Jane again", stash_ids: [{ endpoint: ep, stash_id: "s1" }] }
+  ], ep), [{ id: "s1", name: "Jane", image: "j", localId: "1" }]);
+  assert.equal(c.tabOf("?stashboard=discover"), "discover");
+  assert.equal(c.tabOf(""), "home");
+  assert.equal(c.tabSearch("?a=1", "discover"), "?a=1&stashboard=discover");
+  assert.equal(c.tabSearch("?stashboard=discover", "home"), "");
 });

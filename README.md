@@ -39,27 +39,39 @@ from [Stash Curator](CURATOR.md), which comes with it.
 ## What's on it
 
 A grid of modules in the spirit of streaming apps: each shows a handful of scenes, several sit
-side by side, and the ones in a line grow to fill it when a neighbour has nothing to show. Pictures
-play their preview while you hover them. Your own front page rows stay below the dashboard unless
-you switch them off.
+side by side, and the ones in a line grow to fill it when a neighbour has nothing to show. Hover a
+picture for a moment and it pops out a little bigger and plays its preview (the spotlight too).
+Your own front page rows stay below the dashboard unless you switch them off.
 
-The page has two parts. On top, what's **in your library**. Below, set apart in its own colour,
-**🧭 Discover**: everything that isn't in your library (yet), with a **StashDB** label on each
-scene you don't have. **▴ Hide** folds Discover away; that's remembered.
+Stashboard has two tabs. **🏠 Home** is what's **in your library**; at its end a window leads to
+**🧭 Discover**, a page of its own for everything that isn't in your library (yet), with a
+**StashDB** label on each scene you don't have. Discover has its own address
+(`/?stashboard=discover`), so Back and bookmarks work.
 
 | Module | Source | What's in it |
 |---|---|---|
 | **Spotlight** | Curator, or your library | One big pick: Curator's best bet, else one of your top rated, else a random scene, with its performers, tags and studio. **▶ Play** starts it, **↻ Another pick** shows the next one. |
 | **Up next** | Library | Next to the spotlight: the scenes you started, with a progress bar and the minutes left, then what's new in your library. Past 80% (setting **Watched from**) a scene counts as watched and leaves by itself; **✓** does the same for the others, **✕** deletes the unfinished viewing from the scene's history instead. |
-| **Your performers** | Library | Your favourites and the performers on your [📡 radar](#-on-your-radar) as round faces; the number is how many of their scenes you haven't watched. Grey: nothing new. |
-| **Curator: your top 5 today** | Curator | Curator's For you, ranked with big numbers. |
+| **Your performers** | Library | Your favourites and the performers on your [📡 radar](#-on-your-radar) as round faces; the number is how many of their scenes you haven't watched. Grey: nothing new. Click one with a number and their unwatched scenes open right below, pushing the page down; **🏹 Hunt** looks for theirs on StashDB in Discover. |
+| **Curator: your top 5 today** | Curator | Curator's For you, ranked with big numbers in gold, silver and bronze. |
 | **Tag of the day** | Library | A picture mosaic of a tag with at least four scenes, a different one every day; the chips switch to other tags, 🎲 draws new ones. |
 | **Studio spotlight** | Library | A studio of the day with its logo, how many of its scenes you haven't watched, and three of them. |
 | **Watched … days ago** | Library | One scene you played before, but not in the last 90 days: again? |
 | **Surprise me** | Library | One random scene you haven't started, kept secret until **▶ Go**; 🎲 draws another. |
+| **🧭 Find of the day** | Curator + StashDB | One of Curator's best StashDB matches, big, with why it fits; **↻ Next find** goes on. In Discover, like everything below. |
+| **👯 New faces** | Curator + StashDB | Performers Curator thinks you'd like (Expand); **🏹 Hunt** shows their scenes in Performer Hunt. |
+| **🔮 Made for you on StashDB** | Curator + StashDB | Curator's best matches (Expand), eight at a time and many more behind **More**. **📌** keeps one on your shortlist, **✕** says not interested (it isn't suggested again). |
+| **🔗 More like …** | Curator | A scene you watched lately and what's like it, in your library and on StashDB (Similar). |
+| **🌱 Just released** | Curator + StashDB | New on StashDB and to your taste, newest first. |
+| **🏹 Performer Hunt** | Curator + StashDB | Everything of one performer on StashDB you don't have, best match first: your favourites and radar performers to pick from, anyone else by searching StashDB. |
+| **📌 Your shortlist** | Curator | What you pinned, until you take it off. |
 | **📡 On your radar** | Library + StashDB | One performer from your radar, a different one each visit: portrait, numbers, two of their unwatched scenes and two StashDB scenes you're missing. In Discover. |
 | **Trending on StashDB** | StashDB | The top five there right now, as a chart. In Discover. |
 | **New from your StashDB favourites** | StashDB | Released scenes of the performers and studios you favourited on StashDB. In Discover. |
+
+**🎲** in a Discover module shows others, and **🎲 Shuffle Discover** in the toolbar has every
+module draw something else. Curator's Find needs its StashDB catalogue; while that's still being
+built, Discover says so and offers **Build it now** (Curator's task *Refresh Expand cache*).
 
 Off by default, and there to switch on in **⚙ Customise**: **Recently added**, **Unwatched with
 your favourites**, **Top rated**, Curator's **Best bets**, **Revisit**, **Stretch**, **Blind
@@ -90,7 +102,9 @@ so it's yours, it shows on the performer's page, and anything can filter by it. 
 one of them at a time, picked at random each time the page loads (never the same one twice in a
 row); **🎲 Someone else** picks another right away.
 
-![Discover: a radar performer's profile, trending on StashDB as a chart, new from your StashDB favourites](docs/discover.png)
+![Discover: the find of the day, new faces, made for you on StashDB, more like a scene, just released, Performer Hunt and the StashDB modules](docs/discover-tab.png)
+
+![A radar performer's profile in Discover](docs/discover.png)
 
 ## Install
 

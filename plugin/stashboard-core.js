@@ -71,11 +71,14 @@
   ];
   const CURATOR_LANES = ["for_you", "best_bets", "revisit", "stretch", "blind_spots", "dormant"];
   const BOX_ROWS = ["favorites", "trending", "performers", "new"];
+  // Discover's own modules, from Curator's Find (Expand, Similar, Performer
+  // Hunt) on StashDB.
+  const DISCOVER_ROWS = ["pick", "faces", "matches", "like", "fresh", "hunt", "shortlist"];
 
   // Modules on by default, in this order. Modules of other kinds are
   // available but start switched off. Box modules apply to the first usable
-  // stash-box only. The radar and stash-box modules go below, in the
-  // Discover zone (rowZone).
+  // stash-box only. Curator's Find, the radar and the stash-box modules
+  // make the Discover tab (rowZone).
   const DEFAULT_ON = [
     "spotlight",
     "local:continue",
@@ -85,6 +88,7 @@
     "local:studio_spotlight",
     "local:rediscover",
     "local:random",
+    ...DISCOVER_ROWS.map((k) => `discover:${k}`),
     "radar",
     "box:*:trending",
     "box:*:favorites"
@@ -103,7 +107,14 @@
     "local:rediscover": { span: 5, count: 1 },
     "local:random": { span: 3, count: 1 },
     radar: { span: 4, count: 4, more: 12 },
-    "box:trending": { span: 4, count: 5, more: 20 }
+    "box:trending": { span: 4, count: 5, more: 20 },
+    "discover:pick": { span: 8, count: 12 },
+    "discover:faces": { span: 4, count: 6, more: 18 },
+    "discover:matches": { span: 12, count: 8, more: 32 },
+    "discover:like": { span: 7, count: 4, more: 12 },
+    "discover:fresh": { span: 5, count: 5, more: 20 },
+    "discover:hunt": { span: 12, count: 8, more: 32 },
+    "discover:shortlist": { span: 12, count: 4, more: 40 }
   };
   const TILE = { span: 6, count: 4 };
   // Discover modules load `more` and show the rest on "More".
@@ -129,7 +140,14 @@
     "box:trending": { icon: "🔥", hue: 15 },
     "box:favorites": { icon: "💫", hue: 300 },
     "box:performers": { icon: "👥", hue: 200 },
-    "box:new": { icon: "✨", hue: 55 }
+    "box:new": { icon: "✨", hue: 55 },
+    "discover:pick": { icon: "🧭", hue: 38 },
+    "discover:faces": { icon: "👯", hue: 318 },
+    "discover:matches": { icon: "🔮", hue: 268 },
+    "discover:like": { icon: "🔗", hue: 190 },
+    "discover:fresh": { icon: "🌱", hue: 128 },
+    "discover:hunt": { icon: "🏹", hue: 2 },
+    "discover:shortlist": { icon: "📌", hue: 212 }
   };
 
   function moduleTheme(id) {
@@ -151,13 +169,13 @@
   const UPNEXT_TOTAL = 4;
   const TAG_CHIPS = 4;
 
-  // The front page has two zones: what's in your library (with Curator's
-  // picks from it) on top, and Discover below it, for what isn't (yet).
+  // Two zones: what's in your library (with Curator's picks from it) on the
+  // front page, and Discover, for what isn't (yet), in its own tab.
   const ZONES = ["library", "discover"];
 
   function rowZone(id) {
     const row = parseRowId(id);
-    return row && (row.source === "box" || row.source === "radar") ? "discover" : "library";
+    return row && (row.source === "box" || row.source === "radar" || row.source === "discover") ? "discover" : "library";
   }
 
   // Row ids by zone, each in its given order.
@@ -172,6 +190,7 @@
     const ids = ["spotlight", "bubbles", "radar", ...LOCAL_ROWS.map((r) => `local:${r}`)];
     if (env.curator) ids.push(...CURATOR_LANES.map((l) => `curator:${l}`));
     if (!env.disableExternal) {
+      if (env.curator && stashdbBox(env)) ids.push(...DISCOVER_ROWS.map((k) => `discover:${k}`));
       for (const box of env.boxes || []) ids.push(...BOX_ROWS.map((k) => `box:${box.host}:${k}`));
     }
     return ids;
@@ -184,6 +203,7 @@
     if (parts[0] === "bubbles" && parts.length === 1) return { source: "bubbles" };
     if (parts[0] === "local" && parts.length === 2 && LOCAL_ROWS.includes(parts[1])) return { source: "local", kind: parts[1] };
     if (parts[0] === "curator" && parts.length === 2 && CURATOR_LANES.includes(parts[1])) return { source: "curator", lane: parts[1] };
+    if (parts[0] === "discover" && parts.length === 2 && DISCOVER_ROWS.includes(parts[1])) return { source: "discover", kind: parts[1] };
     if (parts[0] === "box" && parts.length === 3 && BOX_ROWS.includes(parts[2])) return { source: "box", host: parts[1], kind: parts[2] };
     return null;
   }
@@ -578,6 +598,123 @@
   }
 
   /* ------------------------------------------------------------------ *
+   * Discover: Curator's Find on StashDB                                 *
+   * ------------------------------------------------------------------ */
+
+  // Curator's Find works on StashDB only.
+  function stashdbBox(env) {
+    return ((env && env.boxes) || []).find((b) => b.host === "stashdb.org") || null;
+  }
+
+  // Expand answers with ready: false while its StashDB catalogue is still
+  // being built (Curator's "Refresh Expand cache" task).
+  function expandReady(output) {
+    return !!output && output.ready !== false && !output.initializing;
+  }
+
+  function whyOf(payload) {
+    return ((payload && payload.why) || []).filter((w) => typeof w === "string" && w.trim());
+  }
+
+  // Expand, Similar on StashDB and the shortlist → cards, best first as
+  // Curator ranks them, without what Curator found in the library or was
+  // dismissed.
+  function expandCards(output, box) {
+    const items = output && Array.isArray(output.items) ? output.items : [];
+    return items
+      .filter((item) => item && item.id && item.payload && !item.payload.curator_local_match && !item.dismissed && (item.entity_type || "scene") === "scene")
+      .map((item) => ({
+        ...normalizeBoxScene({ ...item.payload, id: item.id }, box),
+        why: whyOf(item.payload),
+        tags: (item.payload.tags || []).map((tg) => tg && tg.name).filter(Boolean).slice(0, 4),
+        details: item.payload.details || "",
+        shortlisted: !!item.shortlisted,
+        curated: true
+      }));
+  }
+
+  // A performer's picture: the most upright one.
+  function portraitImage(images) {
+    const list = (images || []).filter((i) => i && i.url);
+    if (!list.length) return null;
+    const upright = list.filter((i) => i.width && i.height && i.height > i.width);
+    return (upright[0] || list[0]).url;
+  }
+
+  // Expand's performers (and the StashDB performer search) → faces.
+  function expandPerformers(output, box) {
+    const items = output && Array.isArray(output.items) ? output.items : [];
+    return items
+      .filter((item) => item && item.id)
+      .map((item) => {
+        const p = item.payload || item;
+        return {
+          id: String(item.id),
+          name: p.name || "",
+          disambiguation: p.disambiguation || "",
+          image: portraitImage(p.images),
+          why: whyOf(p)[0] || "",
+          sceneCount: typeof p.scene_count === "number" ? p.scene_count : null,
+          url: `${box.site}/performers/${item.id}`
+        };
+      })
+      .filter((p) => p.name);
+  }
+
+  // Similar in the library → local scene ids, most similar first.
+  function similarSceneIds(output) {
+    const items = output && Array.isArray(output.items) ? output.items : [];
+    const ids = [];
+    for (const item of items) {
+      const id = item && item.entity_id != null ? String(item.entity_id) : "";
+      if (/^\d+$/.test(id) && !ids.includes(id)) ids.push(id);
+    }
+    return ids;
+  }
+
+  // Which page of a ranked list to show: the first, then on each 🎲 one of
+  // the next few (never the same twice in a row), so what comes still fits.
+  const DISCOVER_PAGES = 5;
+
+  function discoverPage(seed, roll) {
+    return roll ? 2 + ((seed + roll) % (DISCOVER_PAGES - 1)) : 1;
+  }
+
+  function seededPick(list, seed) {
+    return list && list.length ? list[seed % list.length] : null;
+  }
+
+  // Your performers with a StashDB id, to hunt for: { id (StashDB), name,
+  // image, localId }.
+  function huntTargets(performers, endpoint) {
+    const seen = new Set();
+    const out = [];
+    for (const p of performers || []) {
+      const sid = (p.stash_ids || []).find((s) => s.endpoint === endpoint);
+      if (!sid || seen.has(sid.stash_id)) continue;
+      seen.add(sid.stash_id);
+      out.push({ id: sid.stash_id, name: p.name, image: p.image_path || null, localId: String(p.id) });
+    }
+    return out;
+  }
+
+  // The front page and the Discover tab share the route; ?stashboard=discover
+  // picks the tab, so it can be linked to and Back works.
+  const TAB_PARAM = "stashboard";
+
+  function tabOf(search) {
+    return new URLSearchParams(search || "").get(TAB_PARAM) === "discover" ? "discover" : "home";
+  }
+
+  function tabSearch(search, tab) {
+    const params = new URLSearchParams(search || "");
+    if (tab === "discover") params.set(TAB_PARAM, "discover");
+    else params.delete(TAB_PARAM);
+    const text = params.toString();
+    return text ? `?${text}` : "";
+  }
+
+  /* ------------------------------------------------------------------ *
    * stasharr                                                            *
    * ------------------------------------------------------------------ */
 
@@ -760,9 +897,46 @@
       "radar.decide": "📡 On your radar since {date}, {plays} scenes watched since. A favourite?",
       "zone.library": "📚 From your library",
       "zone.discover": "🧭 Discover",
-      "zone.discover.sub": "Not in your library (yet): new and popular on the stash-boxes, and more from a performer on your radar.",
+      "zone.discover.sub": "Not in your library (yet), found by Curator on StashDB and the stash-boxes. Every 🎲 brings something new.",
       "zone.hide": "Hide",
       "zone.show": "Show",
+      "tab.home": "🏠 Home",
+      "tab.discover": "🧭 Discover",
+      "row.discover.pick": "Find of the day",
+      "row.discover.faces": "New faces",
+      "row.discover.matches": "Made for you on StashDB",
+      "row.discover.like": "More like “{name}”",
+      "row.discover.like.plain": "More like this",
+      "row.discover.fresh": "Just released",
+      "row.discover.hunt": "Performer Hunt",
+      "row.discover.shortlist": "Your shortlist",
+      "source.discover": "Curator + StashDB",
+      "discover.shuffle": "🎲 Shuffle Discover",
+      "discover.shuffle.title": "Every module draws something else",
+      "discover.reroll": "🎲 Others",
+      "discover.reroll.title": "Show others",
+      "discover.next": "↻ Next find",
+      "discover.notReady": "Curator is still building its StashDB catalogue for Discover.",
+      "discover.build": "Build it now",
+      "discover.building": "Started. This takes a few minutes; Discover fills up once it's done.",
+      "discover.like.library": "In your library",
+      "discover.like.box": "On StashDB",
+      "discover.like.none": "Nothing similar yet.",
+      "discover.hunt.search": "Search StashDB for anyone…",
+      "discover.hunt.loading": "Curator is combing through {name}'s scenes on StashDB…",
+      "discover.hunt.empty": "Nothing from {name} that you don't have.",
+      "discover.hunt.none": "Pick a performer to hunt for, or search StashDB.",
+      "discover.hunt.go": "🏹 Hunt",
+      "discover.hunt.go.title": "Show their scenes in Performer Hunt",
+      "discover.teaser": "Curator found scenes on StashDB that fit your taste.",
+      "discover.teaser.open": "Open Discover →",
+      "action.shortlist.title": "Keep on your shortlist",
+      "action.unshortlist.title": "Take off your shortlist",
+      "action.dismiss.title": "Not interested: won't be suggested again",
+      "bubble.open.title": "Show {count} unwatched",
+      "bubble.panel": "{name}: {count} unwatched",
+      "bubble.panel.all": "All of {name}'s scenes →",
+      "action.close": "Close",
       "radar.next": "🎲 Someone else",
       "radar.next.title": "Another performer from your radar ({count} on it)",
       "radar.divider": "Not in your library",
@@ -870,9 +1044,46 @@
       "radar.decide": "📡 Seit {date} auf deinem Radar, seitdem {plays} Szenen gesehen. Ein Favorit?",
       "zone.library": "📚 Aus deiner Bibliothek",
       "zone.discover": "🧭 Entdecken",
-      "zone.discover.sub": "Noch nicht in deiner Sammlung: Neues und Beliebtes von den Stash-Boxen und mehr von einem Performer auf deinem Radar.",
+      "zone.discover.sub": "Noch nicht in deiner Sammlung, gefunden von Curator auf StashDB und den Stash-Boxen. Jedes 🎲 bringt etwas Neues.",
       "zone.hide": "Einklappen",
       "zone.show": "Ausklappen",
+      "tab.home": "🏠 Start",
+      "tab.discover": "🧭 Discover",
+      "row.discover.pick": "Fund des Tages",
+      "row.discover.faces": "Neue Gesichter",
+      "row.discover.matches": "Für dich auf StashDB",
+      "row.discover.like": "Mehr wie „{name}“",
+      "row.discover.like.plain": "Mehr davon",
+      "row.discover.fresh": "Frisch erschienen",
+      "row.discover.hunt": "Performer-Jagd",
+      "row.discover.shortlist": "Deine Merkliste",
+      "source.discover": "Curator + StashDB",
+      "discover.shuffle": "🎲 Discover neu mischen",
+      "discover.shuffle.title": "Jedes Modul zieht etwas anderes",
+      "discover.reroll": "🎲 Andere",
+      "discover.reroll.title": "Andere zeigen",
+      "discover.next": "↻ Nächster Fund",
+      "discover.notReady": "Curator baut seinen StashDB-Katalog für Discover noch auf.",
+      "discover.build": "Jetzt aufbauen",
+      "discover.building": "Gestartet. Das dauert ein paar Minuten; danach füllt sich Discover.",
+      "discover.like.library": "In deiner Bibliothek",
+      "discover.like.box": "Auf StashDB",
+      "discover.like.none": "Noch nichts Ähnliches.",
+      "discover.hunt.search": "Beliebige Performer auf StashDB suchen…",
+      "discover.hunt.loading": "Curator durchkämmt die Szenen von {name} auf StashDB…",
+      "discover.hunt.empty": "Nichts von {name}, das du noch nicht hast.",
+      "discover.hunt.none": "Wähle einen Performer für die Jagd oder such auf StashDB.",
+      "discover.hunt.go": "🏹 Jagen",
+      "discover.hunt.go.title": "Zeigt ihre Szenen in der Performer-Jagd",
+      "discover.teaser": "Curator hat auf StashDB Szenen gefunden, die zu deinem Geschmack passen.",
+      "discover.teaser.open": "Discover öffnen →",
+      "action.shortlist.title": "Auf die Merkliste",
+      "action.unshortlist.title": "Von der Merkliste nehmen",
+      "action.dismiss.title": "Kein Interesse: wird nicht mehr vorgeschlagen",
+      "bubble.open.title": "{count} ungesehene zeigen",
+      "bubble.panel": "{name}: {count} ungesehen",
+      "bubble.panel.all": "Alle Szenen von {name} →",
+      "action.close": "Schließen",
       "radar.next": "🎲 Jemand anderes",
       "radar.next.title": "Ein anderer Performer von deinem Radar ({count} insgesamt)",
       "radar.divider": "Nicht in deiner Sammlung",
@@ -921,6 +1132,7 @@
       return t(lang, `row.local.${row.kind}`, { name: picked && picked.name });
     }
     if (row.source === "curator") return t(lang, `row.curator.${row.lane}`);
+    if (row.source === "discover") return t(lang, row.kind === "like" && !picked ? "row.discover.like.plain" : `row.discover.${row.kind}`, { name: picked && picked.name });
     const box = (env.boxes || []).find((b) => b.host === row.host);
     return t(lang, `row.box.${row.kind}`, { box: box ? box.name : row.host });
   }
@@ -1013,6 +1225,8 @@
     ownedMap, applyOwnership, STASHARR_ATTRIBUTE, STASHARR_HASH, downloadLink,
     RADAR_FIELD, RADAR_DECISION_PLAYS, localIsoDate, radarSince, radarDays, radarPick,
     radarDecisionDue, radarLocalQuery, radarBoxInput, radarBox, curatorHuntCards,
+    DISCOVER_ROWS, stashdbBox, expandReady, expandCards, portraitImage, expandPerformers, similarSceneIds,
+    DISCOVER_PAGES, discoverPage, seededPick, huntTargets, TAB_PARAM, tabOf, tabSearch,
     CACHE_PREFIX, cacheGet, cacheSet, cacheClear,
     oldCuratorEnabled, takeOverCuratorSettings, curatorSceneIds, orderByIds,
     STRINGS, langOf, t, rowTitle, formatDuration, sceneTitle, sceneProgress, minutesLeft, daysAgo, whenText, stars,

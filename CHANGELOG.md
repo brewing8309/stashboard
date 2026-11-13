@@ -1,5 +1,29 @@
 # Changelog
 
+## 3.1.0 — 2026-11-13
+
+### Added
+
+- **🧭 Discover is a tab of its own**, with its own address (`/?stashboard=discover`). The start
+  page ends with a window into it. New in Discover, from Curator's Find: **Find of the day**,
+  **New faces**, **Made for you on StashDB**, **More like …** (Similar, in your library and on
+  StashDB), **Just released**, **Performer Hunt** (your performers or anyone found on StashDB) and
+  **Your shortlist**. **📌** keeps a scene on the shortlist, **✕** says not interested; **🎲**
+  shows others, **🎲 Shuffle Discover** has every module draw again. While Curator still builds its
+  StashDB catalogue, Discover says so and can start that.
+- **Your performers**: clicking one with unwatched scenes opens them right below the faces.
+- Hovered a moment, scene pictures and the spotlight pop out a little bigger while the preview
+  plays.
+
+### Changed
+
+- **Curator: your top 5 today** has livelier numbers: gold, silver, bronze, and a crown for #1.
+- Discover can't be folded away any more; it's a tab now.
+
+### Fixed
+
+- Stash's own front page rows no longer flash up before the dashboard has loaded.
+
 ## 3.0.0 — 2026-11-13
 
 ### Changed

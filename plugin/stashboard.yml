@@ -1,6 +1,6 @@
 name: Stashboard
 description: A dashboard for Stash's front page — up next, your performers, the day's tag, trending on StashDB, new from your favourites — with Stash Curator's recommendations built in.
-version: 3.0.0
+version: 3.1.0
 url: https://github.com/brewing8309/stashboard
 
 ui:
