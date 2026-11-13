@@ -184,6 +184,7 @@
       cacheHours: clampNumber(m.cacheHours, 6, 0, 168),
       radarDecisionDays: Math.round(clampNumber(m.radarDecisionDays, 30, 1, 365)),
       itemsPerRow: Math.round(clampNumber(m.itemsPerRow, 12, 4, 40)),
+      watchedPercent: Math.round(clampNumber(m.watchedPercent, 80, 0, 98)),
       layout
     };
   }
@@ -226,6 +227,18 @@
    * ------------------------------------------------------------------ */
 
   const REDISCOVER_DAYS = 90;
+
+  // Stash only forgets where you stopped past 98% (end credits and all), so
+  // "Continue watching" fills up with scenes you're done with. Scenes past
+  // `percent` (0 = off) count as watched; the row asks for this many times
+  // its size to still fill up after leaving those out.
+  const CONTINUE_OVERFETCH = 2;
+
+  function pastWatched(scene, percent) {
+    if (!percent || !scene) return false;
+    const duration = scene.files && scene.files[0] && scene.files[0].duration;
+    return duration > 0 && scene.resume_time > 0 && scene.resume_time / duration >= percent / 100;
+  }
 
   // The FindScenes variables ({ filter, scene_filter }) for a local row.
   // tag_of_the_day and studio_spotlight need the picked tag/studio id first
@@ -761,7 +774,7 @@
     LOCAL_ROWS, CURATOR_LANES, BOX_ROWS, DEFAULT_ON, availableRows, parseRowId, defaultLayout,
     resolveLayout, visibleRows, readSettings, serializeLayout,
     dayKey, hashSeed, rowSeed, isoDate,
-    REDISCOVER_DAYS, localRowQuery, PICK_MIN_SCENES, pickQuery, localRowLink,
+    REDISCOVER_DAYS, CONTINUE_OVERFETCH, pastWatched, localRowQuery, PICK_MIN_SCENES, pickQuery, localRowLink,
     BOX_SCENES_QUERY, BOX_PERFORMERS_MAX, boxRowInput, followedPerformerIds, pickImage, normalizeBoxScene,
     ownedMap, applyOwnership, STASHARR_ATTRIBUTE, STASHARR_HASH, downloadLink,
     RADAR_FIELD, RADAR_ROWS, RADAR_DECISION_PLAYS, localIsoDate, radarSince, radarDays, radarPick,

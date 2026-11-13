@@ -164,10 +164,23 @@
       picked = (dig(await stashQuery(pick.query, pick.variables), pick.path) || [])[0] || null;
       if (!picked) return { scenes: [], picked };
     }
-    const variables = Core.localRowQuery(row.kind, { count: ctx.count, seed: ctx.seed, now: ctx.now, pickedId: picked && picked.id });
+    const continuing = row.kind === "continue" && ctx.watchedPercent > 0;
+    const count = continuing ? ctx.count * Core.CONTINUE_OVERFETCH : ctx.count;
+    const variables = Core.localRowQuery(row.kind, { count, seed: ctx.seed, now: ctx.now, pickedId: picked && picked.id });
     if (!variables) return { scenes: [], picked };
     const result = await findSlimScenes(variables);
-    return { scenes: result.scenes, picked };
+    if (!continuing) return { scenes: result.scenes, picked };
+    const done = result.scenes.filter((s) => Core.pastWatched(s, ctx.watchedPercent));
+    done.forEach(markWatched);
+    return { scenes: result.scenes.filter((s) => !done.includes(s)).slice(0, ctx.count), picked };
+  }
+
+  // Watched far enough: forget where playback stopped, and record a play
+  // unless Stash already counted one.
+  function markWatched(scene) {
+    const query = scene.play_count > 0 ? RESET_RESUME_MUTATION : WATCHED_MUTATION;
+    stashQuery(query, { id: scene.id })
+      .catch((e) => console.warn(LOG, "Couldn't mark the scene as watched:", e));
   }
 
   async function loadCuratorRow(lane, ctx) {
@@ -522,6 +535,10 @@
   sceneAddPlay(id: $id) { count }
 }`;
 
+  const RESET_RESUME_MUTATION = `mutation StashboardResetResume($id: ID!) {
+  sceneResetActivity(id: $id, reset_resume: true, reset_duration: false)
+}`;
+
   function WatchedButton({ scene, lang, onDone }) {
     const [state, setState] = useState({ busy: false, error: null });
     const mark = async () => {
@@ -822,7 +839,8 @@
       refresh,
       count: settings.itemsPerRow,
       hideOwned: settings.hideOwned,
-      cacheHours: settings.cacheHours
+      cacheHours: settings.cacheHours,
+      watchedPercent: settings.watchedPercent
     };
 
     const newMix = () => {

@@ -74,7 +74,7 @@ test("rows of a missing source stay in the saved layout but aren't shown, and re
 });
 
 test("settings fall back to defaults and clamp numbers", () => {
-  assert.deepEqual(c.readSettings(undefined), { hideNativeRows: false, disableExternal: false, hideOwned: false, cacheHours: 6, radarDecisionDays: 30, itemsPerRow: 12, layout: null });
+  assert.deepEqual(c.readSettings(undefined), { hideNativeRows: false, disableExternal: false, hideOwned: false, cacheHours: 6, radarDecisionDays: 30, itemsPerRow: 12, watchedPercent: 80, layout: null });
   assert.equal(c.readSettings({ radarDecisionDays: 0 }).radarDecisionDays, 1);
   const s = c.readSettings({ hideOwned: true, cacheHours: 500, itemsPerRow: "2", layout: "[{\"id\":\"spotlight\",\"on\":true}]" });
   assert.equal(s.hideOwned, true);
@@ -334,4 +334,14 @@ test("followed performers: favourites, then the radar, then the rest", () => {
 test("radar row titles", () => {
   assert.equal(c.rowTitle("de", "radar", env(), { name: "Jane Doe" }), "Mehr von Jane Doe");
   assert.equal(c.rowTitle("en", "radar", env(), null), "More from performers on your radar");
+});
+
+test("pastWatched: resume point past the watched percentage", () => {
+  const scene = (resume, duration) => ({ resume_time: resume, files: duration == null ? [] : [{ duration }] });
+  assert.equal(c.pastWatched(scene(800, 1000), 80), true);
+  assert.equal(c.pastWatched(scene(799, 1000), 80), false);
+  assert.equal(c.pastWatched(scene(900, 1000), 0), false);
+  assert.equal(c.pastWatched(scene(0, 1000), 80), false);
+  assert.equal(c.pastWatched(scene(900, null), 80), false);
+  assert.equal(c.pastWatched(scene(900, 0), 80), false);
 });

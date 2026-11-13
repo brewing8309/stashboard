@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0 — 2026-11-13
+
+### Added
+
+- **Watched from 80%.** Stash only forgets where you stopped once you're past 98%, so scenes you
+  stopped during the last minutes stayed in "Continue watching". Scenes stopped past 80% (new
+  setting **Watched from (%)**, 0 turns it off) now leave the row and count as watched: Stashboard
+  resets their resume time and records a play unless Stash already counted one.
+
 ## 1.2.0 — 2026-10-27
 
 ### Added

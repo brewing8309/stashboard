@@ -46,7 +46,7 @@ dashboard unless you switch them off.
 |---|---|---|
 | **Spotlight** | Curator, or your library | One big pick: Curator's best bet, else one of your top rated, else a random scene. **▶ Play** starts it. |
 | **More from …** | Library + StashDB | One row per performer on your [📡 radar](#-on-your-radar): their unwatched scenes, then StashDB scenes you're missing. |
-| **Continue watching** | Library | Scenes you started and didn't finish. **✓ Watched** under a card takes it off the row and counts a play. |
+| **Continue watching** | Library | Scenes you started and didn't finish. Past 80% (setting **Watched from**) a scene counts as watched and leaves the row by itself; **✓ Watched** under a card does the same for the others. |
 | **Recently added** | Library | The newest scenes in Stash. |
 | **Unwatched with your favourites** | Library | Scenes with a favourite performer you haven't played or started. |
 | **Tag of the day** · **Studio spotlight** | Library | One tag and one studio with at least four scenes, a different one every day. |
@@ -136,6 +136,7 @@ More in **Settings → Plugins → Stashboard**:
 | **Hide stash-box scenes you already have** | off | Leave owned scenes out of the StashDB rows instead of marking them. |
 | **Don't contact stash-boxes** | off | Library and Curator rows only; StashDB is never asked for anything. |
 | **Scenes per row** | 12 | 4 to 40. |
+| **Watched from (%)** | 80 | Scenes stopped past this point leave Continue watching and count as watched. 0 turns it off. |
 | **Stash-box cache (hours)** | 6 | How long StashDB rows are kept before asking again; 0 turns the cache off. |
 | **Radar decision after (days)** | 30 | When a radar row asks "favourite or off the radar?" (or after three of their scenes watched). |
 

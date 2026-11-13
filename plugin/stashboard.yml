@@ -1,6 +1,6 @@
 name: Stashboard
 description: A dashboard for Stash's front page — continue watching, the day's tag, trending on StashDB, new from your favourites, and Curator's picks when it's installed.
-version: 1.2.0
+version: 1.3.0
 url: https://github.com/brewing8309/stashboard
 
 ui:
@@ -34,6 +34,10 @@ settings:
   itemsPerRow:
     displayName: Scenes per row
     description: How many scenes each row shows, 4 to 40. Default 12.
+    type: NUMBER
+  watchedPercent:
+    displayName: Watched from (%)
+    description: Scenes you stopped past this point leave "Continue watching" and count as watched (Stash itself only does that past 98%). 0 to 98, default 80; 0 turns it off.
     type: NUMBER
   radarDecisionDays:
     displayName: Radar decision after (days)
