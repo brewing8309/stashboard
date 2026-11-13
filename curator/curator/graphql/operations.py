@@ -1,0 +1,238 @@
+"""Named read-only GraphQL operations used by Curator."""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+
+from curator.graphql.adapters import SourceEntity
+
+
+def _updated_at(item: SourceEntity) -> str | None:
+    return item.updated_at
+
+
+def _last_played_at(item: SourceEntity) -> str | None:
+    """Stash leaves updated_at alone when it records a play, so plays need their own mark."""
+    history = getattr(item, "play_history_ms", ())
+    if not history:
+        return None
+    return datetime.fromtimestamp(max(history) / 1000, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _played_since(watermark: str | None) -> dict[str, object]:
+    criteria: dict[str, object] = {"play_count": {"value": 0, "modifier": "GREATER_THAN"}}
+    if watermark:
+        criteria["last_played_at"] = {"value": watermark, "modifier": "GREATER_THAN"}
+    return {"sceneFilter": criteria}
+
+
+def _ids_document(name: str, root_key: str, items_key: str) -> str:
+    """An id-only sweep, sorted by id so appends never shift an unread page."""
+    return f"""
+query {name}($page: Int!, $perPage: Int!) {{
+  {root_key}(filter: {{page: $page, per_page: $perPage, sort: "id", direction: ASC}}) {{
+    count
+    {items_key} {{ id }}
+  }}
+}}
+"""
+
+
+@dataclass(frozen=True)
+class EntityOperation:
+    """A paginated source entity query and its response keys."""
+
+    entity_type: str
+    name: str
+    document: str
+    root_key: str
+    items_key: str
+    sort: str = "updated_at"
+    watermark_of: Callable[[SourceEntity], str | None] = field(default=_updated_at)
+    variables_for: Callable[[str | None], dict[str, object]] | None = None
+    incremental_only: bool = False
+    ids_document: str | None = None
+
+
+CAPABILITIES = """
+query CuratorCapabilities {
+  version { version }
+  queryType: __type(name: "Query") { fields { name } }
+  sceneType: __type(name: "Scene") { fields { name } }
+  performerType: __type(name: "Performer") { fields { name } }
+  tagType: __type(name: "Tag") { fields { name } }
+  sceneFilterType: __type(name: "SceneFilterType") { inputFields { name } }
+}
+"""
+
+TAGS = EntityOperation(
+    "tag",
+    "CuratorTags",
+    """
+query CuratorTags($page: Int!, $perPage: Int!, $sort: String!, $direction: SortDirectionEnum!) {
+  findTags(filter: {page: $page, per_page: $perPage, sort: $sort, direction: $direction}) {
+    count
+    tags {
+      id name updated_at stash_ids { endpoint stash_id }
+      parents { id name updated_at }
+    }
+  }
+}
+""",
+    "findTags",
+    "tags",
+    ids_document=_ids_document("CuratorTagIds", "findTags", "tags"),
+)
+
+STUDIOS = EntityOperation(
+    "studio",
+    "CuratorStudios",
+    """
+query CuratorStudios($page: Int!, $perPage: Int!, $sort: String!, $direction: SortDirectionEnum!) {
+  findStudios(filter: {page: $page, per_page: $perPage, sort: $sort, direction: $direction}) {
+    count
+    studios {
+      id name favorite rating100 updated_at
+      parent_studio { id name updated_at }
+    }
+  }
+}
+""",
+    "findStudios",
+    "studios",
+    ids_document=_ids_document("CuratorStudioIds", "findStudios", "studios"),
+)
+
+PERFORMERS = EntityOperation(
+    "performer",
+    "CuratorPerformers",
+    """
+query CuratorPerformers(
+  $page: Int!, $perPage: Int!, $sort: String!, $direction: SortDirectionEnum!
+) {
+  findPerformers(filter: {page: $page, per_page: $perPage, sort: $sort, direction: $direction}) {
+    count
+    performers {
+      id name gender favorite rating100 birthdate ethnicity country eye_color hair_color
+      height_cm weight measurements fake_tits tattoos piercings updated_at
+      tags { id name updated_at }
+    }
+  }
+}
+""",
+    "findPerformers",
+    "performers",
+    ids_document=_ids_document("CuratorPerformerIds", "findPerformers", "performers"),
+)
+
+SCENE_FIELDS = """
+      id title details date rating100 created_at updated_at organized
+      play_count play_duration play_history o_history
+      studio { id name favorite rating100 updated_at parent_studio { id name updated_at } }
+      tags { id name updated_at }
+      performers { id name updated_at }
+      stash_ids { endpoint stash_id }
+      files { id duration fingerprints { type value } }
+      scene_markers {
+        id seconds end_seconds
+        primary_tag { id name updated_at }
+        tags { id name updated_at }
+      }
+"""
+
+SCENES = EntityOperation(
+    "scene",
+    "CuratorScenes",
+    f"""
+query CuratorScenes($page: Int!, $perPage: Int!, $sort: String!, $direction: SortDirectionEnum!) {{
+  findScenes(filter: {{page: $page, per_page: $perPage, sort: $sort, direction: $direction}}) {{
+    count
+    scenes {{{SCENE_FIELDS}}}
+  }}
+}}
+""",
+    "findScenes",
+    "scenes",
+    ids_document=_ids_document("CuratorSceneIds", "findScenes", "scenes"),
+)
+
+# Stash does not touch scenes.updated_at when it records a play, so the scene pass above can
+# never observe one. This pass walks played scenes on their own last_played_at watermark.
+SCENE_PLAYS = EntityOperation(
+    "scene_play",
+    "CuratorScenePlays",
+    f"""
+query CuratorScenePlays(
+  $page: Int!, $perPage: Int!, $sort: String!, $direction: SortDirectionEnum!,
+  $sceneFilter: SceneFilterType
+) {{
+  findScenes(
+    filter: {{page: $page, per_page: $perPage, sort: $sort, direction: $direction}}
+    scene_filter: $sceneFilter
+  ) {{
+    count
+    scenes {{{SCENE_FIELDS}}}
+  }}
+}}
+""",
+    "findScenes",
+    "scenes",
+    sort="last_played_at",
+    watermark_of=_last_played_at,
+    variables_for=_played_since,
+    incremental_only=True,
+)
+
+ENTITY_OPERATIONS = (TAGS, STUDIOS, PERFORMERS, SCENES, SCENE_PLAYS)
+
+# Single-entity lookups for hook-triggered targeted syncs. They mirror the field lists
+# of the list operations above so the same adapters apply unchanged.
+FIND_SCENE = f"""
+query CuratorFindScene($id: ID!) {{
+  findScene(id: $id) {{{SCENE_FIELDS}}}
+}}
+"""
+
+FIND_PERFORMER = """
+query CuratorFindPerformer($id: ID!) {
+  findPerformer(id: $id) {
+    id name gender favorite rating100 birthdate ethnicity country eye_color hair_color
+    height_cm weight measurements fake_tits tattoos piercings updated_at
+    tags { id name updated_at }
+  }
+}
+"""
+
+FIND_TAG = """
+query CuratorFindTag($id: ID!) {
+  findTag(id: $id) {
+    id name updated_at stash_ids { endpoint stash_id }
+    parents { id name updated_at }
+  }
+}
+"""
+
+FIND_STUDIO = """
+query CuratorFindStudio($id: ID!) {
+  findStudio(id: $id) {
+    id name favorite rating100 updated_at
+    parent_studio { id name updated_at }
+  }
+}
+"""
+
+ALL_DOCUMENTS = (
+    CAPABILITIES,
+    *(operation.document for operation in ENTITY_OPERATIONS),
+    *(
+        operation.ids_document
+        for operation in ENTITY_OPERATIONS
+        if operation.ids_document is not None
+    ),
+    FIND_SCENE,
+    FIND_PERFORMER,
+    FIND_TAG,
+    FIND_STUDIO,
+)

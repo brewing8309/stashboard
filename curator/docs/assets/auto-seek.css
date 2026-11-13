@@ -1,0 +1,106 @@
+/* Auto Seek's page: Curator's site, in the player pill's amber. */
+.as {
+  --amber: #ffb81f;
+  --amber-2: #ff8a1f;
+  --ember: #ff5c39;
+  --glow: #ffb81f33;
+  --ink: #1b1208;
+}
+.as .eyebrow { color: var(--amber); }
+.as .button { background: linear-gradient(120deg, var(--amber), var(--amber-2) 60%, var(--ember)); color: var(--ink); }
+.as .button:hover { color: var(--ink); filter: brightness(1.08); }
+.as .button.secondary { background: transparent; border-color: #5a4630; color: var(--text); }
+.as a:not(.button) { color: #ffc95c; }
+.as a:not(.button):hover { color: #ffe0a0; }
+.as-glow { background: radial-gradient(circle at 70% 0, #ff9a1f22 0, transparent 30rem); inset: 0 0 auto; height: 44rem; pointer-events: none; position: absolute; z-index: -1; }
+
+/* Hero */
+.as-hero { align-items: center; display: grid; gap: clamp(2rem, 5vw, 4rem); grid-template-columns: .95fr 1.05fr; padding-block: 2rem 1rem; position: relative; }
+.as-hero h1 { font-size: clamp(2.6rem, 6.5vw, 5.2rem); max-width: 13ch; }
+.as-hero h1 span { background: linear-gradient(100deg, var(--amber), var(--ember)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.as-badge { align-items: center; border: 1px solid #5a4630; border-radius: 999px; color: #ffd27a; display: inline-flex; font-size: .82rem; font-weight: 700; gap: .45rem; padding: .25rem .7rem .25rem .3rem; }
+.as-badge img { border-radius: 7px; width: 1.6rem; }
+
+/* The demo player, matching the plugin: video, controls, scan strip. */
+.as-player { background: #000; border: 1px solid #3a3022; border-radius: 18px; box-shadow: 0 30px 80px #0009, 0 0 0 1px #ffb81f10, 0 0 90px -20px var(--glow); overflow: hidden; position: relative; user-select: none; }
+.as-screen { aspect-ratio: 16 / 9; background: #000; overflow: hidden; position: relative; }
+.as-screen video { display: block; height: 100%; inset: 0; object-fit: cover; position: absolute; width: 100%; }
+.as-screen video.action { opacity: 0; }
+.as-player.is-action video.action { opacity: 1; }
+.as-toast { background: #000c; border-radius: 8px; color: #fff; font-size: clamp(.7rem, 1.6vw, .85rem); opacity: 0; padding: .4rem .7rem; position: absolute; right: 1rem; top: .8rem; transform: translateY(-6px); transition: opacity .3s, transform .3s; }
+.as-toast b { color: var(--amber); }
+.as-player.is-toast .as-toast { opacity: 1; transform: none; }
+.as-pill { background: #0009; border: 2px solid #ffffff70; border-radius: 6px; bottom: 1rem; color: #ffffffd0; font-size: clamp(.8rem, 2vw, 1.05rem); font-weight: 700; overflow: hidden; padding: .45rem .9rem; position: absolute; right: 1rem; transition: border-color .3s, color .3s, opacity .3s, transform .15s; }
+.as-pill::before { animation: as-sweep 1.6s ease-in-out infinite; background: linear-gradient(90deg, transparent, #ffffff4d, transparent); content: ""; inset: 0; position: absolute; width: 40%; }
+.as-pill .arrow { display: inline-block; margin-left: .25rem; opacity: 0; transition: opacity .3s; }
+.as-player.is-ready .as-pill { border-color: var(--amber); color: #fff; }
+.as-player.is-ready .as-pill::before { display: none; }
+.as-player.is-ready .as-pill .arrow { opacity: 1; }
+.as-player.is-tap .as-pill { background: #fff; color: #000; transform: scale(.94); }
+.as-player.is-gone .as-pill { opacity: 0; }
+@keyframes as-sweep { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+
+.as-controls { background: #0b0b0b; padding: .55rem 1rem .5rem; }
+.as-track { background: #ffffff2e; border-radius: 3px; height: 4px; position: relative; }
+.as-progress { background: #fff; border-radius: 3px; height: 100%; left: 0; position: absolute; top: 0; width: 0; }
+.as-time { color: #ffffffb0; display: flex; font-size: .75rem; font-variant-numeric: tabular-nums; justify-content: space-between; margin-top: .3rem; }
+
+/* The scan strip: the same look as in the plugin. */
+.as-strip { background: #000; border-top: 1px solid #1d1d1d; padding: .4rem 1rem .35rem; position: relative; }
+.as-strip-label { align-items: center; background: linear-gradient(90deg, #000 75%, transparent); color: #ffffffb8; display: flex; font-size: .78rem; gap: .45rem; left: 0; padding: 0 1.8rem 0 .5rem; position: absolute; top: 50%; transform: translateY(-50%); white-space: nowrap; z-index: 1; }
+.as-strip-label img { height: 1.5rem; width: 1.5rem; }
+.as-strip-close { color: #ffffff8c; font-size: 1rem; position: absolute; right: .5rem; top: 50%; transform: translateY(-50%); z-index: 2; }
+.as-strip-bars { height: 1.7rem; position: relative; }
+.as-strip-bars i { animation: as-grow .35s ease-out both; background: #6b7280; border-radius: 2px 2px 0 0; bottom: 0; margin-left: -2px; position: absolute; transform-origin: bottom; width: 4px; }
+.as-strip-bars i.hit { background: linear-gradient(#ffc93c, #ff8a1f); }
+@keyframes as-grow { from { opacity: 0; transform: scaleY(0); } to { opacity: 1; transform: scaleY(1); } }
+.as-strip-line { border-top: 1px dashed #ffffff2e; left: 0; position: absolute; right: 0; }
+.as-strip-flag { z-index: 3; background: linear-gradient(#fff3c4, #ffb81f 35%, #ff8a1f); border-radius: 3px; bottom: -4px; box-shadow: 0 0 10px 2px #ffb81fd9; margin-left: -3px; opacity: 0; position: absolute; top: -5px; width: 6px; }
+.as-strip.is-found .as-strip-flag { animation: as-flash 1.2s ease-out; opacity: 1; }
+.as-strip.is-found { animation: as-glow 1.2s ease-out; }
+@keyframes as-flash { 0% { box-shadow: 0 0 0 0 #ffb81f00; transform: scaleY(.2); } 25% { box-shadow: 0 0 18px 6px #ffd25af2; transform: scaleY(1.15); } 100% { box-shadow: 0 0 10px 2px #ffb81fd9; transform: scaleY(1); } }
+@keyframes as-glow { 0% { background: #000; } 20% { background: #2a1a02; } 100% { background: #000; } }
+.as-strip.is-busy::after { animation: as-sweep 1.6s ease-in-out infinite; background: linear-gradient(90deg, transparent, #ffffff0f, transparent); content: ""; inset: 0; pointer-events: none; position: absolute; width: 30%; }
+.as-player:not(.is-ready) .as-strip-flag { opacity: 0; }
+.as-caption { color: var(--muted); font-size: .9rem; margin: .7rem .2rem 0; }
+
+/* How it works */
+.as-steps { counter-reset: step; display: grid; gap: 1rem; grid-template-columns: repeat(3, 1fr); }
+.as-step { background: linear-gradient(160deg, #1a1710, var(--surface) 45%); border: 1px solid #3a3022; border-radius: var(--radius); padding: 1.25rem; }
+.as-step::before { color: var(--amber); content: "0" counter(step); counter-increment: step; font-size: .8rem; font-weight: 800; letter-spacing: .14em; }
+.as-step h3 { margin: .3rem 0 .4rem; }
+.as-step p { color: var(--muted); margin: 0; }
+.as-step svg { display: block; height: 3.2rem; margin: .9rem 0; width: 100%; }
+
+/* Feature cards */
+.as-features { display: grid; gap: 1rem; grid-template-columns: repeat(3, 1fr); }
+.as-feature { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.2rem 1.25rem; transition: border-color .2s, transform .2s; }
+.as-feature:hover { border-color: #5a4630; transform: translateY(-2px); }
+.as-feature .icon { align-items: center; background: #ffb81f1a; border-radius: 10px; color: var(--amber); display: inline-flex; height: 2.4rem; justify-content: center; width: 2.4rem; }
+.as-feature .icon svg { height: 1.3rem; width: 1.3rem; }
+.as-feature h3 { margin: .8rem 0 .3rem; }
+.as-feature p { color: var(--muted); margin: 0; }
+
+/* Install */
+.as-install { background: linear-gradient(140deg, #1d170c, var(--surface) 55%); border: 1px solid #3a3022; border-radius: var(--radius); margin: 3rem 0; padding: clamp(1.2rem, 4vw, 2.2rem); }
+.as-install h2 { margin-top: 0; }
+.as-install ol { display: grid; gap: .9rem; list-style: none; margin: 1.2rem 0 0; padding: 0; }
+.as-install li { display: grid; gap: .9rem; grid-template-columns: 2rem 1fr; max-width: none; }
+.as-install li > div { min-width: 0; }
+.as-install li > span { align-items: center; background: var(--amber); border-radius: 50%; color: var(--ink); display: flex; font-weight: 800; height: 2rem; justify-content: center; }
+.as-install pre { margin: .5rem 0 0; }
+.as-copy { background: #2a2214; border: 1px solid #5a4630; border-radius: 7px; color: #ffd27a; cursor: pointer; font: inherit; font-size: .8rem; margin-left: .5rem; padding: .15rem .5rem; }
+
+/* Honest corner */
+.as-misses { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.2rem 1.4rem; }
+.as-misses p, .as-misses li { color: var(--muted); }
+.as-misses p:first-child { margin-top: 0; }
+.as-misses p:last-child { margin-bottom: 0; }
+
+@media (max-width: 900px) {
+  .as-hero { grid-template-columns: 1fr; }
+  .as-steps, .as-features, }
+
+@media (prefers-reduced-motion: reduce) {
+  .as-pill::before, .as-strip-bars i, .as-strip.is-found, .as-strip.is-found .as-strip-flag, .as-strip.is-busy::after { animation: none; }
+}

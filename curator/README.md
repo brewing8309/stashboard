@@ -1,0 +1,133 @@
+<p align="center">
+  <img src="docs/assets/stash-curator.svg" alt="Stash Curator compass" width="112">
+</p>
+<h1 align="center">Stash Curator</h1>
+<p align="center"><strong>Rediscover scenes in your Stash library with recommendations that learn from feedback.</strong></p>
+
+Stash Curator uses library metadata, viewing history, and feedback to recommend
+scenes you already have. Open **Why this?** to see why a scene appeared and correct
+the model when it gets something wrong. Connect [StashDB](https://stashdb.org)
+for optional external metadata leads scored against your local taste model.
+
+[Install](#install) · [Watch the video tour](https://mrx-31415.github.io/stash-curator/curator/#tour)
+
+<details open>
+  <summary>Animated tour (show or hide)</summary>
+  <p align="center">
+    <img src="docs/assets/showcase-tour.gif" alt="Stash Curator tour: the For You row on Stash's home page, For You recommendations with Why this? and moving previews, a Roulette spin landing in Stash's player, Similar scenes in Find, and a Tag question in Curate" width="760">
+  </p>
+</details>
+
+<p align="center">The animated tour uses fictional metadata and <a href="https://mrx-31415.github.io/stash-curator/curator/#tour">credited Blender film clips</a>; no personal library appears. <a href="https://mrx-31415.github.io/stash-curator/curator/#tour">Watch with playback controls</a>.</p>
+
+## Install
+
+Requires **Stash v0.31** and a `python` executable for the plugin launcher.
+Curator ships compiled core binaries for supported platforms. StashDB is optional.
+
+1. In Stash, open **Settings → Plugins → Available Plugins** and add
+   `https://mrx-31415.github.io/stash-curator/index.yml` as a plugin source.
+2. Install **Stash Curator** and reload plugins.
+3. Open the compass in Stash's navigation and select **Sync and build recommendations**
+   in the setup checklist to build your first model. You can also start it from
+   **Manage → Tasks**.
+
+The first build can take several minutes on a large library. If you use Docker,
+Python and Curator's data paths must be available inside the Stash container. See
+[Getting started](docs/getting-started.md) for supported platforms, storage setup,
+and troubleshooting.
+
+Once the model is ready, start with **Recommendations → For You**. Open **Why this?**
+to inspect a suggestion, and use thumbs up/down or **Curate → Tag questions** to teach
+Curator your preferences. Feedback affects rankings after a model update.
+
+## New: Auto Seek
+
+<p align="center">
+  <a href="https://mrx-31415.github.io/stash-curator/auto-seek/"><img src="docs/assets/auto-seek-demo.gif" alt="Auto Seek on the Stash player: while the intro plays, the strip under the player fills with the frames the server scored, grey before the action and amber after; it finds the start and Skip intro jumps there" width="640"></a>
+</p>
+<p align="center">Demo footage from <a href="https://peach.blender.org">Big Buck Bunny</a> (CC BY 3.0, © Blender Foundation), shortened.</p>
+
+**Skip the intro. Every scene.** Auto Seek is a separate plugin from the same plugin
+source. It finds where the action starts in each scene and jumps straight there: tap
+**Skip intro** on the player, or let it skip on its own. A small image model works it
+out on your Stash server in a few seconds when you open a scene, or ahead of time in
+the background if you like, and no frames leave your server. When it picks the wrong
+spot, a flag on the player fixes that scene for good.
+
+[See it in action](https://mrx-31415.github.io/stash-curator/auto-seek/) ·
+[Guide](docs/auto-seek-guide.md) ·
+[Source](https://github.com/mrx-31415/stash-auto-seek)
+
+## Incognito
+
+**Watch without a trace.** Incognito is a small plugin from the same plugin source. It
+adds a switch to Stash's navbar. While it is on, this browser records no plays: Stash
+saves no resume point, play count or history, and Curator learns nothing from what
+you watch. Curator is optional. [Details](docs/privacy.md#pausing-and-forgetting-viewing) ·
+[Source](https://github.com/mrx-31415/stash-incognito)
+
+## Explore Curator
+
+### Recommendations
+
+Browse seven lanes of scenes from your library: For You, Best Bets, New Arrivals,
+Revisit, Stretch, Blind Spots, and Dormant. Each offers a different way to find something
+to watch.
+[Learn how to choose a lane](docs/using-curator.md#choose-a-lane).
+
+Lanes also appear as rows on Stash's home page and as a **Curator Lane** filter on
+Stash's scene list. **Play lane** turns a lane into a continuous playlist, and
+**Roulette** spins a wheel of the lane's picks and plays the winner.
+[Play a lane](docs/using-curator.md#play-a-lane) ·
+[Roulette](docs/using-curator.md#roulette).
+
+### Find
+
+Find opens on Expand. After you connect StashDB and refresh its candidate cache,
+Expand ranks recent external leads against your taste. Similar finds related scenes
+or performers in your library or on StashDB; Performer Hunt follows one performer's
+catalog. An external result does not mean you have the scene.
+
+<p align="center">
+  <img src="docs/assets/showcase-find-poster.jpg" alt="Find's Similar view comparing a library scene with related scene cards" width="760">
+</p>
+
+[Learn how to use Find](docs/using-curator.md#find).
+
+### Curate
+
+Answer a few Tag questions, tell Curator what makes your hits work in Why these?,
+rate tags in Tag sentiment, or give direct feedback on a scene to help Curator learn.
+Open **Why this?** on a result to inspect its reasons. After a model build, Impact
+shows what your feedback changed.
+
+[Learn how to use Curate](docs/using-curator.md#curate).
+
+Each recommendation distinguishes **Appeal** (your longer-term interest) from
+**Current Fit** (whether it suits you now). Read [how recommendations work](docs/recommendations.md)
+for the scoring details.
+
+## Safety and privacy
+
+- Your history, feedback, and model stay in a local SQLite database you control.
+- StashDB discovery is optional and read-only. StashDB never receives your model.
+- Curator never deletes media. An explicit Prune action only adds or removes a tag.
+- Whisparr receives an item only when you choose **Send to Whisparr**.
+
+See [Privacy](docs/privacy.md) for details.
+
+## Status
+
+Stash Curator is **preview software (pre-1.0)**. Automatic background updates and
+scheduled tasks are optional; see [Using Curator](docs/using-curator.md).
+Developers can start with [Contributing](docs/contributing.md).
+
+## Project provenance
+
+The idea was inspired by [Restash by Espionage9248](https://github.com/Espionage9248/Restash/tree/main/restash).
+
+Stash Curator is primarily generated with AI coding agents under human direction,
+review, and testing.
+
+Licensed under [AGPL-3.0](LICENSE).

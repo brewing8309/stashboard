@@ -1,0 +1,392 @@
+"""Version and resolve cached external tag taxonomy data."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+from collections.abc import Iterable
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from urllib.parse import urlparse
+
+from curator.storage import transaction
+from curator.taxonomy.stashdb import TaxonomyData
+
+_CATEGORY_ROLE_PATH = Path(__file__).with_name("stashdb_category_roles.json")
+CATEGORY_ROLE_FINGERPRINT = hashlib.sha256(_CATEGORY_ROLE_PATH.read_bytes()).hexdigest()
+
+
+def _load_category_roles() -> tuple[str, dict[str, str]]:
+    payload = json.loads(_CATEGORY_ROLE_PATH.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise RuntimeError("unsupported StashDB category-role resource")
+    default = payload.get("default_role")
+    categories = payload.get("categories")
+    if default not in {"content", "performer_attribute"} or not isinstance(categories, list):
+        raise RuntimeError("invalid StashDB category-role resource")
+    roles: dict[str, str] = {}
+    for item in categories:
+        if not isinstance(item, dict):
+            raise RuntimeError("invalid StashDB category-role entry")
+        category_id = item.get("id")
+        role = item.get("role")
+        if not isinstance(category_id, str) or role not in {"content", "performer_attribute"}:
+            raise RuntimeError("invalid StashDB category-role entry")
+        roles[category_id] = role
+    return default, roles
+
+
+DEFAULT_CATEGORY_ROLE, STASHDB_CATEGORY_ROLES = _load_category_roles()
+ACTIVE_STASHBOX_ENDPOINT = "https://stashdb.org/graphql"
+
+# Which StashDB tags describe the people in a scene rather than the scene. It is
+# a separate resource from the category roles on purpose: it only labels tags for
+# display and never feeds tag roles, features or CATEGORY_ROLE_FINGERPRINT.
+_PERFORMER_TAG_PATH = Path(__file__).with_name("stashdb_performer_tags.json")
+
+
+def _load_performer_tags() -> tuple[str, frozenset[str], frozenset[str]]:
+    payload = json.loads(_PERFORMER_TAG_PATH.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise RuntimeError("unsupported StashDB performer-tag resource")
+    group = payload.get("people_group")
+    excluded = payload.get("excluded_categories")
+    nationalities = payload.get("nationality_tags")
+    if not isinstance(group, str) or not isinstance(excluded, list):
+        raise RuntimeError("invalid StashDB performer-tag resource")
+    if not isinstance(nationalities, list):
+        raise RuntimeError("invalid StashDB performer-tag resource")
+    ids: list[frozenset[str]] = []
+    for entries in (excluded, nationalities):
+        if not all(isinstance(item, dict) and isinstance(item.get("id"), str) for item in entries):
+            raise RuntimeError("invalid StashDB performer-tag entry")
+        ids.append(frozenset(str(item["id"]) for item in entries))
+    return group, ids[0], ids[1]
+
+
+(
+    PEOPLE_CATEGORY_GROUP,
+    PEOPLE_EXCLUDED_CATEGORY_IDS,
+    NATIONALITY_TAG_IDS,
+) = _load_performer_tags()
+PERFORMER_ATTRIBUTE_CATEGORY_IDS = frozenset(
+    category_id
+    for category_id, role in STASHDB_CATEGORY_ROLES.items()
+    if role == "performer_attribute"
+)
+
+
+@dataclass(frozen=True)
+class TaxonomyPublishResult:
+    snapshot_id: str
+    category_count: int
+    tag_count: int
+    reused: bool
+
+
+@dataclass(frozen=True)
+class TaxonomyMatch:
+    snapshot_id: str
+    role: str | None
+    external_tag_id: str | None
+    external_category_id: str | None
+    method: str
+    confidence: float
+    ambiguity_count: int = 0
+
+
+class TaxonomyStore:
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+
+    def publish(self, data: TaxonomyData, *, fetched_at_ms: int) -> TaxonomyPublishResult:
+        canonical = json.dumps(asdict(data), sort_keys=True, separators=(",", ":"))
+        snapshot_id = f"tax-{hashlib.sha256(canonical.encode()).hexdigest()[:20]}"
+        reused = (
+            self.connection.execute(
+                "SELECT 1 FROM taxonomy_snapshot WHERE snapshot_id=?", (snapshot_id,)
+            ).fetchone()
+            is not None
+        )
+        with transaction(self.connection):
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO taxonomy_snapshot(
+                    snapshot_id, endpoint, fetched_at_ms, category_count, tag_count
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    data.endpoint,
+                    fetched_at_ms,
+                    len(data.categories),
+                    len(data.tags),
+                ),
+            )
+            if not reused:
+                self.connection.executemany(
+                    """
+                    INSERT INTO taxonomy_category(
+                        snapshot_id, category_id, name, group_name, description
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        (
+                            snapshot_id,
+                            item.category_id,
+                            item.name,
+                            item.group,
+                            item.description,
+                        )
+                        for item in data.categories
+                    ),
+                )
+                self.connection.executemany(
+                    """
+                    INSERT INTO taxonomy_tag(snapshot_id, tag_id, name, category_id)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    ((snapshot_id, item.tag_id, item.name, item.category_id) for item in data.tags),
+                )
+                self.connection.executemany(
+                    """
+                    INSERT INTO taxonomy_tag_alias(snapshot_id, tag_id, alias)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        (snapshot_id, item.tag_id, alias)
+                        for item in data.tags
+                        for alias in item.aliases
+                    ),
+                )
+            self.connection.execute(
+                """
+                INSERT INTO application_meta(key, value) VALUES ('taxonomy_snapshot_id', ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                (snapshot_id,),
+            )
+        return TaxonomyPublishResult(snapshot_id, len(data.categories), len(data.tags), reused)
+
+
+class TaxonomyIndex:
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+        row = connection.execute(
+            "SELECT value FROM application_meta WHERE key='taxonomy_snapshot_id'"
+        ).fetchone()
+        self.snapshot_id = str(row[0]) if row else None
+        self.tags: dict[str, tuple[str | None, str]] = {}
+        self.names: dict[str, set[str]] = {}
+        if self.snapshot_id is None:
+            return
+        for tag in connection.execute(
+            "SELECT tag_id, category_id, name FROM taxonomy_tag WHERE snapshot_id=?",
+            (self.snapshot_id,),
+        ):
+            tag_id = str(tag["tag_id"])
+            self.tags[tag_id] = (
+                str(tag["category_id"]) if tag["category_id"] else None,
+                str(tag["name"]),
+            )
+            self.names.setdefault(_normalize(str(tag["name"])), set()).add(tag_id)
+        for alias in connection.execute(
+            "SELECT tag_id, alias FROM taxonomy_tag_alias WHERE snapshot_id=?",
+            (self.snapshot_id,),
+        ):
+            self.names.setdefault(_normalize(str(alias["alias"])), set()).add(str(alias["tag_id"]))
+
+    def resolve(self, local_tag_id: str, name: str | None) -> TaxonomyMatch | None:
+        if self.snapshot_id is None:
+            return None
+        external_ids = {
+            str(row["stash_id"])
+            for row in self.connection.execute(
+                "SELECT endpoint, stash_id FROM source_tag_stash_id WHERE tag_id=?",
+                (local_tag_id,),
+            )
+            if _is_stashdb(str(row["endpoint"]))
+        }
+        known_ids = sorted(external_ids & self.tags.keys())
+        if len(known_ids) == 1:
+            return self._match(known_ids[0], "stable_id", 1.0)
+        if len(known_ids) > 1:
+            return TaxonomyMatch(
+                self.snapshot_id, None, None, None, "ambiguous_stable_id", 0.0, len(known_ids)
+            )
+        candidates = sorted(self.names.get(_normalize(name or ""), set()))
+        if len(candidates) == 1:
+            return self._match(candidates[0], "unique_name_or_alias", 0.9)
+        if len(candidates) > 1:
+            return TaxonomyMatch(
+                self.snapshot_id, None, None, None, "ambiguous_name", 0.0, len(candidates)
+            )
+        return TaxonomyMatch(self.snapshot_id, None, None, None, "unmapped", 0.0)
+
+    def _match(self, tag_id: str, method: str, confidence: float) -> TaxonomyMatch:
+        if self.snapshot_id is None:
+            raise RuntimeError("taxonomy index has no active snapshot")
+        category_id, _ = self.tags[tag_id]
+        role = STASHDB_CATEGORY_ROLES.get(category_id or "", DEFAULT_CATEGORY_ROLE)
+        return TaxonomyMatch(self.snapshot_id, role, tag_id, category_id, method, confidence)
+
+
+def performer_describing_tag_ids(
+    connection: sqlite3.Connection, tags: Iterable[tuple[str, str | None]]
+) -> set[str]:
+    """Return the local tags whose StashDB tag describes who is in the scene.
+
+    That is a tag in a PEOPLE-group category other than Clothing, or one of the
+    nationality tags StashDB files under Misc. Without a taxonomy snapshot
+    nothing matches; callers add tags whose own role is performer_attribute.
+    """
+    index = TaxonomyIndex(connection)
+    if index.snapshot_id is None:
+        return set()
+    people = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT category_id FROM taxonomy_category WHERE snapshot_id=? AND group_name=?",
+            (index.snapshot_id, PEOPLE_CATEGORY_GROUP),
+        )
+    } - PEOPLE_EXCLUDED_CATEGORY_IDS
+    result: set[str] = set()
+    for tag_id, name in tags:
+        match = index.resolve(tag_id, name)
+        if match is None or match.external_tag_id is None:
+            continue
+        if match.external_tag_id in NATIONALITY_TAG_IDS or match.external_category_id in people:
+            result.add(tag_id)
+    return result
+
+
+def _normalize(value: str) -> str:
+    return " ".join(value.casefold().split())
+
+
+def equivalent_tag_names(
+    connection: sqlite3.Connection, values: tuple[str, ...]
+) -> tuple[frozenset[str], ...]:
+    """Expand selected tag names through taxonomy aliases and the local tag hierarchy.
+
+    Each input name resolves to the matching local tag ids, any taxonomy
+    (StashDB) ids that map back to local tags, and — transitively — every
+    descendant in the local ``tag_parent`` hierarchy.  The returned groups
+    include local names and taxonomy names/aliases for all of those tags so
+    both local and external filtering surfaces see the full subtree.
+    """
+    snapshot = connection.execute(
+        "SELECT value FROM application_meta WHERE key='taxonomy_snapshot_id'"
+    ).fetchone()
+    groups: list[frozenset[str]] = []
+    for value in values:
+        normalized = _normalize(value)
+        local_ids: set[str] = set()
+        # 1 ─ direct local name match
+        local_ids.update(
+            str(row[0])
+            for row in connection.execute(
+                "SELECT tag_id FROM source_tag WHERE lower(name)=?", (normalized,)
+            )
+        )
+        taxonomy_names: set[str] = set()
+        if snapshot:
+            # 2 ─ taxonomy (StashDB) resolution + map back to local ids
+            taxonomy_ids = {
+                str(row[0])
+                for row in connection.execute(
+                    """
+                    SELECT tag_id FROM taxonomy_tag WHERE snapshot_id=? AND lower(name)=?
+                    UNION
+                    SELECT tag_id FROM taxonomy_tag_alias
+                    WHERE snapshot_id=? AND lower(alias)=?
+                    """,
+                    (snapshot[0], normalized, snapshot[0], normalized),
+                )
+            }
+            if taxonomy_ids:
+                local_from_taxonomy = {
+                    str(row[0])
+                    for row in connection.execute(
+                        f"""SELECT local_tag_id FROM tag_taxonomy_match
+                        WHERE snapshot_id=? AND external_tag_id IN
+                        ({",".join("?" for _ in taxonomy_ids)})""",
+                        (snapshot[0], *sorted(taxonomy_ids)),
+                    )
+                    if row[0]
+                }
+                local_ids.update(local_from_taxonomy)
+            # Taxonomy names / aliases (covers external-only tags and aliases
+            # that differ from the local name).
+            for tag_id in taxonomy_ids:
+                taxonomy_names.update(
+                    _normalize(str(row[0]))
+                    for row in connection.execute(
+                        """
+                        SELECT name FROM taxonomy_tag WHERE snapshot_id=? AND tag_id=?
+                        UNION ALL
+                        SELECT alias FROM taxonomy_tag_alias
+                        WHERE snapshot_id=? AND tag_id=?
+                        """,
+                        (snapshot[0], tag_id, snapshot[0], tag_id),
+                    )
+                )
+        # 3 ─ walk tag_parent for all descendants
+        if local_ids:
+            queue = list(local_ids)
+            while queue:
+                parent = queue.pop()
+                for (child,) in connection.execute(
+                    "SELECT tag_id FROM tag_parent WHERE parent_tag_id=?", (parent,)
+                ):
+                    child = str(child)
+                    if child not in local_ids:
+                        local_ids.add(child)
+                        queue.append(child)
+        # 4 ─ collect local names for every resolved id
+        if local_ids:
+            local_names = {
+                _normalize(str(row[0]))
+                for row in connection.execute(
+                    f"""SELECT name FROM source_tag WHERE tag_id IN
+                    ({",".join("?" for _ in local_ids)})""",
+                    sorted(local_ids),
+                )
+            }
+            taxonomy_names.update(local_names)
+        # 5 ─ taxonomy names/aliases for every local id
+        if snapshot and local_ids:
+            external_ids = {
+                str(row[0])
+                for row in connection.execute(
+                    f"""SELECT external_tag_id FROM tag_taxonomy_match
+                    WHERE snapshot_id=? AND local_tag_id IN
+                    ({",".join("?" for _ in local_ids)})""",
+                    (snapshot[0], *sorted(local_ids)),
+                )
+                if row[0]
+            }
+            for ext_id in external_ids:
+                taxonomy_names.update(
+                    _normalize(str(row[0]))
+                    for row in connection.execute(
+                        """
+                        SELECT name FROM taxonomy_tag WHERE snapshot_id=? AND tag_id=?
+                        UNION ALL
+                        SELECT alias FROM taxonomy_tag_alias
+                        WHERE snapshot_id=? AND tag_id=?
+                        """,
+                        (snapshot[0], ext_id, snapshot[0], ext_id),
+                    )
+                )
+        taxonomy_names.add(normalized)
+        groups.append(frozenset(taxonomy_names))
+    return tuple(groups)
+
+
+def _is_stashdb(endpoint: str) -> bool:
+    return endpoint.rstrip("/").casefold() == ACTIVE_STASHBOX_ENDPOINT.rstrip("/").casefold() or (
+        ACTIVE_STASHBOX_ENDPOINT.casefold() == "https://stashdb.org/graphql"
+        and (urlparse(endpoint).hostname or "").casefold() == "stashdb.org"
+    )

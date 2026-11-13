@@ -1,0 +1,1985 @@
+"""Transport-neutral operations used by the Stash plugin and tests."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import operator
+import sqlite3
+import time
+from collections import defaultdict
+from collections.abc import Set
+from dataclasses import asdict, replace
+from typing import Any, Protocol
+from uuid import uuid4
+
+from curator import curation
+from curator.config import DEFAULT_CONFIG
+from curator.events.contracts import OBSERVED_PLAYBACK_SQL
+from curator.expand import STASHDB, ExpandService
+from curator.explanations import ExplanationService
+from curator.features import FeatureBuilder, FeatureStore
+from curator.features.tag_roles import effective_tag_role_config_version
+from curator.interactions import InteractionStore
+from curator.model import ModelUpdateCoordinator, RecommendationModelStore
+from curator.profiling import record_duration, span
+from curator.ranking import SlateBuilder
+from curator.ranking.slate import LaneEntry, Slate
+from curator.similarity import SimilarityService
+from curator.storage import transaction
+from curator.taste_summary import taste_summary
+from curator.taxonomy.store import performer_describing_tag_ids
+
+API_SCHEMA_VERSION = 2
+# Tag questions: the For You pool an answer is measured against, the fewest
+# pool scenes a tag must reach to be asked about, and the example scenes shown
+# with each question. DIRECT_TAG_SUPPORT mirrors the model build's blend weight
+# for a direct tag answer.
+TAG_QUESTION_POOL_SIZE = 300
+TAG_QUESTION_MIN_REACH = 2
+TAG_QUESTION_EXAMPLES = 6
+DIRECT_TAG_SUPPORT = 8.0
+# A tag's inferred value of at least TAG_QUESTION_GUESS is asked as "Curator
+# thinks you like/dislike X. Right?". Questions are ranked toward strong
+# guesses (a replay on real answers found the model's confident guesses were
+# mostly wrong); TAG_QUESTION_MIN_STRENGTH keeps zero-guess tags rankable.
+TAG_QUESTION_GUESS = 0.15
+TAG_QUESTION_MIN_STRENGTH = 0.05
+# Answer review: direct answers whose viewing-only (learned) affinity is at
+# least ANSWER_REVIEW_MIN_CONFIDENCE confident, ranked by
+# |answer - learned| x learned confidence.
+ANSWER_REVIEW_MIN_CONFIDENCE = 0.35
+
+
+def _performer_preference(
+    favorite: bool,
+    rating: int | None,
+    affinity: float | None,
+    confidence: float | None,
+    estimate: tuple[float, float] | None = None,
+) -> dict[str, object]:
+    learned = affinity * (confidence or 0.0) if affinity is not None else 0.0
+    prior = DEFAULT_CONFIG.model.performer_favorite_prior if favorite else 0.0
+    if rating is not None:
+        prior += (
+            max(-1.0, min(1.0, (rating - 50) / 50)) * DEFAULT_CONFIG.model.performer_rating_bound
+        )
+    prior_confidence = 0.90 if favorite else 0.75 if rating is not None else 0.0
+    direct_confidence = max(confidence or 0.0, prior_confidence)
+    estimated_value, estimated_confidence = estimate or (0.0, 0.0)
+    similarity_confidence = estimated_confidence * max(0.05, 1 - direct_confidence)
+    similarity = estimated_value * similarity_confidence
+    combined_confidence = direct_confidence + (1 - direct_confidence) * estimated_confidence
+    if (learned + prior) * estimated_value < 0:
+        combined_confidence = max(direct_confidence, similarity_confidence)
+    known = affinity is not None or prior_confidence > 0 or estimate is not None
+    return {
+        "affinity": learned + prior + similarity if known else None,
+        "confidence": combined_confidence if known else None,
+        "affinity_details": {
+            "learned": learned,
+            "prior": prior,
+            "similarity": similarity,
+            "similarity_confidence": similarity_confidence,
+            # The learned part's own confidence, so a client can recover its
+            # evidence (confidence = 1 - exp(-support / 3)) for estimates.
+            "learned_confidence": confidence or 0.0,
+        },
+    }
+
+
+DEFAULT_PLUGIN_CONFIG: dict[str, object] = {
+    "page_size": 20,
+    "recommendation_endless_scroll": False,
+    "diversity_enabled": True,
+    "rotation_cooldown_days": 7,
+    "sync_page_size": 250,
+    "debounce_ms": 2_000,
+    "model_update_event_threshold": 5,
+    "model_update_max_wait_minutes": 30,
+    "model_update_min_interval_minutes": 60,
+    "prune_tag_name": "[Prune]",
+    "ignored_tags": "",
+    "new_arrivals_include_unorganized": False,
+    "together_excluded_tags": [],
+    "moods": [{"id": "together", "name": "Together", "excluded_tags": []}],
+    "expand_horizon_days": 90,
+    "expand_gender": "FEMALE",
+    "expand_wildcard": False,
+    "expand_candidate_limit": 1_000,
+    "expand_similar_seed_top_k": 20,
+    "expand_similar_seed_per_favorite": 5,
+    "auto_tasks_enabled": False,
+    "schedule_expand_refresh_enabled": False,
+    "schedule_expand_refresh_interval_hours": 24,
+    "schedule_expand_refresh_at_hour": None,
+    "schedule_sync_build_enabled": False,
+    "schedule_sync_build_interval_hours": 24,
+    "schedule_sync_build_at_hour": None,
+    "schedule_backup_enabled": False,
+    "schedule_backup_interval_hours": 24,
+    "schedule_backup_at_hour": None,
+}
+
+
+class _Drawable(Protocol):
+    @property
+    def scene_id(self) -> str: ...
+
+    @property
+    def source_lane(self) -> str: ...
+
+
+def _draw_slate[DrawnT: _Drawable](
+    connection: sqlite3.Connection,
+    lane: str,
+    items: tuple[DrawnT, ...],
+    seed: str,
+    at_ms: int,
+    page_size: int,
+    cooldown_days: int,
+) -> tuple[DrawnT, ...]:
+    """Weighted, repeatable draw from the best few pages; lane slots stay intact."""
+    pool_size = min(len(items), max(100, min(500, 5 * page_size)))
+    pool = items[:pool_size]
+    ids = [item.scene_id for item in pool]
+    if not ids:
+        return items
+    placeholders = ",".join("?" for _ in ids)
+    cooldown_ms = cooldown_days * 86_400_000
+    picked = {
+        (row["impression_id"], row["scene_id"])
+        for table, condition in (
+            ("play_session", "impression_id IS NOT NULL"),
+            ("feedback", "feedback_type='thumb_up' AND reversed_by_id IS NULL"),
+        )
+        for row in connection.execute(
+            f"SELECT impression_id, scene_id FROM {table} "
+            f"WHERE scene_id IN ({placeholders}) AND {condition}",
+            ids,
+        )
+    }
+    exposures: dict[str, list[int]] = {}
+    for row in connection.execute(
+        f"""SELECT scene_id, impression_id, shown_at_ms FROM recommendation_history
+            WHERE scene_id IN ({placeholders}) AND lane=? AND shown_at_ms BETWEEN ? AND ?""",
+        (*ids, lane, at_ms - cooldown_ms, at_ms),
+    ):
+        if (row["impression_id"], row["scene_id"]) not in picked:
+            exposures.setdefault(str(row["scene_id"]), []).append(int(row["shown_at_ms"]))
+    groups: dict[str, list[tuple[float, str, DrawnT]]] = {}
+    for index, item in enumerate(pool):
+        recent = exposures.get(item.scene_id, [])
+        weight = 1 + 4 * (pool_size - index) / pool_size
+        if recent:
+            age = max(0, at_ms - max(recent)) / cooldown_ms
+            weight *= (0.15 + 0.85 * min(age, 1)) / (1 + min(len(recent), 5))
+        digest = hashlib.sha256(f"{seed}\0{item.scene_id}".encode()).digest()
+        uniform = ((int.from_bytes(digest[:8], "big") >> 11) + 0.5) / (1 << 53)
+        groups.setdefault(item.source_lane, []).append(
+            (math.log(uniform) / weight, item.scene_id, item)
+        )
+    for group in groups.values():
+        group.sort(key=lambda row: (-row[0], row[1]))
+    positions = {source_lane: 0 for source_lane in groups}
+    drawn = []
+    for item in pool:
+        source_lane = item.source_lane
+        drawn.append(groups[source_lane][positions[source_lane]][2])
+        positions[source_lane] += 1
+    return tuple(drawn) + items[pool_size:]
+
+
+class CuratorAPI:
+    def __init__(self, connection: sqlite3.Connection, stashbox_endpoint: str = STASHDB) -> None:
+        self.connection = connection
+        self.stashbox_endpoint = stashbox_endpoint
+
+    def get_slate(
+        self,
+        lane: str,
+        count: int,
+        *,
+        page: int = 1,
+        impression_id: str | None = None,
+        context: dict[str, object] | None = None,
+        now_ms: int | None = None,
+        exclude_scene_ids: set[str] | None = None,
+        exploration: float = 0,
+        draw_seed: str = "",
+        draw_at_ms: int | None = None,
+        together_mode: bool = False,
+        mood_id: str | None = None,
+        include_tags: tuple[str, ...] = (),
+        exclude_tags: tuple[str, ...] = (),
+        performer_ids: tuple[str, ...] = (),
+        studio_ids: tuple[str, ...] = (),
+        gender: str = "",
+    ) -> dict[str, object]:
+        if page < 1 or not 1 <= count <= 500:
+            raise ValueError("invalid recommendation page")
+        if len(draw_seed) > 128 or (draw_at_ms is not None and draw_at_ms < 0):
+            raise ValueError("invalid recommendation draw")
+        started = time.perf_counter()
+        timings: dict[str, int] = {}
+        config = self.config()["config"]
+        assert isinstance(config, dict)
+        coordinator = ModelUpdateCoordinator(
+            self.connection, debounce_ms=int(config["debounce_ms"])
+        )
+        model_id = RecommendationModelStore(self.connection).current_model_id()
+        # Model builds can take minutes on a large library. The plugin schedules them as
+        # native background tasks; slate requests always use the last published model.
+        timings["model_update"] = round((time.perf_counter() - started) * 1000)
+        record_duration("python", "slate.model_update", timings["model_update"])
+        stage_started = time.perf_counter()
+        excluded = set(exclude_scene_ids or ())
+        requested_mood = mood_id if mood_id is not None else "together" if together_mode else ""
+        moods = config["moods"]
+        assert isinstance(moods, list)
+        selected_mood = next((mood for mood in moods if mood["id"] == requested_mood), None)
+        active_mood_id = selected_mood["id"] if selected_mood else ""
+        together_mode = bool(active_mood_id)
+        together_tags = selected_mood["excluded_tags"] if selected_mood else []
+        if together_tags:
+            assert isinstance(together_tags, list)
+            ids = [tag["id"] for tag in together_tags]
+            excluded.update(
+                row[0]
+                for row in self.connection.execute(
+                    "WITH RECURSIVE excluded(tag_id) AS ("
+                    "SELECT tag_id FROM source_tag WHERE tag_id IN ("
+                    + ",".join("?" for _ in ids)
+                    + ") UNION SELECT tp.tag_id FROM tag_parent tp "
+                    "JOIN excluded e ON tp.parent_tag_id=e.tag_id) "
+                    "SELECT DISTINCT st.scene_id FROM scene_tag st "
+                    "JOIN excluded e ON st.tag_id=e.tag_id",
+                    ids,
+                )
+            )
+        start = (page - 1) * count
+        end = page * count
+        builder = SlateBuilder(self.connection, diversity_enabled=bool(config["diversity_enabled"]))
+        has_filters = bool(
+            together_mode or include_tags or exclude_tags or performer_ids or studio_ids or gender
+        )
+        # A filtered request always recomputes total from a full candidate
+        # fetch, the same way an exploration request does, since the cached
+        # eligibility count doesn't know about filters.
+        total = (
+            builder.available_count(model_id, lane, exclude_scene_ids=excluded)
+            if exploration == 0 and not has_filters
+            else None
+        )
+        if total is None:
+            if lane == "for_you":
+                candidate_count = int(
+                    self.connection.execute(
+                        "SELECT count(DISTINCT scene_id) FROM model_scene_lane WHERE model_id=?",
+                        (model_id,),
+                    ).fetchone()[0]
+                )
+            else:
+                candidate_count = int(
+                    self.connection.execute(
+                        """
+                        SELECT count(DISTINCT scene_id) FROM model_scene_lane
+                        WHERE model_id=? AND lane=?
+                        """,
+                        (model_id, lane),
+                    ).fetchone()[0]
+                )
+            request_count = max(end + len(excluded), candidate_count + len(excluded))
+        else:
+            request_count = end + len(excluded)
+        if draw_seed:
+            request_count = max(request_count, max(100, min(500, 5 * count)) + len(excluded))
+        built = builder.recommend(
+            lane,
+            request_count,
+            exploration=exploration,
+            include_tags=include_tags,
+            exclude_tags=exclude_tags,
+            performer_ids=performer_ids,
+            studio_ids=studio_ids,
+            gender=gender,
+        )
+        available = tuple(item for item in built.items if item.scene_id not in excluded)
+        if total is None:
+            total = len(available)
+        if draw_seed:
+            available = _draw_slate(
+                self.connection,
+                lane,
+                available,
+                draw_seed,
+                draw_at_ms if draw_at_ms is not None else time.time_ns() // 1_000_000,
+                count,
+                int(config["rotation_cooldown_days"]),
+            )
+        selected = available[start:end]
+        slate = Slate(
+            built.model_id,
+            built.lane,
+            tuple(
+                replace(item, position=position)
+                for position, item in enumerate(selected, start=start)
+            ),
+            built.diagnostics,
+            built.timings_ms,
+        )
+        timings["ranking"] = round((time.perf_counter() - stage_started) * 1000)
+        record_duration("python", "slate.ranking", timings["ranking"])
+        stage_started = time.perf_counter()
+        impression_id = impression_id or str(uuid4())
+        now_ms = now_ms if now_ms is not None else time.time_ns() // 1_000_000
+        InteractionStore(self.connection).record_impression(impression_id, slate, now_ms, context)
+        timings["impression"] = round((time.perf_counter() - stage_started) * 1000)
+        record_duration("python", "slate.impression", timings["impression"])
+        items = [{**asdict(item), "impression_id": impression_id} for item in slate.items]
+        timings["total"] = round((time.perf_counter() - started) * 1000)
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "model_id": slate.model_id,
+            "config_updated_at_ms": self.config()["updated_at_ms"],
+            "mood_id": active_mood_id,
+            "moods": moods,
+            "model_pending": coordinator.status().pending,
+            "rebuilding": self.connection.execute(
+                """
+                SELECT 1 FROM curator_job
+                WHERE state='running' AND job_type IN (
+                    'build', 'update-model', 'sync-build', 'full-sync-build'
+                ) LIMIT 1
+                """
+            ).fetchone()
+            is not None,
+            "impression_id": impression_id,
+            "lane": lane,
+            "page": page,
+            "page_size": count,
+            "total": total,
+            "has_more": total > end,
+            "items": items,
+            "diagnostics": list(slate.diagnostics),
+            "timings_ms": timings,
+            "ranking_timings_ms": slate.timings_ms,
+        }
+
+    def get_score_review(
+        self,
+        page: int = 1,
+        count: int = 20,
+        *,
+        max_appeal: float = 0.0,
+        order: str = "asc",
+        now_ms: int | None = None,
+    ) -> dict[str, object]:
+        if page < 1 or not 1 <= count <= 500:
+            raise ValueError("invalid score review page")
+        if order not in ("asc", "desc"):
+            raise ValueError("invalid score review order")
+        model_id = RecommendationModelStore(self.connection).current_model_id()
+        if model_id is None:
+            raise RuntimeError("no published model; run build-model first")
+        start = (page - 1) * count
+        end = page * count
+        builder = SlateBuilder(self.connection)
+        total = builder.score_review_available_count(model_id, max_appeal)
+        built = builder.score_review(model_id, end, max_appeal=max_appeal, order=order)
+        selected = built.items[start:end]
+        slate = Slate(
+            built.model_id,
+            built.lane,
+            tuple(
+                replace(item, position=position)
+                for position, item in enumerate(selected, start=start)
+            ),
+            built.diagnostics,
+            built.timings_ms,
+        )
+        impression_id = str(uuid4())
+        now_ms = now_ms if now_ms is not None else time.time_ns() // 1_000_000
+        InteractionStore(self.connection).record_impression(impression_id, slate, now_ms, None)
+        items = [{**asdict(item), "impression_id": impression_id} for item in slate.items]
+        return {
+            "items": items,
+            "total": total,
+            "page_size": count,
+            "has_more": total > end,
+            "page": page,
+            "model_version": model_id,
+        }
+
+    def inspector(
+        self,
+        entity_type: str,
+        entity_id: str,
+        *,
+        include_similar: bool = True,
+        include_evidence: bool = False,
+    ) -> dict[str, object]:
+        model_id = RecommendationModelStore(self.connection).current_model_id()
+        if model_id is None:
+            raise RuntimeError("no published model")
+        if entity_type == "scene":
+            score = (
+                RecommendationModelStore(self.connection)
+                .scores(model_id, {entity_id})
+                .get(entity_id)
+            )
+            if score is None:
+                raise ValueError(f"unknown scene: {entity_id}")
+            return {
+                "schema_version": API_SCHEMA_VERSION,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "model_id": model_id,
+                "score": asdict(score),
+                "explanation": self.explanation(entity_id),
+            }
+        if entity_type == "performer":
+            row = self.connection.execute(
+                "SELECT * FROM source_performer WHERE performer_id=?", (entity_id,)
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown performer: {entity_id}")
+            feature_version = self.connection.execute(
+                "SELECT feature_version FROM model_version WHERE model_id=?", (model_id,)
+            ).fetchone()[0]
+            affinity_row = self.connection.execute(
+                """
+                SELECT fa.affinity, fa.confidence
+                FROM feature_affinity fa WHERE fa.model_id = ? AND fa.feature_id = ?
+                """,
+                (
+                    model_id,
+                    FeatureBuilder._feature_id(
+                        feature_version, "scene", "performer_identity", f"performer:{entity_id}"
+                    ),
+                ),
+            ).fetchone()
+            estimate = self.connection.execute(
+                "SELECT value, confidence FROM model_performer_estimate "
+                "WHERE model_id=? AND performer_id=?",
+                (model_id, entity_id),
+            ).fetchone()
+            preference = _performer_preference(
+                bool(row["favorite"]),
+                row["rating100"],
+                affinity_row[0] if affinity_row is not None else None,
+                affinity_row[1] if affinity_row is not None else None,
+                (estimate[0], estimate[1]) if estimate is not None else None,
+            )
+            matches = (
+                FeatureStore(self.connection).similar_performers(
+                    str(feature_version),
+                    entity_id,
+                    count=10,
+                    block_weights=dict(DEFAULT_CONFIG.feature.performer_block_weights),
+                )
+                if include_similar
+                else []
+            )
+            result = {
+                "schema_version": API_SCHEMA_VERSION,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "model_id": model_id,
+                "profile": dict(row),
+                **preference,
+                "similar": [
+                    {
+                        "performer_id": performer_id,
+                        "similarity": result.similarity,
+                        "blocks": result.block_similarities,
+                    }
+                    for performer_id, result in matches
+                ],
+            }
+            if include_evidence:
+                result["evidence"] = {
+                    "scenes": [
+                        {
+                            "scene_id": evidence[0],
+                            "title": evidence[1],
+                            "direct": json.loads(evidence[2]),
+                        }
+                        for evidence in self.connection.execute(
+                            """SELECT ef.entity_id, COALESCE(s.title, ''),
+                            json_extract(ms.components_json, '$.direct')
+                            FROM entity_feature ef JOIN model_scene_score ms
+                            ON ms.scene_id=ef.entity_id AND ms.model_id=?
+                            LEFT JOIN source_scene s ON s.scene_id=ef.entity_id
+                            WHERE ef.feature_version=? AND ef.entity_type='scene'
+                            AND ef.feature_id=? AND ef.value>0
+                            AND json_extract(ms.components_json, '$.direct.learning_evidence')>0
+                            ORDER BY
+                            json_extract(ms.components_json, '$.direct.learning_evidence') DESC,
+                            ef.entity_id LIMIT 8""",
+                            (
+                                model_id,
+                                feature_version,
+                                FeatureBuilder._feature_id(
+                                    feature_version,
+                                    "scene",
+                                    "performer_identity",
+                                    f"performer:{entity_id}",
+                                ),
+                            ),
+                        )
+                    ],
+                    "performers": [
+                        dict(evidence)
+                        for evidence in self.connection.execute(
+                            """SELECT e.similar_performer_id AS performer_id,
+                            COALESCE(p.name, '') AS name,
+                            e.similarity, e.affinity, e.confidence
+                            FROM model_performer_edge e LEFT JOIN source_performer p
+                            ON p.performer_id=e.similar_performer_id
+                            WHERE e.model_id=? AND e.performer_id=? ORDER BY e.rank""",
+                            (model_id, entity_id),
+                        )
+                    ],
+                }
+            return result
+        raise ValueError(f"unsupported inspector entity type: {entity_type}")
+
+    def performer_affinities(self) -> dict[str, object]:
+        model_id = RecommendationModelStore(self.connection).current_model_id()
+        if model_id is None:
+            raise RuntimeError("no published model")
+        feature_version = self.connection.execute(
+            "SELECT feature_version FROM model_version WHERE model_id=?", (model_id,)
+        ).fetchone()[0]
+        rows = self.connection.execute(
+            """
+            SELECT fd.name, fa.affinity, fa.confidence
+            FROM feature_definition fd CROSS JOIN feature_affinity fa USING(feature_id)
+            WHERE fa.model_id=? AND fd.feature_version=? AND fd.family='performer_identity'
+            ORDER BY fd.name
+            """,
+            (model_id, feature_version),
+        )
+        learned = {row[0].removeprefix("performer:"): (row[1], row[2]) for row in rows}
+        estimates = {
+            row[0]: (row[1], row[2])
+            for row in self.connection.execute(
+                "SELECT performer_id, value, confidence FROM model_performer_estimate "
+                "WHERE model_id=? ORDER BY performer_id",
+                (model_id,),
+            )
+        }
+        performers = self.connection.execute(
+            "SELECT performer_id, favorite, rating100 FROM source_performer ORDER BY performer_id"
+        )
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "model_id": model_id,
+            "affinities": {
+                row[0]: _performer_preference(
+                    bool(row[1]),
+                    row[2],
+                    *learned.get(row[0], (None, None)),
+                    estimates.get(row[0]),
+                )
+                for row in performers
+                if row[0] in learned or row[1] or row[2] is not None or row[0] in estimates
+            },
+        }
+
+    def studio_affinities(self) -> dict[str, object]:
+        """Each studio's view as the model scores it: learned affinity times
+        its confidence plus the Stash-favourite prior, with the learned
+        confidence so a client can estimate a reason's effect."""
+        model_id = RecommendationModelStore(self.connection).current_model_id()
+        if model_id is None:
+            raise RuntimeError("no published model")
+        feature_version = self.connection.execute(
+            "SELECT feature_version FROM model_version WHERE model_id=?", (model_id,)
+        ).fetchone()[0]
+        learned = {
+            row[0].removeprefix("studio:"): (float(row[1]), float(row[2]))
+            for row in self.connection.execute(
+                """
+                SELECT fd.name, fa.affinity, fa.confidence
+                FROM feature_definition fd CROSS JOIN feature_affinity fa USING(feature_id)
+                WHERE fa.model_id=? AND fd.feature_version=? AND fd.family='studio'
+                ORDER BY fd.name
+                """,
+                (model_id, feature_version),
+            )
+        }
+        affinities: dict[str, object] = {}
+        for studio_id, favorite in self.connection.execute(
+            "SELECT studio_id, favorite FROM source_studio ORDER BY studio_id"
+        ):
+            if studio_id not in learned and not favorite:
+                continue
+            affinity, confidence = learned.get(studio_id, (0.0, 0.0))
+            prior = DEFAULT_CONFIG.model.studio_favorite_prior if favorite else 0.0
+            affinities[studio_id] = {
+                "affinity": affinity * confidence + prior,
+                "confidence": max(confidence, 0.70 if favorite else 0.0),
+                "affinity_details": {
+                    "learned": affinity * confidence,
+                    "prior": prior,
+                    "learned_confidence": confidence,
+                },
+            }
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "model_id": model_id,
+            "affinities": affinities,
+        }
+
+    def lane_scene_order(self, lane: str) -> list[LaneEntry]:
+        """Every scene a lane could show now, in the lane's published order."""
+        config = self.config()["config"]
+        assert isinstance(config, dict)
+        builder = SlateBuilder(self.connection, diversity_enabled=bool(config["diversity_enabled"]))
+        return builder.lane_order(lane)
+
+    def scene_affinity_rows(
+        self,
+        scene_ids: object,
+        *,
+        sort: bool = False,
+        direction: str = "DESC",
+        criterion: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        model_id = RecommendationModelStore(self.connection).current_model_id()
+        if model_id is None:
+            raise RuntimeError("no published model")
+        if not isinstance(scene_ids, list) or any(
+            not isinstance(item, str) or not item for item in scene_ids
+        ):
+            raise ValueError("scene_ids must be a list of strings")
+        comparisons = {
+            "GREATER_THAN": operator.gt,
+            "LESS_THAN": operator.lt,
+            "EQUALS": operator.eq,
+            "NOT_EQUALS": operator.ne,
+        }
+        modifier, threshold = "", 0.0
+        if criterion is not None:
+            modifier = criterion.get("modifier", "")
+            if modifier not in {*comparisons, "IS_NULL", "NOT_NULL"}:
+                raise ValueError("unsupported Curator Appeal comparison")
+            if modifier not in {"IS_NULL", "NOT_NULL"}:
+                value = criterion.get("value")
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                ):
+                    raise ValueError("enter a valid Curator Appeal value")
+                threshold = value
+        if sort and direction not in {"ASC", "DESC"}:
+            raise ValueError("direction must be ASC or DESC")
+        query = (
+            "SELECT i.value AS scene_id, s.appeal, s.confidence FROM json_each(?) i "
+            "LEFT JOIN model_scene_score s ON s.model_id=? AND s.scene_id=i.value"
+        )
+        params: list[object] = [json.dumps(scene_ids), model_id]
+        if sort or criterion is not None:
+            query = "SELECT scene_id, appeal, confidence FROM model_scene_score WHERE model_id=?"
+            params = [model_id]
+        scores = {row["scene_id"]: dict(row) for row in self.connection.execute(query, params)}
+        selected = []
+        for scene_id in scene_ids:
+            row = scores.get(scene_id, {"scene_id": scene_id, "appeal": None, "confidence": None})
+            known = row["appeal"] is not None
+            if (
+                not modifier
+                or (modifier == "IS_NULL" and not known)
+                or (modifier == "NOT_NULL" and known)
+                or (
+                    modifier in comparisons
+                    and known
+                    and comparisons[modifier](row["appeal"], threshold)
+                )
+            ):
+                selected.append(row)
+        if sort:
+            selected.sort(
+                key=lambda row: (
+                    row["appeal"] is None,
+                    (row["appeal"] or 0) * (1 if direction == "ASC" else -1),
+                )
+            )
+        return selected
+
+    def scene_reason_candidates(
+        self, mode: str, limit: int = 20, exclude_scene_ids: Set[str] = frozenset()
+    ) -> dict[str, object]:
+        """Scenes for Why these?: the highest-rated scenes the user has played
+        ("hits") or the lowest-rated scenes overall ("misses"), leaving out
+        scenes already answered and the excluded ones (skipped in the browser).
+        """
+        if mode not in {"hits", "misses"}:
+            raise ValueError("mode must be hits or misses")
+        if not 1 <= limit <= 50:
+            raise ValueError("limit must be between 1 and 50")
+        model_id = RecommendationModelStore(self.connection).current_model_id()
+        if model_id is None:
+            raise RuntimeError("no published model")
+        played = "AND s.scene_id IN (SELECT scene_id FROM source_play)" if mode == "hits" else ""
+        order = "DESC" if mode == "hits" else "ASC"
+        rows = self.connection.execute(
+            f"""
+            SELECT s.scene_id, s.appeal, s.confidence FROM model_scene_score s
+            WHERE s.model_id=? {played}
+              AND s.scene_id NOT IN (SELECT scene_id FROM scene_reason_answer)
+              AND s.scene_id NOT IN (SELECT value FROM json_each(?))
+            ORDER BY s.appeal {order}, s.scene_id
+            LIMIT ?
+            """,
+            (model_id, json.dumps(sorted(exclude_scene_ids)), limit),
+        )
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "mode": mode,
+            "items": [
+                {
+                    "scene_id": row["scene_id"],
+                    "appeal": row["appeal"],
+                    "confidence": row["confidence"],
+                }
+                for row in rows
+            ],
+        }
+
+    def scene_affinities(self, scene_ids: object) -> dict[str, object]:
+        rows = self.scene_affinity_rows(scene_ids)
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "model_id": RecommendationModelStore(self.connection).current_model_id(),
+            "affinities": {
+                row["scene_id"]: {"appeal": row["appeal"], "confidence": row["confidence"]}
+                for row in rows
+                if row["appeal"] is not None
+            },
+        }
+
+    def similar(
+        self,
+        entity_type: str,
+        entity_id: str,
+        count: int = 20,
+        *,
+        page: int = 1,
+        impression_id: str | None = None,
+        now_ms: int | None = None,
+        gender: str = "",
+        include_tags: tuple[str, ...] = (),
+        exclude_tags: tuple[str, ...] = (),
+        performer_ids: tuple[str, ...] = (),
+        studio_ids: tuple[str, ...] = (),
+        favorite_only: bool = False,
+        minimum_similarity: float = 0.18,
+        exclude_scene_ids: set[str] | None = None,
+    ) -> dict[str, object]:
+        if page < 1 or not 1 <= count <= 500:
+            raise ValueError("invalid Similar page")
+        if not 0 <= minimum_similarity <= 1:
+            raise ValueError("minimum_similarity must be between 0 and 1")
+        start = (page - 1) * count
+        end = page * count
+        excluded = exclude_scene_ids or set()
+        requested = end + 1 + len(excluded)
+        service = SimilarityService(self.connection)
+        if entity_type == "scene":
+            results = service.scenes(
+                entity_id,
+                requested,
+                gender,
+                include_tags=include_tags,
+                exclude_tags=exclude_tags,
+                performer_ids=performer_ids,
+                studio_ids=studio_ids,
+                favorite_only=favorite_only,
+                minimum_similarity=minimum_similarity,
+            )
+            table, id_column, label_column = "source_scene", "scene_id", "title"
+        elif entity_type == "performer":
+            results = service.performers(entity_id, requested, gender)
+            table, id_column, label_column = "source_performer", "performer_id", "name"
+        else:
+            raise ValueError(f"unsupported similar entity type: {entity_type}")
+        raw_results = results
+        available = tuple(item for item in raw_results if item.entity_id not in excluded)
+        results = available[start:end]
+        total = max(
+            0, service.total_count - len(excluded & {item.entity_id for item in raw_results})
+        )
+        labels = {
+            str(row[id_column]): str(row[label_column] or "")
+            for row in self.connection.execute(f"SELECT {id_column}, {label_column} FROM {table}")
+        }
+        impression_id = impression_id or str(uuid4())
+        if entity_type == "scene":
+            self.connection.execute("PRAGMA busy_timeout = 100")
+            try:
+                InteractionStore(self.connection).record_ranked_impression(
+                    impression_id,
+                    "similar",
+                    service.model_id,
+                    (
+                        (item.entity_id, position, item.rank_score, item.relationships)
+                        for position, item in enumerate(results, start=start)
+                    ),
+                    now_ms if now_ms is not None else time.time_ns() // 1_000_000,
+                    {"provenance": "similar", "source_scene_id": entity_id},
+                )
+            except sqlite3.OperationalError as error:
+                if "locked" not in str(error).casefold():
+                    raise
+                impression_id = None
+            finally:
+                self.connection.execute("PRAGMA busy_timeout = 30000")
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "model_id": service.model_id,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "impression_id": impression_id if entity_type == "scene" else None,
+            "page": page,
+            "page_size": count,
+            "total": total,
+            "has_more": total > end,
+            "timings_ms": service.timings_ms,
+            "items": [
+                {
+                    **asdict(item),
+                    "label": labels.get(item.entity_id, ""),
+                    "position": position,
+                }
+                for position, item in enumerate(results, start=start)
+            ],
+        }
+
+    def explanation(self, scene_id: str) -> dict[str, object]:
+        model_id = RecommendationModelStore(self.connection).current_model_id()
+        if model_id is None:
+            raise RuntimeError("no published model")
+        explanation = ExplanationService(self.connection).explain_scene(model_id, scene_id)
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "model_id": model_id,
+            "scene_id": scene_id,
+            "summary": explanation.summary,
+            "components": list(explanation.components),
+            "reasons": [asdict(reason) for reason in explanation.all_reasons],
+            "supporting_reasons": [asdict(reason) for reason in explanation.selected_reasons],
+            "evidence_rows": list(explanation.evidence_rows),
+            "lane_context": explanation.lane_context,
+            "scores": explanation.scores,
+            "evidence_fingerprint": explanation.evidence_fingerprint,
+        }
+
+    def recommendation_history(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        *,
+        lane: str | None = None,
+    ) -> dict[str, object]:
+        if page < 1 or not 1 <= page_size <= 100:
+            raise ValueError("invalid recommendation history page")
+        if lane and lane not in {
+            "for_you",
+            "best_bets",
+            "revisit",
+            "stretch",
+            "blind_spots",
+            "dormant",
+            "new_arrivals",
+        }:
+            raise ValueError("unknown recommendation lane")
+        where = "WHERE h.lane=?" if lane else ""
+        parameters: tuple[object, ...] = (lane,) if lane else ()
+        model_id = RecommendationModelStore(self.connection).current_model_id()
+        total = int(
+            self.connection.execute(
+                f"SELECT count(*) FROM recommendation_history h {where}",
+                parameters,
+            ).fetchone()[0]
+        )
+        rows = self.connection.execute(
+            f"""
+            SELECT h.history_id, h.scene_id, h.impression_id, h.lane, h.shown_at_ms,
+                   i.reason_snapshot_json,
+                   EXISTS(
+                     SELECT 1 FROM model_scene_score score
+                     WHERE score.model_id=? AND score.scene_id=h.scene_id
+                   ) AS current_model
+            FROM recommendation_history h
+            LEFT JOIN impression_item i
+              ON i.impression_id=h.impression_id AND i.scene_id=h.scene_id
+            {where}
+            ORDER BY h.shown_at_ms DESC, h.history_id DESC LIMIT ? OFFSET ?
+            """,
+            (model_id, *parameters, page_size, (page - 1) * page_size),
+        )
+        items = []
+        for row in rows:
+            item = dict(row)
+            snapshot = item.pop("reason_snapshot_json")
+            item["reason_snapshot"] = json.loads(str(snapshot)) if snapshot else []
+            items.append(item)
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "lane": lane,
+            "items": items,
+        }
+
+    def expand(
+        self,
+        entity_type: str,
+        *,
+        page: int = 1,
+        sort: str = "match",
+        performer_id: str | None = None,
+        favorite_only: bool = False,
+        gender: str = "FEMALE",
+        include_tags: tuple[str, ...] = (),
+        exclude_tags: tuple[str, ...] = (),
+        performer_query: str = "",
+        studio_query: str = "",
+        performer_names: tuple[str, ...] = (),
+        studio_names: tuple[str, ...] = (),
+        hide_phash_matches: bool = True,
+        hide_dismissed: bool = True,
+        minimum_score: float = -1.0,
+        count: int = 50,
+        links: dict[str, dict[str, str]] | None = None,
+    ) -> dict[str, object]:
+        return ExpandService(self.connection).results(
+            entity_type,
+            page=page,
+            sort=sort,
+            performer_id=performer_id,
+            favorite_only=favorite_only,
+            gender=gender,
+            include_tags=include_tags,
+            exclude_tags=exclude_tags,
+            performer_query=performer_query,
+            studio_query=studio_query,
+            performer_names=performer_names,
+            studio_names=studio_names,
+            hide_phash_matches=hide_phash_matches,
+            hide_dismissed=hide_dismissed,
+            minimum_score=minimum_score,
+            count=count,
+            links=links,
+        )
+
+    def expand_shortlist(self, page: int = 1, page_size: int = 20) -> dict[str, object]:
+        return ExpandService(self.connection, self.stashbox_endpoint).shortlist_results(
+            page=page, count=page_size
+        )
+
+    def update_shortlist(self, entity_type: str, external_id: str, selected: bool) -> None:
+        ExpandService(self.connection, self.stashbox_endpoint).shortlist(
+            entity_type, external_id, selected
+        )
+
+    def update_external_dismissal(self, external_id: str, kind: str | None) -> None:
+        ExpandService(self.connection, self.stashbox_endpoint).dismiss(external_id, kind)
+
+    def update_external_dismissals(self, external_ids: list[str], kind: str | None) -> list[str]:
+        return ExpandService(self.connection, self.stashbox_endpoint).dismiss_many(
+            external_ids, kind
+        )
+
+    def update_external_performer_dislike(
+        self, performer_id: str, name: str, disliked: bool
+    ) -> None:
+        ExpandService(self.connection, self.stashbox_endpoint).update_performer_dislike(
+            performer_id, name, disliked
+        )
+
+    def external_performer_dislikes(self, page: int = 1, page_size: int = 20) -> dict[str, object]:
+        result = ExpandService(self.connection, self.stashbox_endpoint).performer_dislike_results(
+            page=page, count=page_size
+        )
+        return {"schema_version": API_SCHEMA_VERSION, **result}
+
+    def external_dismissals(self, page: int = 1, page_size: int = 20) -> dict[str, object]:
+        result = ExpandService(self.connection, self.stashbox_endpoint).dismissal_results(
+            page=page, count=page_size
+        )
+        return {"schema_version": API_SCHEMA_VERSION, **result}
+
+    def external_similar(self, entity_type: str, entity_id: str) -> dict[str, object]:
+        return ExpandService(self.connection).similar(entity_type, entity_id)
+
+    def submit_feedback(self, entries: list[dict[str, Any]]) -> dict[str, object]:
+        inserted = InteractionStore(self.connection).submit_feedback(entries)
+        return {"schema_version": API_SCHEMA_VERSION, "accepted": inserted}
+
+    def feedback_history(self, page: int = 1, page_size: int = 20) -> dict[str, object]:
+        if page < 1 or not 1 <= page_size <= 100:
+            raise ValueError("invalid feedback history page")
+        where = "feedback_type <> 'reversal'"
+        total = int(
+            self.connection.execute(f"SELECT count(*) FROM feedback WHERE {where}").fetchone()[0]
+        )
+        rows = self.connection.execute(
+            f"""
+            SELECT feedback_id, scene_id, feedback_type, value, occurred_at_ms,
+                   reversed_by_id
+            FROM feedback WHERE {where}
+            ORDER BY occurred_at_ms DESC, feedback_id DESC LIMIT ? OFFSET ?
+            """,
+            (page_size, (page - 1) * page_size),
+        )
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "items": [dict(row) for row in rows],
+        }
+
+    def correct_feedback(
+        self,
+        feedback_id: str,
+        correction_id: str,
+        feedback_type: str | None,
+        *,
+        now_ms: int | None = None,
+    ) -> dict[str, object]:
+        InteractionStore(self.connection).correct_feedback(
+            feedback_id,
+            correction_id,
+            feedback_type,
+            now_ms if now_ms is not None else time.time_ns() // 1_000_000,
+        )
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "feedback_id": feedback_id,
+            "correction_id": correction_id,
+            "feedback_type": feedback_type,
+        }
+
+    def submit_tag_preferences(self, entries: list[dict[str, Any]]) -> dict[str, object]:
+        inserted = InteractionStore(self.connection).submit_tag_preferences(entries)
+        return {"schema_version": API_SCHEMA_VERSION, "accepted": inserted}
+
+    def submit_external_scene_reasons(self, entries: list[dict[str, Any]]) -> dict[str, object]:
+        inserted = InteractionStore(self.connection).submit_external_scene_reasons(
+            self.stashbox_endpoint, entries
+        )
+        return {"schema_version": API_SCHEMA_VERSION, "accepted": inserted}
+
+    def submit_scene_reasons(self, entries: list[dict[str, Any]]) -> dict[str, object]:
+        inserted = InteractionStore(self.connection).submit_scene_reasons(entries)
+        return {"schema_version": API_SCHEMA_VERSION, "accepted": inserted}
+
+    def get_scene_tag_choices(self, scene_id: str) -> dict[str, object]:
+        if not scene_id:
+            raise ValueError("scene_id is required")
+        config_version = effective_tag_role_config_version(self.connection)
+        items: list[dict[str, object]] = []
+        for row in self.connection.execute(
+            """
+            SELECT t.tag_id, t.name, p.value AS direct_value, p.blocked AS direct_blocked
+            FROM scene_tag st
+            JOIN source_tag t ON t.tag_id=st.tag_id
+            JOIN tag_role r ON r.tag_id=t.tag_id AND r.config_version=?
+            LEFT JOIN direct_tag_preference p ON p.tag_id=t.tag_id
+            WHERE st.scene_id=?
+            GROUP BY t.tag_id
+            ORDER BY t.name COLLATE NOCASE, t.tag_id
+            """,
+            (config_version, scene_id),
+        ):
+            items.append(
+                {
+                    "tag_id": str(row["tag_id"]),
+                    "name": str(row["name"] or row["tag_id"]),
+                    "direct_value": (
+                        float(row["direct_value"]) if row["direct_value"] is not None else None
+                    ),
+                    "direct_blocked": bool(row["direct_blocked"]),
+                }
+            )
+        return {"schema_version": API_SCHEMA_VERSION, "items": items}
+
+    def taste_profile(self) -> dict[str, object]:
+        model_id = RecommendationModelStore(self.connection).current_model_id()
+        if model_id is None:
+            raise RuntimeError("no published model")
+        feature_version = str(
+            self.connection.execute(
+                "SELECT feature_version FROM model_version WHERE model_id=?", (model_id,)
+            ).fetchone()[0]
+        )
+        direct: dict[str, tuple[float | None, bool]] = {}
+        for row in self.connection.execute(
+            "SELECT tag_id, value, blocked FROM direct_tag_preference"
+        ):
+            direct[str(row["tag_id"])] = (float(row["value"]), bool(row["blocked"]))
+        items: list[dict[str, object]] = []
+        config_version = effective_tag_role_config_version(self.connection)
+        rows = self.connection.execute(
+            """
+            WITH scene_counts AS (
+              SELECT tag_id, count(DISTINCT scene_id) AS scene_count
+              FROM scene_tag WHERE provenance='scene' GROUP BY tag_id
+            )
+            SELECT t.tag_id, t.name, r.role, coalesce(sc.scene_count, 0) AS scene_count,
+                   a.affinity, a.confidence, a.effective_support, a.metadata_json
+            FROM source_tag t
+            JOIN tag_role r ON r.tag_id=t.tag_id AND r.config_version=?
+            LEFT JOIN scene_counts sc ON sc.tag_id=t.tag_id
+            LEFT JOIN feature_definition d
+              ON d.feature_version=? AND d.family='content' AND d.name='tag:' || t.tag_id
+            LEFT JOIN feature_affinity a
+              ON a.feature_id=d.feature_id AND a.model_id=?
+            ORDER BY t.name, t.tag_id
+            """,
+            (config_version, feature_version, model_id),
+        ).fetchall()
+        # Display-only: tags about who is in the scene (nationality, body, age
+        # group), so a client doesn't read them as a choice of scene. Roles and
+        # the model are untouched.
+        about_performer = performer_describing_tag_ids(
+            self.connection,
+            (
+                (str(row["tag_id"]), row["name"])
+                for row in rows
+                if row["role"] != "performer_attribute"
+            ),
+        )
+        for row in rows:
+            tag_id = str(row["tag_id"])
+            scene_count = int(row["scene_count"])
+            affinity = float(row["affinity"] or 0)
+            confidence = float(row["confidence"] or 0)
+            direct_value, direct_blocked = direct.get(tag_id, (None, False))
+            # The answer a parent passed down (_inherit_tag_preferences), so a
+            # client can tell it apart from the tag's own evidence.
+            passed_down = json.loads(row["metadata_json"] or "{}").get("inherited_preference")
+            inherited = float(passed_down) if passed_down is not None else None
+            prompt = None
+            if direct_value is None and row["role"] == "content" and scene_count >= 2:
+                prompt = "belief" if confidence >= 0.35 and abs(affinity) >= 0.15 else "uncertain"
+            items.append(
+                {
+                    "tag_id": tag_id,
+                    "name": str(row["name"] or tag_id),
+                    "inferred_value": affinity,
+                    "confidence": confidence,
+                    "support": float(row["effective_support"] or 0),
+                    "scene_count": scene_count,
+                    "direct_value": direct_value,
+                    "direct_blocked": direct_blocked,
+                    "prompt": prompt,
+                    "role": str(row["role"]),
+                    "inherited_value": inherited,
+                    "describes_performer": row["role"] == "performer_attribute"
+                    or tag_id in about_performer,
+                }
+            )
+        items.sort(
+            key=lambda item: (
+                item["prompt"] is None,
+                item["prompt"] == "uncertain",
+                not (float(str(item["inferred_value"])) > 0),
+                -abs(float(str(item["inferred_value"]))),
+                str(item["name"]).casefold(),
+                str(item["tag_id"]),
+            )
+        )
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "model_id": model_id,
+            "items": items,
+        }
+
+    def taste_summary(self) -> dict[str, object]:
+        return {"schema_version": API_SCHEMA_VERSION, **taste_summary(self.connection)}
+
+    def external_tag_search(self, query: str = "") -> dict[str, object]:
+        if not isinstance(query, str) or len(query.encode()) > 100:
+            raise ValueError("query must be a string up to 100 bytes")
+        ready = bool(
+            self.connection.execute(
+                """SELECT EXISTS(SELECT 1 FROM taxonomy_snapshot WHERE snapshot_id=
+            (SELECT value FROM application_meta WHERE key='taxonomy_snapshot_id'))"""
+            ).fetchone()[0]
+        )
+        text = query.strip()
+        rows = self.connection.execute(
+            """SELECT t.tag_id AS id, t.name FROM taxonomy_tag t
+            WHERE t.snapshot_id=(
+                SELECT value FROM application_meta WHERE key='taxonomy_snapshot_id')
+              AND ?<>'' AND (instr(lower(t.name), lower(?))>0 OR EXISTS(
+                SELECT 1 FROM taxonomy_tag_alias a
+                WHERE a.snapshot_id=t.snapshot_id AND a.tag_id=t.tag_id
+                  AND instr(lower(a.alias), lower(?))>0))
+            ORDER BY lower(t.name)=lower(?) DESC, t.name COLLATE NOCASE, t.tag_id LIMIT 8""",
+            (text, text, text, text),
+        )
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "ready": ready,
+            "items": [dict(row) for row in rows],
+        }
+
+    def external_tag_choices(self, tags: list[dict[str, Any]]) -> dict[str, object]:
+        if len(tags) > 100:
+            raise ValueError("at most 100 external tags are supported")
+        requested = [
+            (str(item.get("id") or ""), str(item.get("name") or "").strip())
+            for item in tags
+            if isinstance(item, dict) and (item.get("id") or item.get("name"))
+        ]
+        config_version = effective_tag_role_config_version(self.connection)
+        rows = [
+            dict(row)
+            for row in self.connection.execute(
+                """
+                SELECT t.tag_id, t.name, p.value AS direct_value,
+                       p.blocked AS direct_blocked, ids.stash_id
+                FROM source_tag t
+                JOIN tag_role r
+                  ON r.tag_id=t.tag_id AND r.config_version=?
+                LEFT JOIN direct_tag_preference p ON p.tag_id=t.tag_id
+                LEFT JOIN source_tag_stash_id ids ON ids.tag_id=t.tag_id
+                  AND lower(rtrim(ids.endpoint, '/'))=lower(rtrim(?, '/'))
+                ORDER BY t.tag_id
+                """,
+                (config_version, self.stashbox_endpoint),
+            )
+        ]
+        by_external = {str(row["stash_id"]): row for row in rows if row["stash_id"]}
+        by_name: dict[str, list[dict[str, object]]] = {}
+        for row in rows:
+            by_name.setdefault(str(row["name"] or "").casefold(), []).append(row)
+        choices: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for external_id, name in requested:
+            matched = by_external.get(external_id)
+            if matched is None:
+                matches = by_name.get(name.casefold(), [])
+                matched = matches[0] if len(matches) == 1 else None
+            if matched is None:
+                # Try taxonomy alias → local tag mapping
+                snapshot = self.connection.execute(
+                    "SELECT value FROM application_meta WHERE key='taxonomy_snapshot_id'"
+                ).fetchone()
+                if snapshot:
+                    tax_row = self.connection.execute(
+                        """
+                        SELECT ttm.local_tag_id
+                        FROM taxonomy_tag tt
+                        JOIN tag_taxonomy_match ttm
+                          ON ttm.snapshot_id=tt.snapshot_id AND ttm.external_tag_id=tt.tag_id
+                        WHERE tt.snapshot_id=? AND lower(tt.name)=?
+                        UNION
+                        SELECT ttm.local_tag_id
+                        FROM taxonomy_tag_alias tta
+                        JOIN taxonomy_tag tt USING(snapshot_id, tag_id)
+                        JOIN tag_taxonomy_match ttm
+                          ON ttm.snapshot_id=tt.snapshot_id AND ttm.external_tag_id=tt.tag_id
+                        WHERE tta.snapshot_id=? AND lower(tta.alias)=?
+                        """,
+                        (snapshot[0], name.casefold(), snapshot[0], name.casefold()),
+                    ).fetchone()
+                    if tax_row:
+                        local_id = str(tax_row["local_tag_id"])
+                        matched = next((r for r in rows if str(r["tag_id"]) == local_id), None)
+            if matched is None or str(matched["tag_id"]) in seen:
+                continue
+            seen.add(str(matched["tag_id"]))
+            choices.append(
+                {
+                    "tag_id": str(matched["tag_id"]),
+                    "name": str(matched["name"] or matched["tag_id"]),
+                    "direct_value": (
+                        float(str(matched["direct_value"]))
+                        if matched["direct_value"] is not None
+                        else None
+                    ),
+                    "direct_blocked": bool(matched["direct_blocked"]),
+                }
+            )
+        return {"schema_version": API_SCHEMA_VERSION, "items": choices}
+
+    def tag_questions(
+        self, limit: int = 5, exclude_tag_ids: Set[str] = frozenset()
+    ) -> dict[str, object]:
+        """Unanswered content tags ranked by how much one answer would change
+        what For You shows.
+
+        value = leverage x reach x strength. leverage is the share of the tag's
+        blended affinity a direct answer would control; reach is the
+        rank-discounted share of the For You pool carrying the tag; strength is
+        how far the current guess is from neutral (at least
+        TAG_QUESTION_MIN_STRENGTH), so confident guesses get checked first.
+        exclude_tag_ids drops tags the browser has already answered or
+        skipped, so a continuous queue can keep fetching past them.
+        """
+        if not 1 <= limit <= 10:
+            raise ValueError("limit must be between 1 and 10")
+        profile_items = self.taste_profile()["items"]
+        assert isinstance(profile_items, list)
+        config = self.config()["config"]
+        assert isinstance(config, dict)
+        slate = SlateBuilder(
+            self.connection, diversity_enabled=bool(config["diversity_enabled"])
+        ).recommend("for_you", TAG_QUESTION_POOL_SIZE)
+        pool = [item.scene_id for item in slate.items]
+        weights = {scene_id: 1 / math.log2(rank + 1) for rank, scene_id in enumerate(pool, 1)}
+        total_weight = sum(weights.values())
+        scene_tags: dict[str, set[str]] = defaultdict(set)
+        for row in self.connection.execute(
+            """
+            SELECT scene_id, tag_id FROM scene_tag
+            WHERE provenance='scene' AND scene_id IN (SELECT value FROM json_each(?))
+            """,
+            (json.dumps(pool),),
+        ):
+            scene_tags[str(row["scene_id"])].add(str(row["tag_id"]))
+        reach_weight: dict[str, float] = defaultdict(float)
+        members: dict[str, list[str]] = defaultdict(list)
+        for scene_id in pool:
+            for tag_id in sorted(scene_tags[scene_id]):
+                reach_weight[tag_id] += weights[scene_id]
+                members[tag_id].append(scene_id)
+        total_scenes = int(
+            self.connection.execute("SELECT count(*) FROM source_scene").fetchone()[0]
+        )
+        candidates: list[dict[str, object]] = []
+        for item in profile_items:
+            assert isinstance(item, dict)
+            tag_id = str(item["tag_id"])
+            scene_count = int(item["scene_count"])
+            if (
+                item["prompt"] is None
+                or tag_id in exclude_tag_ids
+                or len(members[tag_id]) < TAG_QUESTION_MIN_REACH
+                # ponytail: library-wide prevalence is the existing cheap generic-tag signal.
+                or (scene_count >= 5 and scene_count >= 0.8 * total_scenes)
+            ):
+                continue
+            reach = reach_weight[tag_id] / total_weight
+            leverage = DIRECT_TAG_SUPPORT / (float(str(item["support"])) + DIRECT_TAG_SUPPORT)
+            inferred = float(str(item["inferred_value"]))
+            strength = max(abs(inferred), TAG_QUESTION_MIN_STRENGTH)
+            guess = (
+                ("like" if inferred > 0 else "dislike")
+                if abs(inferred) >= TAG_QUESTION_GUESS
+                else None
+            )
+            candidates.append(
+                {
+                    "tag_id": tag_id,
+                    "name": item["name"],
+                    "inferred_value": item["inferred_value"],
+                    "confidence": item["confidence"],
+                    "support": item["support"],
+                    "inherited_value": item["inherited_value"],
+                    "scene_count": scene_count,
+                    "reach": reach,
+                    "leverage": leverage,
+                    "value": leverage * reach * strength,
+                    "guess": guess,
+                    "examples": members[tag_id][:TAG_QUESTION_EXAMPLES],
+                }
+            )
+        candidates.sort(
+            key=lambda item: (
+                -float(str(item["value"])),
+                abs(float(str(item["inferred_value"]))),
+                str(item["name"]).casefold(),
+                str(item["tag_id"]),
+            )
+        )
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "pool_size": len(pool),
+            "items": candidates[:limit],
+        }
+
+    def answer_review(self, limit: int = 5) -> dict[str, object]:
+        """Direct tag answers that most disagree with what viewing alone suggests.
+
+        The model keeps each answered tag's learned (history-only) affinity in
+        its metadata; the blended affinity already contains the answer.
+        """
+        if not 1 <= limit <= 10:
+            raise ValueError("limit must be between 1 and 10")
+        model_id = RecommendationModelStore(self.connection).current_model_id()
+        if model_id is None:
+            raise RuntimeError("no published model")
+        feature_version = str(
+            self.connection.execute(
+                "SELECT feature_version FROM model_version WHERE model_id=?", (model_id,)
+            ).fetchone()[0]
+        )
+        candidates: list[dict[str, object]] = []
+        for row in self.connection.execute(
+            """
+            SELECT p.tag_id, t.name, p.value, p.occurred_at_ms, a.metadata_json,
+                   (SELECT count(DISTINCT st.scene_id) FROM scene_tag st
+                    WHERE st.tag_id=p.tag_id AND st.provenance='scene') AS scene_count
+            FROM direct_tag_preference p
+            JOIN source_tag t ON t.tag_id=p.tag_id
+            JOIN tag_role r ON r.tag_id=p.tag_id AND r.config_version=? AND r.role='content'
+            JOIN feature_definition d
+              ON d.feature_version=? AND d.family='content' AND d.name='tag:' || p.tag_id
+            JOIN feature_affinity a ON a.feature_id=d.feature_id AND a.model_id=?
+            WHERE p.blocked=0
+            """,
+            (effective_tag_role_config_version(self.connection), feature_version, model_id),
+        ):
+            metadata = json.loads(str(row["metadata_json"]))
+            learned = metadata.get("learned_affinity")
+            learned_confidence = metadata.get("learned_confidence")
+            if learned is None or learned_confidence is None:
+                continue
+            learned_value = float(learned)
+            confidence = float(learned_confidence)
+            if confidence < ANSWER_REVIEW_MIN_CONFIDENCE:
+                continue
+            answer = float(row["value"])
+            candidates.append(
+                {
+                    "tag_id": str(row["tag_id"]),
+                    "name": str(row["name"] or row["tag_id"]),
+                    "answer": answer,
+                    "answered_at_ms": int(row["occurred_at_ms"]),
+                    "learned_value": learned_value,
+                    "learned_confidence": confidence,
+                    "scene_count": int(row["scene_count"]),
+                    "disagreement": abs(answer - learned_value) * confidence,
+                }
+            )
+        candidates.sort(
+            key=lambda item: (
+                -float(str(item["disagreement"])),
+                -int(str(item["scene_count"])),
+                str(item["name"]).casefold(),
+                str(item["tag_id"]),
+            )
+        )
+        items = candidates[:limit]
+        for item in items:
+            item["examples"] = [
+                str(row[0])
+                for row in self.connection.execute(
+                    """
+                    SELECT st.scene_id FROM scene_tag st
+                    JOIN model_scene_score s ON s.scene_id=st.scene_id AND s.model_id=?
+                    WHERE st.tag_id=? AND st.provenance='scene'
+                    ORDER BY s.current_fit DESC, st.scene_id LIMIT ?
+                    """,
+                    (model_id, item["tag_id"], TAG_QUESTION_EXAMPLES),
+                )
+            ]
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "candidate_count": len(candidates),
+            "items": items,
+        }
+
+    def curation_impact(self) -> dict[str, object]:
+        return curation.curation_impact(self.connection)
+
+    def submit_impact_correction(self, scene_id: str, direction: str) -> dict[str, object]:
+        return curation.submit_impact_correction(self.connection, scene_id, direction)
+
+    def submit_events(self, entries: list[dict[str, Any]]) -> dict[str, object]:
+        store = InteractionStore(self.connection)
+        impressions = [
+            entry for entry in entries if entry.get("event_type") == "qualified_impression"
+        ]
+        sessions = [entry for entry in entries if entry.get("event_type") != "qualified_impression"]
+        inserted = store.qualify_impressions(impressions) + store.submit_sessions(sessions)
+        return {"schema_version": API_SCHEMA_VERSION, "accepted": inserted}
+
+    def prune_candidates(
+        self,
+        view: str = "candidates",
+        *,
+        aggressiveness: float = 0.0,
+        page: int = 1,
+        page_size: int = 20,
+        tag_name: str = "[Prune]",
+    ) -> dict[str, object]:
+        if view not in {"candidates", "tagged", "explicit", "suspects", "breadth"}:
+            raise ValueError("unknown prune view")
+        if page < 1 or not 1 <= page_size <= 100:
+            raise ValueError("invalid prune page")
+        if not 0 <= aggressiveness <= 1:
+            raise ValueError("aggressiveness must be between 0 and 1")
+        model_id = RecommendationModelStore(self.connection).current_model_id()
+        if model_id is None:
+            raise RuntimeError("no published model")
+        with span("python", "prune.tagged"):
+            tagged = {
+                str(row[0])
+                for row in self.connection.execute(
+                    """
+                    SELECT scene_id FROM scene_tag WHERE tag_id IN (
+                      SELECT tag_id FROM source_tag WHERE lower(name)=lower(?)
+                    )
+                    """,
+                    (tag_name,),
+                )
+            }
+        states = {
+            str(row["scene_id"]): str(row["state"])
+            for row in self.connection.execute("SELECT scene_id, state FROM pruning_candidate")
+        }
+        with span("python", "prune.explicit"):
+            explicit = {
+                str(row[0])
+                for row in self.connection.execute(
+                    """
+                    SELECT f.scene_id FROM feedback f
+                    WHERE f.reversed_by_id IS NULL
+                    AND f.feedback_type IN ('thumb_down', 'never_show')
+                    AND f.occurred_at_ms=(
+                      SELECT max(f2.occurred_at_ms) FROM feedback f2
+                      WHERE f2.scene_id=f.scene_id AND f2.reversed_by_id IS NULL
+                      AND f2.feedback_type IN ('thumb_up', 'thumb_down', 'never_show')
+                    )
+                    """
+                )
+            } | {scene_id for scene_id, state in states.items() if state == "review"}
+        appeal_limit = -0.18 + 0.13 * aggressiveness
+        confidence_limit = 0.55 - 0.20 * aggressiveness
+        with span("python", "prune.scores"):
+            scores = (
+                {
+                    str(row["scene_id"]): row
+                    for row in self.connection.execute(
+                        """
+                        SELECT scene_id, appeal, confidence FROM model_scene_score
+                        WHERE model_id=? AND appeal<=? AND confidence>=?
+                        UNION
+                        SELECT scene_id, appeal, confidence FROM model_scene_score
+                        WHERE model_id=? AND scene_id IN (
+                          SELECT scene_id FROM pruning_candidate WHERE state='review'
+                        )
+                        """,
+                        (model_id, appeal_limit, confidence_limit, model_id),
+                    )
+                }
+                if view != "tagged"
+                else {}
+            )
+        suspects = {
+            scene_id
+            for scene_id, score in scores.items()
+            if float(score["appeal"]) <= appeal_limit
+            and float(score["confidence"]) >= confidence_limit
+            and states.get(scene_id) != "keep"
+        }
+        breadth: set[str] = set()
+        breadth_scene_studio: dict[str, str] = {}
+        breadth_studio_stats: dict[str, tuple[int, int]] = {}
+        breadth_studio_names: dict[str, str] = {}
+        with span("python", "prune.breadth"):
+            played = {
+                str(row[0])
+                for row in self.connection.execute(
+                    f"""
+                    SELECT DISTINCT scene_id FROM source_play
+                    UNION
+                    SELECT DISTINCT scene_id FROM play_session
+                    WHERE provenance<>'direct_player' OR {OBSERVED_PLAYBACK_SQL}
+                    """
+                )
+            }
+            studio_scenes: dict[str, set[str]] = defaultdict(set)
+            for row in self.connection.execute(
+                """
+                SELECT s.scene_id, s.studio_id, st.name FROM source_scene s
+                JOIN source_studio st ON st.studio_id = s.studio_id
+                WHERE s.studio_id IS NOT NULL
+                """
+            ):
+                scene_id, studio_id = str(row["scene_id"]), str(row["studio_id"])
+                studio_scenes[studio_id].add(scene_id)
+                breadth_studio_names[studio_id] = str(row["name"] or "")
+            total_scenes = max(
+                1, int(self.connection.execute("SELECT count(*) FROM source_scene").fetchone()[0])
+            )
+            base_rate = len(played) / total_scenes
+            alpha = DEFAULT_CONFIG.ranking.dark_prior_strength
+            if base_rate > 0:
+                for studio_id, scenes in studio_scenes.items():
+                    library_count = len(scenes)
+                    if library_count <= DEFAULT_CONFIG.ranking.dark_max_library:
+                        continue
+                    played_count = len(scenes & played)
+                    rate = (played_count + alpha * base_rate) / (library_count + alpha)
+                    darkness = max(0.0, min(1.0, 1 - rate / base_rate))
+                    if darkness >= DEFAULT_CONFIG.ranking.dark_threshold:
+                        breadth_studio_stats[studio_id] = (library_count, played_count)
+                        for scene_id in scenes:
+                            if states.get(scene_id) == "keep":
+                                continue
+                            breadth.add(scene_id)
+                            breadth_scene_studio[scene_id] = studio_id
+        selected = {
+            "candidates": explicit | suspects | breadth,
+            "tagged": tagged,
+            "explicit": explicit,
+            "suspects": suspects,
+            "breadth": breadth,
+        }[view] - (tagged if view != "tagged" else set())
+        ordered = sorted(
+            selected,
+            key=lambda scene_id: (
+                scene_id not in explicit,
+                float(scores[scene_id]["appeal"]) if scene_id in scores else 0,
+                scene_id,
+            ),
+        )
+        start = (page - 1) * page_size
+        page_ids = ordered[start : start + page_size]
+        rows = {
+            str(row["scene_id"]): dict(row)
+            for row in self.connection.execute(
+                f"SELECT scene_id, title, play_count FROM source_scene WHERE scene_id IN "
+                f"({','.join('?' for _ in page_ids)})",
+                page_ids,
+            )
+        }
+        items = []
+        for scene_id in page_ids:
+            score = scores.get(scene_id)
+            evidence = []
+            if scene_id in explicit:
+                evidence.append("Explicit negative feedback")
+            if scene_id in suspects:
+                evidence.append("Low predicted Appeal with supporting evidence")
+            if scene_id in breadth:
+                studio_id = breadth_scene_studio[scene_id]
+                library_count, played_count = breadth_studio_stats[studio_id]
+                studio_name = breadth_studio_names.get(studio_id, studio_id)
+                evidence.append(
+                    f"Broad, low-engagement studio ({studio_name}): "
+                    f"owns {library_count}, played {played_count}"
+                )
+            items.append(
+                {
+                    **rows.get(scene_id, {"scene_id": scene_id, "title": "", "play_count": 0}),
+                    "appeal": float(score["appeal"]) if score else None,
+                    "confidence": float(score["confidence"]) if score else None,
+                    "tagged": scene_id in tagged,
+                    "explicit": scene_id in explicit,
+                    "suspect": scene_id in suspects,
+                    "breadth": scene_id in breadth,
+                    "evidence": evidence,
+                }
+            )
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "model_id": model_id,
+            "view": view,
+            "aggressiveness": aggressiveness,
+            "tag_name": tag_name,
+            "page": page,
+            "page_size": page_size,
+            "total": len(ordered),
+            "items": items,
+        }
+
+    def dismiss_prune_candidate(self, scene_id: str, now_ms: int | None = None) -> None:
+        now_ms = now_ms if now_ms is not None else time.time_ns() // 1_000_000
+        with transaction(self.connection):
+            self.connection.execute(
+                """
+                INSERT INTO pruning_candidate(scene_id, state, created_at_ms, updated_at_ms, reason)
+                VALUES (?, 'keep', ?, ?, 'Dismissed model suspect')
+                ON CONFLICT(scene_id) DO UPDATE SET state='keep',
+                    updated_at_ms=excluded.updated_at_ms, reason=excluded.reason
+                """,
+                (scene_id, now_ms, now_ms),
+            )
+
+    def record_prune_tags(
+        self, scene_ids: list[str], tagged: bool, tag_id: str, tag_name: str
+    ) -> None:
+        now_ms = time.time_ns() // 1_000_000
+        with transaction(self.connection):
+            self.connection.execute(
+                """
+                INSERT INTO source_tag(tag_id, name, source_hash) VALUES (?, ?, 'curator-prune')
+                ON CONFLICT(tag_id) DO UPDATE SET name=excluded.name
+                """,
+                (tag_id, tag_name),
+            )
+            if tagged:
+                self.connection.executemany(
+                    """
+                    INSERT OR IGNORE INTO scene_tag(scene_id, tag_id, provenance)
+                    VALUES (?, ?, 'scene')
+                    """,
+                    ((scene_id, tag_id) for scene_id in scene_ids),
+                )
+                self.connection.executemany(
+                    """
+                    INSERT INTO pruning_candidate(
+                        scene_id, state, created_at_ms, updated_at_ms, reason
+                    )
+                    VALUES (?, 'remove', ?, ?, ?)
+                    ON CONFLICT(scene_id) DO UPDATE SET state='remove',
+                        updated_at_ms=excluded.updated_at_ms, reason=excluded.reason
+                    """,
+                    ((scene_id, now_ms, now_ms, f"Tagged {tag_name}") for scene_id in scene_ids),
+                )
+            else:
+                self.connection.executemany(
+                    "DELETE FROM scene_tag WHERE scene_id=? AND tag_id=?",
+                    ((scene_id, tag_id) for scene_id in scene_ids),
+                )
+                self.connection.executemany(
+                    "DELETE FROM pruning_candidate WHERE scene_id=? AND state='remove'",
+                    ((scene_id,) for scene_id in scene_ids),
+                )
+
+    def reconcile_prune_tag(self, tag_name: str) -> bool:
+        tagged = {
+            str(row[0])
+            for row in self.connection.execute(
+                """
+                SELECT st.scene_id FROM scene_tag st JOIN source_tag t USING(tag_id)
+                WHERE lower(t.name)=lower(?)
+                """,
+                (tag_name,),
+            )
+        }
+        now_ms = time.time_ns() // 1_000_000
+        reason = f"Tagged {tag_name}"
+        with transaction(self.connection):
+            deleted = self.connection.execute(
+                """
+                DELETE FROM pruning_candidate
+                WHERE state='remove' AND scene_id NOT IN (
+                    SELECT st.scene_id FROM scene_tag st JOIN source_tag t USING(tag_id)
+                    WHERE lower(t.name)=lower(?)
+                )
+                """,
+                (tag_name,),
+            ).rowcount
+            changed = deleted > 0
+            for scene_id in tagged:
+                cursor = self.connection.execute(
+                    """
+                INSERT INTO pruning_candidate(scene_id, state, created_at_ms, updated_at_ms, reason)
+                VALUES (?, 'remove', ?, ?, ?)
+                ON CONFLICT(scene_id) DO UPDATE SET state='remove',
+                    updated_at_ms=excluded.updated_at_ms, reason=excluded.reason
+                WHERE pruning_candidate.state!='remove'
+                    OR pruning_candidate.reason IS NOT excluded.reason
+                """,
+                    (scene_id, now_ms, now_ms, reason),
+                )
+                changed = changed or cursor.rowcount > 0
+        return changed
+
+    def config(self) -> dict[str, object]:
+        row = self.connection.execute(
+            "SELECT config_json, updated_at_ms FROM curator_config WHERE singleton=1"
+        ).fetchone()
+        stored = json.loads(row["config_json"])
+        return {
+            "schema_version": API_SCHEMA_VERSION,
+            "config": {**DEFAULT_PLUGIN_CONFIG, **stored},
+            "updated_at_ms": int(row["updated_at_ms"]),
+        }
+
+    def update_config(
+        self, values: dict[str, object], now_ms: int | None = None
+    ) -> dict[str, object]:
+        allowed = {
+            "saved_filters",
+            "moods",
+            "together_excluded_tags",
+            "page_size",
+            "recommendation_endless_scroll",
+            "diversity_enabled",
+            "new_arrivals_include_unorganized",
+            "rotation_cooldown_days",
+            "sync_page_size",
+            "debounce_ms",
+            "model_update_event_threshold",
+            "model_update_max_wait_minutes",
+            "model_update_min_interval_minutes",
+            "prune_tag_name",
+            "ignored_tags",
+            "expand_horizon_days",
+            "expand_gender",
+            "expand_wildcard",
+            "expand_candidate_limit",
+            "expand_similar_seed_top_k",
+            "expand_similar_seed_per_favorite",
+            "auto_tasks_enabled",
+            "schedule_expand_refresh_enabled",
+            "schedule_expand_refresh_interval_hours",
+            "schedule_expand_refresh_at_hour",
+            "schedule_sync_build_enabled",
+            "schedule_sync_build_interval_hours",
+            "schedule_sync_build_at_hour",
+            "schedule_backup_enabled",
+            "schedule_backup_interval_hours",
+            "schedule_backup_at_hour",
+        }
+        unknown = set(values) - allowed
+        if unknown:
+            raise ValueError(f"unknown configuration keys: {sorted(unknown)}")
+        current = self.config()["config"]
+        assert isinstance(current, dict)
+        merged = {**current, **values}
+        self._validate_config(merged)
+        with transaction(self.connection):
+            self.connection.execute(
+                "UPDATE curator_config SET config_json=?, updated_at_ms=? WHERE singleton=1",
+                (
+                    json.dumps(merged, sort_keys=True, separators=(",", ":")),
+                    now_ms if now_ms is not None else time.time_ns() // 1_000_000,
+                ),
+            )
+        return self.config()
+
+    @staticmethod
+    def _validate_config(values: dict[str, object]) -> None:
+        if "saved_filters" in values:
+            filters = values["saved_filters"]
+            if not isinstance(filters, dict):
+                raise ValueError("saved_filters must be an object")
+            for scope, saved in filters.items():
+                if scope not in {"recommendations", "similar", "expand", "hunt"}:
+                    raise ValueError("unknown saved filter scope")
+                presets = saved.get("presets") if isinstance(saved, dict) else None
+                if not isinstance(presets, dict):
+                    raise ValueError("saved filter scope needs a presets object")
+                if any(
+                    not name.strip() or not isinstance(value, dict)
+                    for name, value in presets.items()
+                ):
+                    raise ValueError("saved filters need a nonempty name and an object value")
+                default = saved.get("default")
+                if default is not None and (not isinstance(default, str) or default not in presets):
+                    raise ValueError("saved filter default must name an existing preset")
+        if "moods" in values:
+            moods = values["moods"]
+            if not isinstance(moods, list) or len(moods) > 50:
+                raise ValueError("moods must be a list of at most 50 moods")
+            ids, names = set(), set()
+            for mood in moods:
+                if (
+                    not isinstance(mood, dict)
+                    or not isinstance(mood.get("id"), str)
+                    or not mood["id"]
+                    or len(mood["id"].encode()) > 128
+                    or not isinstance(mood.get("name"), str)
+                    or not mood["name"].strip()
+                    or len(mood["name"].encode()) > 80
+                    or not isinstance(mood.get("excluded_tags"), list)
+                ):
+                    raise ValueError(
+                        "each mood needs a string id, a name, and an excluded_tags list"
+                    )
+                name_key = mood["name"].strip().lower()
+                if mood["id"] in ids or name_key in names:
+                    raise ValueError("mood ids and names must be unique")
+                ids.add(mood["id"])
+                names.add(name_key)
+                CuratorAPI._validate_config({"together_excluded_tags": mood["excluded_tags"]})
+        tags = values.get("together_excluded_tags")
+        if tags is not None:
+            if not isinstance(tags, list) or len(tags) > 50:
+                raise ValueError("together_excluded_tags must be a list of at most 50 tags")
+            if any(
+                not isinstance(tag, dict)
+                or any(not isinstance(tag.get(key), str) or not tag[key] for key in ("id", "name"))
+                for tag in tags
+            ):
+                raise ValueError(
+                    "together_excluded_tags entries must have nonempty string id and name"
+                )
+        diversity = values.get("diversity_enabled")
+        if diversity is not None and not isinstance(diversity, bool):
+            raise ValueError("diversity_enabled must be true or false")
+        endless = values.get("recommendation_endless_scroll")
+        if endless is not None and not isinstance(endless, bool):
+            raise ValueError("recommendation_endless_scroll must be true or false")
+        unorganized = values.get("new_arrivals_include_unorganized")
+        if unorganized is not None and not isinstance(unorganized, bool):
+            raise ValueError("new_arrivals_include_unorganized must be true or false")
+        for key in (
+            "schedule_expand_refresh_at_hour",
+            "schedule_sync_build_at_hour",
+            "schedule_backup_at_hour",
+        ):
+            value = values.get(key)
+            if value is not None and (not isinstance(value, int) or not 0 <= value <= 23):
+                raise ValueError(f"{key} must be an integer from 0 to 23")
+        for key in ("page_size", "sync_page_size"):
+            value = values.get(key)
+            if value is not None and (not isinstance(value, int) or not 1 <= value <= 500):
+                raise ValueError(f"{key} must be an integer from 1 to 500")
+        cooldown = values.get("rotation_cooldown_days")
+        if cooldown is not None and (
+            isinstance(cooldown, bool) or not isinstance(cooldown, int) or not 1 <= cooldown <= 30
+        ):
+            raise ValueError("rotation_cooldown_days must be an integer from 1 to 30")
+        debounce = values.get("debounce_ms")
+        if debounce is not None and (not isinstance(debounce, int) or not 0 <= debounce <= 60_000):
+            raise ValueError("debounce_ms must be an integer from 0 to 60000")
+        threshold = values.get("model_update_event_threshold")
+        if threshold is not None and (not isinstance(threshold, int) or not 1 <= threshold <= 100):
+            raise ValueError("model_update_event_threshold must be an integer from 1 to 100")
+        for key in ("model_update_max_wait_minutes", "model_update_min_interval_minutes"):
+            value = values.get(key)
+            if value is not None and (
+                not isinstance(value, (int, float)) or not 1 <= float(value) <= 24 * 60
+            ):
+                raise ValueError(f"{key} must be between 1 and 1440")
+        prune_tag = values.get("prune_tag_name")
+        if prune_tag is not None and (
+            not isinstance(prune_tag, str) or not prune_tag.strip() or len(prune_tag) > 100
+        ):
+            raise ValueError("prune_tag_name must be a non-empty string up to 100 characters")
+        ignored_tags = values.get("ignored_tags")
+        if ignored_tags is not None and not isinstance(ignored_tags, str):
+            raise ValueError("ignored_tags must be a comma-separated string")
+        horizon = values.get("expand_horizon_days")
+        if horizon is not None and (not isinstance(horizon, int) or not 1 <= horizon <= 3650):
+            raise ValueError("expand_horizon_days must be an integer from 1 to 3650")
+        gender = values.get("expand_gender")
+        if gender is not None and not isinstance(gender, str):
+            raise ValueError("expand_gender must be a string")
+        wildcard = values.get("expand_wildcard")
+        if wildcard is not None and not isinstance(wildcard, bool):
+            raise ValueError("expand_wildcard must be true or false")
+        candidate_limit = values.get("expand_candidate_limit")
+        if candidate_limit is not None and (
+            not isinstance(candidate_limit, int) or not 100 <= candidate_limit <= 10_000
+        ):
+            raise ValueError("expand_candidate_limit must be an integer from 100 to 10000")
+        similar_top_k = values.get("expand_similar_seed_top_k")
+        if similar_top_k is not None and (
+            not isinstance(similar_top_k, int) or not 0 <= similar_top_k <= 200
+        ):
+            raise ValueError("expand_similar_seed_top_k must be an integer from 0 to 200")
+        similar_per_favorite = values.get("expand_similar_seed_per_favorite")
+        if similar_per_favorite is not None and (
+            not isinstance(similar_per_favorite, int) or not 0 <= similar_per_favorite <= 50
+        ):
+            raise ValueError("expand_similar_seed_per_favorite must be an integer from 0 to 50")

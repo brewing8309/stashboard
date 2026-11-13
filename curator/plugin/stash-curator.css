@@ -1,0 +1,6236 @@
+/* Shared surface and text tokens inherit Sticky, Stash UI or Bootstrap variables
+   when available, with Curator's existing palette as fallback. Lane hues and
+   the explicit light theme remain Curator-specific.
+   --curator-card-* backs Stash's native scene-card/performer-card
+   internals and curator's own adjacent card-body content — its colors
+   *are* theme-responsive (see the light block below), Stash's own
+   hardcoded card CSS just isn't, so that half needs direct selector
+   overrides instead of a token swap (see the .curator-card .card rules
+   below the light-theme block). */
+:root {
+  --curator-bg: var(--bg-0, var(--st-ink, var(--bs-body-bg, #101216)));
+  --curator-surface: var(--surface-solid, var(--st-ink-2, var(--bs-tertiary-bg, var(--bs-secondary-bg, #182126))));
+  --curator-surface-raised: var(--control-bg-hover, var(--st-ink-3, var(--bs-secondary-bg, #252a30)));
+  --curator-card-surface: var(--card-bg, var(--curator-surface));
+  --curator-card-border: var(--card-border, var(--st-ink-3, var(--bs-border-color, rgba(255, 255, 255, 0.12))));
+  --curator-card-border-strong: var(--surface-border, var(--st-flush, var(--bs-border-color, rgba(255, 255, 255, 0.22))));
+  --curator-card-shadow: 0 0.25rem 0.8rem rgba(0, 0, 0, 0.2);
+  --curator-card-shadow-lg: 0 0.4rem 1rem rgba(0, 0, 0, 0.3);
+  --curator-card-text: var(--text, var(--st-paper, var(--bs-body-color, #f8f9fa)));
+  --curator-card-text-muted: var(--text-muted, var(--st-smudge, var(--bs-secondary-color, #adb5bd)));
+  --curator-border: var(--border, var(--st-ink-3, var(--bs-border-color, rgba(255, 255, 255, 0.14))));
+  --curator-border-strong: var(--surface-border, var(--st-flush, var(--bs-border-color, rgba(255, 255, 255, 0.22))));
+  --curator-text: var(--text, var(--st-paper, var(--bs-body-color, #f8f9fa)));
+  --curator-text-muted: var(--text-muted, var(--st-smudge, var(--bs-secondary-color, #adb5bd)));
+  --curator-overlay: rgba(16, 18, 22, 0.82);
+  --curator-wash-raised: rgba(255, 255, 255, 0.04);
+  --curator-wash-recessed: rgba(0, 0, 0, 0.18);
+  --curator-shadow-color: rgba(0, 0, 0, 0.3);
+  --curator-glow-color: rgba(51, 154, 240, 0.24);
+
+  --curator-accent: var(--st-flush, #4f8ce0);
+  --curator-accent-secondary: #d59a52;
+
+  --curator-hue-for_you: var(--st-flush, #4f8ce0);
+  --curator-hue-similar: #6cc4dc;
+  --curator-hue-best_bets: #f6a123;
+  --curator-hue-hunt: #e36d99;
+  --curator-hue-stretch: #4dcb9d;
+  --curator-hue-blind_spots: #e98449;
+  --curator-hue-dormant: #7985d8;
+  --curator-hue-new_arrivals: #90c748;
+  --curator-hue-revisit: #ab83e2;
+  --curator-hue-expand: #e46258;
+  --curator-hue-prune: #9aa1ab;
+  --curator-hue-curate: #4cc2a8;
+  --curator-insight-more: #4f8ce0;
+  --curator-insight-less: #d9763a;
+
+  --curator-radius-sm: var(--radius-sm, 4px);
+  --curator-radius: var(--radius, 7px);
+  --curator-radius-lg: var(--card-radius, 10px);
+
+  --curator-shadow-sm: 0 0.2rem 0.55rem var(--curator-shadow-color);
+  --curator-shadow-md: 0 0.25rem 0.8rem var(--curator-shadow-color);
+  --curator-shadow-lg: 0 0.4rem 1rem var(--curator-shadow-color);
+  --curator-shadow-glow: 0 0.25rem 0.8rem var(--curator-glow-color);
+
+  /* Deliberately NOT var(--curator-accent)/var(--curator-hue-similar) — those
+     vivid hues measure 3.41:1/1.99:1 against white text, both failing WCAG
+     AA (4.5:1). These are the same darker blue/teal already used as the
+     *light*-theme accent/hue-similar values (6.21:1/4.63:1) — reused here
+     as literals so dark theme's primary-button gradient passes AA too,
+     without darkening the vivid accent everywhere else it's used
+     (lane-hue dots, focus rings, etc). */
+  --curator-gradient-brand: linear-gradient(145deg, var(--st-ink-3, #1d5fb8), var(--st-ink-2, #1f7f96));
+
+  --curator-font-display: var(--st-display, "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif);
+  --curator-font-ui: var(--st-font, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif);
+  --curator-font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Consolas, monospace;
+}
+
+.curator-page[data-theme="light"] {
+  --curator-bg: #f1f2f5;
+  --curator-surface: #ffffff;
+  --curator-surface-raised: #e9ebef;
+  --curator-card-surface: #ffffff;
+  --curator-card-border: rgba(16, 18, 22, 0.14);
+  --curator-card-border-strong: rgba(16, 18, 22, 0.24);
+  --curator-card-text: #16181c;
+  --curator-card-text-muted: #5b6470;
+  --curator-border: rgba(16, 18, 22, 0.14);
+  --curator-border-strong: rgba(16, 18, 22, 0.24);
+  --curator-text: #16181c;
+  --curator-text-muted: #5b6470;
+  --curator-overlay: rgba(16, 18, 22, 0.5);
+  --curator-wash-raised: rgba(16, 18, 22, 0.04);
+  --curator-wash-recessed: rgba(16, 18, 22, 0.06);
+  --curator-shadow-color: rgba(16, 18, 22, 0.16);
+  --curator-glow-color: rgba(29, 95, 184, 0.22);
+
+  --curator-accent: var(--st-flush-deep, #1d5fb8);
+  --curator-accent-secondary: #a56f2a;
+
+  --curator-hue-for_you: var(--st-flush-deep, #1d5fb8);
+  --curator-hue-similar: #1f7f96;
+  --curator-hue-best_bets: #a86500;
+  --curator-hue-hunt: #d03970;
+  --curator-hue-stretch: #13845a;
+  --curator-hue-blind_spots: #c15415;
+  --curator-hue-dormant: #5564c3;
+  --curator-hue-new_arrivals: #518112;
+  --curator-hue-revisit: #824dcb;
+  --curator-hue-expand: #d53d32;
+  --curator-hue-prune: #7c838c;
+  --curator-hue-curate: #2f9c85;
+  --curator-insight-more: #1d5fb8;
+  --curator-insight-less: #c15415;
+}
+
+/* Stash's own native scene/performer card (Api.components.SceneCard,
+   rendered inside .curator-card) was previously assumed un-themeable and
+   pinned dark to match — but its background/title-color rules are plain
+   CSS, not inline styles, so they're just as overridable as the
+   Bootstrap .btn-primary/.alert-* overrides above. Restyle the card body
+   (thumbnail + its own overlays are left alone — badges over arbitrary
+   video/image content should stay legible regardless of page theme, the
+   same convention this component already uses) for light mode. .text-muted
+   carries !important in Stash's own stylesheet, so the override needs it
+   too, not just higher specificity. */
+.curator-page[data-theme="light"] .curator-card .card {
+  background-color: transparent;
+  color: var(--curator-text);
+}
+
+.curator-page[data-theme="light"] .curator-card .card-section-title {
+  color: var(--curator-text) !important;
+}
+
+.curator-page[data-theme="light"] .curator-card .text-muted {
+  color: var(--curator-text-muted) !important;
+}
+
+.curator-page[data-theme="light"] .curator-card hr {
+  border-color: var(--curator-border);
+}
+
+/* Bare <button>s don't inherit color from their parent by default in most
+   browsers (the UA stylesheet gives them their own color: buttontext) — any
+   text inside one that doesn't set its own explicit color falls back to
+   near-black regardless of the surrounding dark background. Confirmed
+   reproducing on .curator-lane-card-name. Fix at the root rather than
+   patching each instance found. */
+.curator-page button {
+  color: inherit;
+}
+
+/* Plain Bootstrap <Button>s (Generate, Rebuild, Submit picks, etc.) only
+   ever picked up curator's design tokens where a hand-picked custom class
+   (.curator-icon-button and friends) happened to set them explicitly —
+   every other button on the page kept Stash's own default Bootstrap
+   radius, reading as a different, un-reskinned control next to anything
+   that did get a custom class. Scope the radius token to every button
+   under .curator-page so the whole page is visually one family. */
+.curator-page .btn {
+  border-radius: var(--curator-radius);
+  transition: transform 0.12s ease, border-color 0.15s ease, background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.curator-page .btn:active {
+  transform: scale(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .curator-page .btn {
+    transition: none;
+  }
+
+  .curator-page .btn:active {
+    transform: none;
+  }
+}
+
+/* Bootstrap's stock .btn-primary/-secondary fills read heavier and flatter
+   than the mockup's palette: secondary there is just a bordered, --surface
+   button (color comes from the border/text, not a solid fill), and the
+   gradient treatment is reserved for the one true primary action per
+   screen rather than applied to every button that happens to default to
+   "primary". Restyle both to match. */
+.curator-page .btn-secondary,
+.curator-page .btn-outline-secondary {
+  background: var(--curator-surface);
+  border-color: var(--curator-border-strong);
+  color: var(--curator-text);
+}
+
+.curator-page .btn-secondary:hover,
+.curator-page .btn-outline-secondary:hover {
+  background: var(--curator-surface-raised);
+  border-color: var(--curator-text-muted);
+}
+
+.curator-page .btn-primary {
+  background: var(--curator-gradient-brand);
+  border-color: var(--curator-accent);
+  color: #fff;
+}
+
+.curator-page .btn-primary:hover {
+  filter: brightness(1.08);
+}
+
+.curator-page {
+  background: var(--curator-bg);
+  color: var(--curator-text);
+  font-family: var(--curator-font-ui);
+  box-sizing: border-box;
+  /* Stash's own route wrapper (.main.container-fluid, outside anything
+     this stylesheet controls) carries a fixed 15px horizontal gutter *and*
+     a 7px top-padding gutter, both with a transparent background — Stash's
+     real page background (a different blue-grey, not --curator-bg) shows
+     through on all three edges: a thin grey bar between the navbar and
+     this page's own background at the top, and the same gutter bleed
+     horizontally, most visible on narrow/mobile widths where 15px is a
+     bigger fraction of the screen. Extend past the gutter on all three
+     sides with matching negative margin, matched by extra padding so the
+     visible content inset is unchanged.
+  */
+  margin: -7px -15px 0;
+  min-height: 100vh;
+  min-width: 0;
+  overflow-x: clip;
+  padding: calc(0.55rem + 7px) calc(1.25rem + 15px) 2rem;
+  width: calc(100% + 30px);
+}
+
+/* Bootstrap's stock .alert-* colors (35 call sites across every screen —
+   empty states, errors, confirmations) were never reskinned, so every one
+   of them renders as a light, un-themed box in an otherwise all-dark page.
+   Same tinted-dark-surface pattern already used for lane cards and
+   sentiment tiers, just applied at the page level since alerts appear
+   everywhere. */
+.curator-page .alert {
+  border-radius: var(--curator-radius);
+}
+
+.curator-page .alert-info {
+  background: color-mix(in srgb, var(--curator-accent) 14%, var(--curator-surface));
+  border-color: color-mix(in srgb, var(--curator-accent) 40%, transparent);
+  color: var(--curator-text);
+}
+
+.curator-page .alert-danger {
+  background: color-mix(in srgb, #e0645c 16%, var(--curator-surface));
+  border-color: color-mix(in srgb, #e0645c 45%, transparent);
+  color: var(--curator-text);
+}
+
+.curator-page .alert-warning {
+  background: color-mix(in srgb, #e0824f 16%, var(--curator-surface));
+  border-color: color-mix(in srgb, #e0824f 45%, transparent);
+  color: var(--curator-text);
+}
+
+.curator-page .alert-success {
+  background: color-mix(in srgb, #5cc19c 16%, var(--curator-surface));
+  border-color: color-mix(in srgb, #5cc19c 45%, transparent);
+  color: var(--curator-text);
+}
+
+.curator-page .alert-secondary {
+  background: var(--curator-surface-raised);
+  border-color: var(--curator-border);
+  color: var(--curator-text);
+}
+
+.curator-page h1,
+.curator-page h2,
+.curator-page h3 {
+  font-family: var(--curator-font-display);
+}
+
+/* Single row (brand | scrollable nav | controls) at every width, matching
+   the design mockup's app-header-inner — previously a 2-row grid (brand +
+   controls on row 1, nav spanning full-width on row 2) above 36rem, which
+   the mockup never does. */
+.curator-header {
+  align-items: center;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.5rem 1.5rem;
+}
+
+.curator-header > *,
+.curator-similar,
+.curator-similar-search,
+.curator-expand-toolbar {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* The page spans the full screen so card grids gain columns on wide
+   displays. Forms, comparisons and reading text keep the previous content
+   width (the old 112rem page cap minus its padding) instead of stretching
+   across ultrawide screens. */
+.curator-curate,
+.curator-manage-shell,
+.curator-hunt-controls,
+.curator-hunt > .alert,
+.curator-similar-search,
+.curator-similar-candidates {
+  max-width: 109.5rem;
+}
+
+.curator-hunt-controls {
+  align-items: end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.4rem 0 0.8rem;
+}
+
+.curator-hunt-controls .curator-token-filter {
+  flex: 1 1 18rem;
+}
+
+.curator-brand {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.65rem;
+}
+
+.curator-brand-mark {
+  align-items: center;
+  background: var(--curator-gradient-brand);
+  border-radius: var(--curator-radius-lg);
+  box-shadow: var(--curator-shadow-glow);
+  display: inline-flex;
+  font-size: 1.15rem;
+  height: 2.35rem;
+  justify-content: center;
+  width: 2.35rem;
+}
+
+.curator-header h1 {
+  font-size: 1.55rem;
+  line-height: 1.1;
+  margin: 0;
+}
+
+.curator-tagline,
+.curator-feedback small {
+  color: var(--curator-text-muted);
+}
+
+.curator-tagline {
+  font-size: 0.82rem;
+  margin: 0.15rem 0 0;
+}
+
+.curator-view-guidance {
+  align-items: center;
+  color: var(--curator-text-muted);
+  display: flex;
+  font-size: 0.82rem;
+  gap: 0.75rem;
+  justify-content: space-between;
+  margin: 0.35rem 0 0.8rem;
+}
+
+.curator-view-copy {
+  min-width: 0;
+  position: relative;
+}
+
+.curator-view-stats {
+  color: var(--curator-text);
+  display: block !important;
+  font-weight: 600;
+  margin-top: 0.3rem !important;
+}
+
+.curator-view-actions {
+  align-items: center;
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.curator-view-copy h1 {
+  color: var(--curator-text);
+  font-size: 1.5rem;
+  margin: 0 0 0.2rem;
+}
+
+.curator-view-copy p {
+  display: inline;
+  margin: 0;
+}
+
+.curator-view-copy p + p::before {
+  content: " ";
+}
+
+.curator-diversity-toggle {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.curator-page .curator-rotate-button {
+  background: color-mix(in srgb, var(--curator-accent) 12%, var(--curator-surface));
+  border-color: color-mix(in srgb, var(--curator-accent) 55%, var(--curator-border));
+  box-shadow: var(--curator-shadow-sm);
+  color: var(--curator-text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.curator-page .curator-rotate-button:hover:not(:disabled),
+.curator-page .curator-rotate-button:focus-visible {
+  background: color-mix(in srgb, var(--curator-accent) 20%, var(--curator-surface));
+  border-color: var(--curator-accent);
+  color: var(--curator-text);
+}
+
+.curator-rotate-icon {
+  transition: transform 0.2s ease;
+}
+
+.curator-rotate-button:hover:not(:disabled) .curator-rotate-icon {
+  transform: rotate(35deg);
+}
+
+.curator-rotate-icon-spinning {
+  animation: curator-spin 0.7s linear infinite;
+}
+
+/* Question-mark disclosure for the Appeal/Rank explanation in the
+   recommendation lane guidance. The summary renders as a quiet circular
+   icon button; opening it shows the explanation as an inline popover. */
+.curator-view-help {
+  display: inline-block;
+  margin-left: 0.35rem;
+  position: relative;
+  vertical-align: middle;
+}
+
+.curator-view-help summary {
+  align-items: center;
+  border: 1px solid var(--curator-border-strong);
+  border-radius: 50%;
+  color: var(--curator-text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  height: 1.15rem;
+  justify-content: center;
+  list-style: none;
+  transition: color 0.12s ease, border-color 0.12s ease;
+  width: 1.15rem;
+}
+
+.curator-view-help summary::-webkit-details-marker {
+  display: none;
+}
+
+.curator-view-help summary:hover {
+  border-color: var(--curator-text-muted);
+  color: var(--curator-text);
+}
+
+.curator-view-help summary svg {
+  font-size: 0.7rem;
+}
+
+.curator-view-help[open] summary {
+  border-color: var(--curator-accent);
+  color: var(--curator-accent);
+}
+
+.curator-view-help p {
+  background: var(--curator-surface-raised);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius);
+  box-shadow: var(--curator-shadow-md);
+  color: var(--curator-text-muted);
+  display: block;
+  font-size: 0.76rem;
+  left: 0;
+  line-height: 1.45;
+  margin: 0.35rem 0 0;
+  max-width: 24rem;
+  padding: 0.5rem 0.6rem;
+  position: absolute;
+  top: 100%;
+  z-index: 5;
+}
+
+
+.curator-navigation {
+  align-items: stretch;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Bootstrap's own .nav-tabs rule (also applied here — the Nav component
+   renders className="curator-tabs nav nav-tabs") sets `margin: auto` then
+   `margin-bottom: 1.5rem`, i.e. an auto top margin plus a *fixed* 21px
+   bottom margin — that 21px doesn't get distributed as centering space
+   (there's no free space left to give the auto margin once the fixed
+   bottom margin claims its share), so the tabs strip sat flush against the
+   header's top edge with 21px of invisible margin below it instead of
+   being vertically centered like every other header control. `margin: 0`
+   here overrides both. */
+.curator-tabs {
+  align-items: center;
+  align-self: center;
+  border-bottom: 0;
+  flex: 1 1 34rem;
+  flex-wrap: nowrap;
+  height: 3rem;
+  justify-content: flex-start;
+  margin: 0;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  white-space: nowrap;
+}
+
+.curator-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+/* Collapsed primary nav (GH #150 Package 3): Recommendations / Curate /
+   Similar / Expand / Hunt / Manage — replaces the old flat PRIMARY_NAV_ITEMS
+   tab row (which surfaced all 5 recommendation lanes as separate top-level
+   tabs) and the <details> maintenance flyout below it. No full-pill (999px)
+   shapes, per the #150 design brief — rounded rectangles only. */
+.curator-tabs .nav-link {
+  align-items: center;
+  border-radius: var(--curator-radius-sm);
+  color: inherit;
+  display: inline-flex;
+  gap: 0.4rem;
+  height: 100%;
+  padding: 0.55rem 0.7rem;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.curator-tabs .nav-link.active {
+  background: var(--curator-gradient-brand);
+  color: #fff;
+}
+
+/* Override Stash UI's important button/tab fills, preserving native card overlays. */
+html.kb-classic .curator-page .btn-primary:not(.minimal, .scene-card *, .performer-card *),
+html.kb-classic .curator-tabs .nav-link.active,
+html.kb-classic .curator-lane-card[aria-pressed="true"],
+html.kb-classic .curator-manage-item[aria-current="page"] {
+  background: var(--st-flush) !important;
+  border-color: var(--st-flush) !important;
+  color: var(--st-ink) !important;
+}
+
+html.kb-classic .curator-lane-card[aria-pressed="true"] :is(.curator-lane-card-name, .curator-lane-card-desc, .curator-lane-card-icon) {
+  color: inherit;
+}
+
+html.kb-classic .curator-lane-card[aria-pressed="true"] .curator-lane-card-icon {
+  background: var(--curator-wash-recessed);
+}
+
+/* ---------- lane switcher (Recommendations tab, inside the page body) ---------- */
+.curator-lane-switcher {
+  display: flex;
+  gap: 0.6rem;
+  margin: 0.35rem 0 0.8rem;
+  overflow-x: auto;
+  padding-bottom: 0.2rem;
+}
+
+.curator-lane-card {
+  --lc: var(--curator-accent);
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius);
+  align-items: center;
+  cursor: pointer;
+  display: grid;
+  flex: 0 0 auto;
+  gap: 0.3rem 0.5rem;
+  grid-template-columns: auto minmax(0, 1fr);
+  padding: 0.55rem 0.65rem 0.6rem;
+  text-align: left;
+  width: 13rem;
+}
+
+.curator-lane-card:hover {
+  border-color: var(--curator-border-strong);
+}
+
+/* A flat tint of a warm lane hue over the dark surface reads as brown, so the
+   selected card fades a glow from the left and makes the icon chip solid. */
+.curator-lane-card[aria-pressed="true"] {
+  background: linear-gradient(90deg, color-mix(in srgb, var(--lc) 22%, var(--curator-surface)), var(--curator-surface) 70%);
+  border-color: var(--lc);
+}
+
+.curator-lane-card[aria-pressed="true"] .curator-lane-card-icon {
+  background: var(--lc);
+  color: var(--curator-surface);
+}
+
+.curator-lane-card-icon {
+  align-items: center;
+  background: color-mix(in srgb, var(--lc) 18%, var(--curator-surface));
+  border-radius: var(--curator-radius-sm);
+  color: var(--lc);
+  display: inline-flex;
+  height: 1.6rem;
+  justify-content: center;
+  width: 1.6rem;
+}
+
+.curator-lane-card-name {
+  color: var(--curator-text);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.curator-lane-card-desc {
+  align-self: start;
+  color: var(--curator-text-muted);
+  display: -webkit-box;
+  grid-column: 1 / -1;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  overflow: hidden;
+}
+
+/* ---------- Find + Curate switchers (lane-style card tabs) ---------- */
+/* Both reuse the lane-card classes from the recommendation lane switcher
+   above; the containers match the lane switcher's scrollable layout. */
+.curator-find-switcher,
+.curator-curate-switcher {
+  display: flex;
+  gap: 0.6rem;
+  margin: 0.35rem 0 0.8rem;
+  overflow-x: auto;
+  padding-bottom: 0.2rem;
+}
+
+/* Section head under the Curate switcher — same shape as Manage's detail
+   head, since Curate no longer uses the side-menu shell. */
+.curator-curate-head {
+  margin-bottom: 0.9rem;
+  position: relative;
+}
+
+.curator-curate-head h2 {
+  font-size: 1.15rem;
+  margin: 0 0 0.2rem;
+}
+
+.curator-curate-head p {
+  color: var(--curator-text-muted);
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+/* ---------- Manage shell (two-pane list + detail) ---------- */
+.curator-manage-shell {
+  align-items: start;
+  display: grid;
+  gap: 1.1rem;
+  grid-template-columns: 16rem 1fr;
+  margin-top: 0.5rem;
+}
+
+/* Neither the mockup nor this shell caps the detail pane's height — with
+   short demo content that never mattered, but a real section (e.g.
+   Sentiment review with many cards) can run tens of thousands of pixels
+   tall, pushing the section list off-screen and forcing a scroll-to-top
+   just to switch sections. Pin the list and let it scroll internally (the
+   list itself can be taller than the viewport with ten sections). */
+.curator-manage-list {
+  max-height: calc(100vh - 7rem);
+  overflow-y: auto;
+  position: sticky;
+  top: 0.75rem;
+}
+
+@media (max-width: 860px) {
+  .curator-manage-shell {
+    grid-template-columns: 1fr;
+  }
+
+  /* Below 860px the shell drops to one column — list and detail stack in
+     document order instead of sitting side by side, so a sticky list would
+     freeze partway down the page and visually overlap the detail content
+     scrolling underneath it (the sticky fix only makes sense for the
+     two-column layout it was built for). */
+  .curator-manage-list {
+    position: static;
+  }
+}
+
+.curator-manage-list {
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius);
+  overflow-x: hidden;
+}
+
+.curator-manage-item {
+  align-items: flex-start;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--curator-border);
+  cursor: pointer;
+  display: flex;
+  gap: 0.55rem;
+  padding: 0.65rem 0.7rem;
+  text-align: left;
+  width: 100%;
+}
+
+.curator-manage-item:last-child {
+  border-bottom: 0;
+}
+
+.curator-manage-item:hover {
+  background: var(--curator-wash-raised);
+}
+
+/* Use a dark fill so the selected item's white text stays readable. */
+.curator-manage-item[aria-current="page"] {
+  background: var(--st-ink-3, #1d5fb8);
+  color: #fff;
+}
+
+.curator-manage-item-icon {
+  align-items: center;
+  background: var(--curator-wash-raised);
+  border-radius: var(--curator-radius-sm);
+  display: inline-flex;
+  flex: none;
+  height: 1.7rem;
+  justify-content: center;
+  width: 1.7rem;
+}
+
+.curator-manage-item[aria-current="page"] .curator-manage-item-icon {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+.curator-manage-item-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.curator-manage-item-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.curator-manage-item-desc {
+  color: var(--curator-text-muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.curator-manage-item[aria-current="page"] .curator-manage-item-desc {
+  /* 0.78 measured 4.46:1 against the new #1d5fb8 background, just under
+     AA's 4.5:1 — bumped to clear it with a small margin. */
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.curator-manage-detail {
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius);
+  min-width: 0;
+  padding: 1rem 1.1rem;
+}
+
+.curator-manage-detail-head {
+  margin-bottom: 0.9rem;
+}
+
+.curator-manage-detail-head h2 {
+  font-size: 1.15rem;
+  margin: 0 0 0.2rem;
+}
+
+.curator-manage-detail-head p {
+  color: var(--curator-text-muted);
+  font-size: 0.8rem;
+  margin: 0;
+}
+
+/* Record list (Backups, Feedback history) — was a plain <table>, replaced
+   with the mockup's icon+title+meta row pattern (.record-row). */
+.curator-record-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.curator-record-row {
+  align-items: center;
+  border-bottom: 1px solid var(--curator-border);
+  display: flex;
+  gap: 0.7rem;
+  padding: 0.65rem 0.1rem;
+}
+
+.curator-record-row:last-child {
+  border-bottom: 0;
+}
+
+.curator-record-icon {
+  align-items: center;
+  background: var(--curator-surface-raised);
+  border-radius: var(--curator-radius-sm);
+  color: var(--curator-text-muted);
+  display: inline-flex;
+  flex: none;
+  height: 1.9rem;
+  justify-content: center;
+  width: 1.9rem;
+}
+
+.curator-record-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.curator-record-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.curator-record-meta {
+  color: var(--curator-text-muted);
+  font-size: 0.72rem;
+  margin-top: 0.1rem;
+}
+
+.curator-record-row .btn:not(.btn-primary) {
+  color: var(--curator-accent);
+  flex: none;
+  font-weight: 700;
+}
+
+.curator-record-row .curator-record-destructive {
+  color: #e0645c;
+}
+
+.curator-settings-group + .curator-settings-group {
+  margin-top: 1.4rem;
+}
+
+/* Pill switch with the state text inside (Settings boolean fields). */
+.curator-switch {
+  --curator-switch-knob: 1.25rem;
+  align-items: center;
+  background: var(--curator-border);
+  border: 1px solid var(--curator-text-muted);
+  border-radius: 999px;
+  display: inline-flex;
+  height: 1.65rem;
+  justify-content: center;
+  min-width: 3.5rem;
+  padding: 0 0.3rem;
+  position: relative;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.curator-switch:hover:not(:disabled) {
+  border-color: var(--curator-text);
+}
+.curator-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.curator-switch-on {
+  background: var(--curator-accent);
+  border-color: var(--curator-accent);
+}
+.curator-switch-thumb {
+  background: #fff;
+  border-radius: 50%;
+  height: var(--curator-switch-knob);
+  left: 0.15rem;
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  transition: left 0.15s ease;
+  width: var(--curator-switch-knob);
+}
+.curator-switch-on .curator-switch-thumb {
+  left: calc(100% - var(--curator-switch-knob) - 0.15rem);
+}
+.curator-switch-text {
+  color: var(--curator-text-muted);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding-left: calc(var(--curator-switch-knob) + 0.3rem);
+  text-transform: uppercase;
+  transition: color 0.15s ease, padding 0.15s ease;
+}
+.curator-switch-on .curator-switch-text {
+  color: #fff;
+  padding-left: 0;
+  padding-right: calc(var(--curator-switch-knob) + 0.3rem);
+}
+
+.curator-settings-group h3 {
+  font-size: 0.95rem;
+  margin: 0 0 0.2rem;
+}
+
+.curator-settings-field {
+  align-items: flex-start;
+}
+
+.curator-settings-control {
+  flex: none;
+  width: 12rem;
+}
+
+.curator-settings-saving {
+  color: var(--curator-text-muted);
+  flex: none;
+  font-size: 0.72rem;
+}
+
+.curator-settings-field-error {
+  color: #e0645c;
+}
+
+.curator-feedback-row {
+  align-items: flex-start;
+}
+
+.curator-feedback-correction {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.curator-profiling {
+  margin-top: 1rem;
+}
+
+.curator-taste {
+  margin-top: 1rem;
+}
+
+.curator-taste > h2 {
+  font-size: 1.2rem;
+}
+
+.curator-taste-list {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.curator-taste-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.curator-taste-toolbar input {
+  flex: 1 1 16rem;
+}
+
+.curator-taste-toolbar select {
+  flex: 0 1 9rem;
+}
+
+.curator-taste-item {
+  align-items: center;
+  background: var(--curator-wash-raised);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 1rem;
+  justify-content: space-between;
+  padding: 0.65rem;
+}
+
+.curator-taste-item strong,
+.curator-taste-item small {
+  display: block;
+}
+
+.curator-taste-item strong a {
+  color: var(--curator-text);
+  text-decoration: none;
+}
+
+.curator-taste-item strong a:hover {
+  text-decoration: underline;
+}
+
+.curator-taste-item .badge {
+  margin-left: 0.5rem;
+}
+
+.curator-taste-item small {
+  color: var(--curator-text-muted);
+}
+
+/* Design-mockup "confidence pips" (ConfidencePips) — 5 bars filled
+   left-to-right by how much viewing history backs the model's inference. */
+.curator-confidence-wrap {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.curator-confidence-label {
+  color: var(--curator-text-muted);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.curator-confidence-pips {
+  display: flex;
+  gap: 3px;
+}
+
+.curator-confidence-pips span {
+  background: var(--curator-border-strong);
+  border-radius: 1px;
+  display: block;
+  height: 12px;
+  width: 5px;
+}
+
+.curator-confidence-pips span.on {
+  background: var(--curator-accent);
+}
+
+.curator-sentiment {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.curator-sentiment-compact {
+  flex-wrap: nowrap;
+  gap: 0.15rem;
+  white-space: nowrap;
+}
+
+.curator-sentiment-scale {
+  font-size: 0.65rem;
+  font-weight: 600;
+  height: 2.4rem;
+  line-height: 1.15;
+  position: relative;
+  width: 100%;
+}
+
+.curator-sentiment-scale > span {
+  bottom: 0.2rem;
+  max-width: 14%;
+  position: absolute;
+  text-align: center;
+  transform: translateX(-50%);
+  white-space: normal;
+  width: 4rem;
+}
+
+.curator-sentiment-scale > span:first-child { text-align: left; transform: none; width: 2.6rem; }
+.curator-sentiment-scale > span:last-child { text-align: right; transform: translateX(-100%); width: 3rem; }
+.curator-sentiment-scale-never { color: #f17884; }
+
+.curator-sentiment-labelled {
+  display: grid;
+  grid-template-columns: minmax(14rem, 1fr) 6.5rem auto;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.curator-sentiment-labelled > .curator-sentiment-scale { grid-column: 1; grid-row: 1; }
+.curator-sentiment-labelled .curator-sentiment-track { grid-column: 1; grid-row: 2; width: 100%; }
+.curator-sentiment-labelled .curator-sentiment-current { font-size: 0.7rem; grid-column: 2; grid-row: 2; }
+.curator-sentiment-labelled .curator-sentiment-range-wrap { display: contents; }
+.curator-sentiment-labelled > .btn { grid-column: 3; grid-row: 2; }
+
+.popover.curator-rating-popover {
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-card-border-strong);
+  color: var(--curator-card-text);
+  max-width: calc(100vw - 1rem);
+  min-height: 0;
+  padding: 0;
+  width: 56rem;
+  z-index: 1070;
+}
+
+.curator-rating-popover .curator-external-tag-rating {
+  display: block;
+}
+
+.curator-rating-popover .curator-external-tag-rating-header {
+  margin-bottom: 0.5rem;
+}
+
+.curator-rating-popover .curator-rating-section + .curator-rating-section { margin-top: 0.75rem; }
+.curator-rating-popover .curator-rating-section {
+  --curator-rating-columns: minmax(9rem, 1fr) minmax(18rem, 2fr) 6.5rem 2.8rem;
+  min-width: 42rem;
+}
+
+.curator-rating-scale-header,
+.curator-rating-popover .curator-external-tag-row {
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: var(--curator-rating-columns);
+}
+
+.curator-rating-scale-header {
+  align-items: end;
+}
+
+.curator-rating-popover .curator-external-tag-row { min-height: 1.8rem; }
+.curator-rating-popover .curator-external-tag-row .curator-sentiment,
+.curator-rating-popover .curator-sentiment-range-wrap { display: contents; }
+.curator-rating-popover .curator-sentiment-compact .curator-sentiment-track { width: 100%; }
+.curator-rating-popover .curator-sentiment-current { font-size: 0.7rem; }
+
+@media (max-width: 600px) {
+  .curator-rating-popover .curator-rating-section {
+    --curator-rating-columns: minmax(3.8rem, 1fr) minmax(6.5rem, 1.1fr) 5.6rem 2.4rem;
+    min-width: 0;
+  }
+
+  .curator-rating-popover .curator-rating-scale-header,
+  .curator-rating-popover .curator-external-tag-row { gap: 0.3rem; }
+  .curator-rating-popover .curator-external-tag-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .curator-sentiment-labelled { grid-template-columns: minmax(6.5rem, 1fr) 5.6rem auto; }
+  .curator-rating-popover .curator-sentiment-scale > span,
+  .curator-sentiment-labelled > .curator-sentiment-scale > span { max-width: 48%; }
+  .curator-rating-popover .curator-sentiment-scale > span:not(:first-child):not(:last-child),
+  .curator-sentiment-labelled > .curator-sentiment-scale > span:not(:first-child):not(:last-child) {
+    display: none;
+  }
+}
+
+.curator-sentiment-clear-placeholder {
+  visibility: hidden;
+}
+
+.curator-sentiment .btn-sm {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.4rem;
+}
+
+.curator-sentiment-never,
+.curator-sentiment-danger,
+.curator-sentiment-dislike,
+.curator-sentiment-warning,
+.curator-sentiment-neutral,
+.curator-sentiment-like,
+.curator-sentiment-fond,
+.curator-sentiment-love {
+  background: transparent;
+  color: var(--curator-text);
+}
+
+.curator-sentiment-never            { --sc: #212529; border-color: var(--sc); }
+.curator-sentiment-danger           { --sc: #dc3545; border-color: var(--sc); }
+.curator-sentiment-dislike          { --sc: #e8590c; border-color: var(--sc); }
+.curator-sentiment-warning          { --sc: #fd7e14; border-color: var(--sc); }
+.curator-sentiment-neutral          { --sc: #6c757d; border-color: var(--sc); }
+.curator-sentiment-like             { --sc: #6b8e23; border-color: var(--sc); }
+.curator-sentiment-fond             { --sc: #2f9e44; border-color: var(--sc); }
+.curator-sentiment-love             { --sc: #198754; border-color: var(--sc); }
+
+/* Taste Profile's belief badge ("I think you slightly/strongly like/
+   dislike this" / "I'm unsure") reuses these same tier classes for their
+   --sc value instead of Bootstrap's one-size-fits-all badge-info cyan,
+   which gave every tier identical color. All 7 sentiment tiers are listed
+   (not just love/danger/neutral) since the badge text is now the specific
+   nearest tier, not a plain like/dislike binary — warning/like badges were
+   only getting the tier's border-color (from the button-oriented rule
+   above) without this rule's tinted background/text, reading as half-
+   colored next to the fully-colored strong tiers. */
+.badge.curator-sentiment-love,
+.badge.curator-sentiment-fond,
+.badge.curator-sentiment-like,
+.badge.curator-sentiment-neutral,
+.badge.curator-sentiment-warning,
+.badge.curator-sentiment-dislike,
+.badge.curator-sentiment-danger {
+  background: color-mix(in srgb, var(--sc) 18%, transparent);
+  border: 1px solid var(--sc);
+  color: var(--sc);
+}
+
+/* Shared themed look for every native <input type="range"> in the app
+   (Taste Profile sentiment, Similar/Expand "Minimum match", Prune
+   "aggressiveness", Sentiment-review "Appeal ≤" threshold) — apply
+   className="curator-range" to opt in. Stash's own global
+   `input[type="range"]` rule (element + [type] attribute = 0,1,1
+   specificity) and its `::-webkit-slider-thumb`/`::-webkit-slider-runnable-
+   track` pseudo-rules (0,1,2) beat a bare `.curator-range` class (0,1,0/1),
+   so every slider silently fell back to Stash's hardcoded dark
+   Bootstrap-blue look (solid rgb(0,123,255) track, rgb(57,75,89) thumb, both
+   theme-blind) regardless of curator's own light/dark theme — the .curator-
+   page prefix (an extra class) is what wins the specificity fight. Thumb
+   background reads var(--sc, ...) so the Taste Profile sentiment slider's
+   wrapping tier className (below) recolors it for free, with no separate
+   override rule needed. */
+.curator-page .curator-range {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  display: block;
+  height: 0.9rem;
+  outline: none;
+}
+
+.curator-page .curator-range::-webkit-slider-runnable-track {
+  background: var(--curator-border-strong);
+  border-radius: var(--curator-radius-lg);
+  height: 0.35rem;
+}
+
+.curator-page .curator-range::-moz-range-track {
+  background: var(--curator-border-strong);
+  border-radius: var(--curator-radius-lg);
+  height: 0.35rem;
+}
+
+.curator-page .curator-range::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--sc, var(--curator-accent));
+  border: 2px solid var(--curator-text);
+  border-radius: 50%;
+  cursor: pointer;
+  height: 0.9rem;
+  margin-top: -0.275rem;
+  width: 0.9rem;
+}
+
+.curator-page .curator-range::-moz-range-thumb {
+  background: var(--sc, var(--curator-accent));
+  border: 2px solid var(--curator-text);
+  border-radius: 50%;
+  cursor: pointer;
+  height: 0.9rem;
+  width: 0.9rem;
+}
+
+/* Sentiment slider (redesigned to match the GH #150 design mockup's
+   .rs-track/.rs-stop/.rs-thumb, which the original native-<input>-styled
+   version — round 15's specificity fix — never actually matched: that fix
+   made the native range render *something* coherent, but not the mockup's
+   compact fixed-width track with visible per-stop tick dots). The visible
+   rail (.curator-sentiment-rail/-stop/-thumb) is purely decorative; a fully
+   transparent native range input (.curator-sentiment-input) sits on top at
+   the same geometry, capturing clicks/drags/keyboard for free instead of
+   hand-rolling the mockup's manual pointer math. The wrapping label carries
+   the current tier's className (reusing the --sc custom property declared
+   above) so the active stop/thumb inherit the right color. */
+.curator-sentiment-range-wrap {
+  align-items: center;
+  display: flex;
+  gap: 0.6rem;
+}
+
+.curator-sentiment-current {
+  color: var(--curator-text);
+  flex: 0 0 auto;
+  font-size: 0.75rem;
+  font-weight: 600;
+  min-width: 5.2rem;
+}
+
+.curator-sentiment-never .curator-sentiment-current { color: #dc3545; }
+
+.curator-sentiment-track {
+  flex: 0 0 auto;
+  height: 1.2rem;
+  position: relative;
+  width: 10rem;
+}
+
+.curator-sentiment-rail {
+  background: var(--curator-border-strong);
+  border-radius: 2px;
+  height: 4px;
+  left: 0;
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.curator-sentiment-stop {
+  background: var(--curator-border-strong);
+  border-radius: 50%;
+  height: 6px;
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  transition: background 0.15s ease, transform 0.15s ease;
+  width: 6px;
+}
+
+.curator-sentiment-stop-active {
+  background: var(--sc, var(--curator-accent));
+  transform: translate(-50%, -50%) scale(1.15);
+}
+
+.curator-sentiment-stop-never {
+  background: color-mix(in srgb, #dc3545 55%, var(--curator-border-strong));
+  border-radius: 2px;
+  height: 8px;
+  width: 8px;
+}
+
+.curator-sentiment-stop-never.curator-sentiment-stop-active {
+  background: #dc3545;
+  transform: translate(-50%, -50%) scale(1.25);
+}
+
+.curator-sentiment-thumb {
+  background: var(--sc, var(--curator-accent));
+  border: 2px solid var(--curator-surface);
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px var(--sc, var(--curator-accent));
+  height: 14px;
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  transition: left 0.18s cubic-bezier(0.34, 1.4, 0.64, 1);
+  width: 14px;
+}
+
+.curator-sentiment-never .curator-sentiment-thumb {
+  background: #dc3545;
+  box-shadow: 0 0 0 1px #dc3545;
+}
+
+/* The model's own continuous estimate (Taste Profile only — see
+   TagSentimentControl's inferredValue prop): a small tick in a third color
+   (the existing amber secondary accent — distinct from the blue direct-
+   rating thumb and the red "Never" stop) on the same track, so the two can
+   be compared without the model's read silently overriding what the user
+   set or being mistaken for another stop/thumb. */
+.curator-sentiment-model-dot {
+  background: var(--curator-accent-secondary);
+  border-radius: 50%;
+  height: 6px;
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 6px;
+  z-index: 1;
+}
+
+/* Pointer input goes to the track (see TagSentimentControl), not the
+   transparent native input; vertical swipes still scroll the page. The
+   ::after strip extends the touch target above and below the thin rail. */
+.curator-sentiment-track {
+  cursor: pointer;
+  touch-action: pan-y;
+}
+
+.curator-sentiment-track::after {
+  content: "";
+  inset: -0.45rem 0;
+  position: absolute;
+}
+
+.curator-sentiment-input {
+  pointer-events: none;
+  appearance: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+  height: 100%;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  position: absolute;
+  width: 100%;
+}
+
+/* The interactive input is fully transparent, so its own focus ring (which
+   would otherwise render invisibly along with the rest of it) needs to be
+   redirected onto the decorative thumb for keyboard users. The input has to
+   paint after (on top of) the rail to receive clicks, which rules out a
+   ~ sibling-combinator selector here (it only matches *later* siblings) —
+   :has() on the shared ancestor sidesteps the ordering requirement. An
+   unrated item has no thumb to ring (see TagSentimentControl — nothing
+   renders there until a real value exists), so the rail itself is the
+   fallback target for that case. */
+.curator-sentiment-track:has(.curator-sentiment-input:focus-visible) .curator-sentiment-thumb {
+  box-shadow: 0 0 0 1px var(--sc, var(--curator-accent)), 0 0 0 4px var(--curator-glow-color);
+}
+
+.curator-sentiment-track:has(.curator-sentiment-input:focus-visible) .curator-sentiment-rail {
+  box-shadow: 0 0 0 3px var(--curator-glow-color);
+}
+
+.curator-sentiment-compact .curator-sentiment-track {
+  width: 6rem;
+}
+
+/* TagSentimentControl renders in two different contexts: standalone on the
+   page (Taste Profile, Curate's suggestion detail — the base rules above
+   are theme-responsive for these) and nested inside ExternalCard's "Rate
+   tags & terms" panel (.curator-external-tag-rating), which sits on the
+   deliberately-always-dark --curator-card-surface. Force the pinned-dark
+   card tokens back on specifically for that nested case so the slider
+   doesn't go light-on-dark there in light mode. */
+.curator-external-tag-rating .curator-sentiment-current { color: var(--curator-card-text); }
+.curator-external-tag-rating .curator-sentiment-rail { background: var(--curator-card-border-strong); }
+.curator-external-tag-rating .curator-sentiment-stop { background: var(--curator-card-border-strong); }
+.curator-external-tag-rating .curator-sentiment-thumb { border-color: var(--curator-card-surface); }
+
+@media (max-width: 480px) {
+  .curator-sentiment .btn-sm {
+    font-size: 0.7rem;
+    padding: 0.15rem 0.3rem;
+  }
+}
+
+.curator-tag-follow-up {
+  margin: 0.5rem 0;
+}
+
+.curator-tag-follow-up-heading,
+.curator-tag-follow-up-item,
+.curator-tag-follow-up-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.curator-tag-follow-up-heading {
+  justify-content: space-between;
+}
+
+.curator-tag-follow-up p {
+  margin: 0.25rem 0 0.5rem;
+}
+
+.curator-tag-follow-up-item {
+  margin-bottom: 0.35rem;
+}
+
+.curator-external-tag-rating {
+  background: var(--curator-wash-raised);
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.6rem;
+}
+
+.curator-external-tag-rating-header,
+.curator-external-tag-row {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.curator-external-tag-rating-header {
+  justify-content: space-between;
+}
+
+.curator-rating-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 0.6rem 0.6rem;
+}
+
+.curator-external-tag-name {
+  color: var(--text-muted, var(--curator-card-text-muted));
+  flex: 1 1 8rem;
+  font-size: 0.82rem;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.curator-external-tag-row .curator-sentiment {
+  flex: 0 0 auto;
+}
+
+.curator-external-tag-row .curator-sentiment .btn-sm {
+  font-size: 0.7rem;
+  min-width: 1.45rem;
+  padding: 0.12rem 0.25rem;
+}
+
+.curator-rating-section {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.curator-rating-section-title {
+  color: var(--text-muted, var(--curator-card-text-muted));
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.curator-profiling-toolbar {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.curator-profiling-toolbar h2 {
+  flex: 1;
+  font-size: 1.1rem;
+  margin: 0;
+}
+
+.curator-profile-layout {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(15rem, 22rem) minmax(0, 1fr);
+  margin-top: 0.75rem;
+}
+
+.curator-profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.curator-profile-list button {
+  background: var(--curator-wash-raised);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius);
+  color: var(--curator-text);
+  display: flex;
+  flex-direction: column;
+  padding: 0.45rem 0.6rem;
+  text-align: left;
+}
+
+.curator-profile-list button.active {
+  border-color: var(--primary, #7952b3);
+}
+
+.curator-profile-list span,
+.curator-profile-list small {
+  color: var(--curator-text-muted);
+}
+
+.curator-profile-timeline {
+  background: var(--curator-wash-recessed);
+  border-radius: var(--curator-radius);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 15rem;
+  overflow: auto;
+  padding: 0.35rem;
+}
+
+.curator-profile-timeline > div {
+  height: 0.35rem;
+  width: 100%;
+}
+
+.curator-profile-timeline span {
+  background: #748ffc;
+  display: block;
+  height: 100%;
+  min-width: 2px;
+}
+
+.curator-profile-timeline .curator-profile-sqlite { background: #20c997; }
+.curator-profile-timeline .curator-profile-stash { background: #ffd43b; }
+.curator-profile-timeline .curator-profile-stashdb { background: #ff922b; }
+.curator-profile-timeline .curator-profile-python { background: #b197fc; }
+
+.curator-profile-table-wrap {
+  max-height: 45vh;
+  overflow: auto;
+}
+
+.curator-profile-table td:last-child {
+  font-family: var(--curator-font-mono);
+  max-width: 32rem;
+  overflow-wrap: anywhere;
+}
+
+.curator-mono {
+  /* Bootstrap's default <code> color (#e83e8c, alarm-colored magenta,
+     meant for inline code snippets) reads as an error/warning for what's
+     just an informational file path here. */
+  color: var(--curator-text-muted);
+  font-family: var(--curator-font-mono);
+}
+
+.curator-diagnostics-preview {
+  max-height: 60vh;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.curator-lane-for_you { --lane-color: var(--curator-hue-for_you); }
+.curator-lane-best_bets { --lane-color: var(--curator-hue-best_bets); }
+.curator-lane-revisit { --lane-color: var(--curator-hue-revisit); }
+.curator-lane-stretch { --lane-color: var(--curator-hue-stretch); }
+.curator-lane-blind_spots { --lane-color: var(--curator-hue-blind_spots); }
+.curator-lane-dormant { --lane-color: var(--curator-hue-dormant); }
+.curator-lane-new_arrivals { --lane-color: var(--curator-hue-new_arrivals); }
+.curator-lane-similar { --lane-color: var(--curator-hue-similar); }
+.curator-lane-expand { --lane-color: var(--curator-hue-expand); }
+.curator-lane-hunt { --lane-color: var(--curator-hue-hunt); }
+.curator-lane-prune { --lane-color: var(--curator-hue-prune); }
+
+/* .curator-source-badge (the lane corner badge on cards) uses dark text on
+   a bright fill. White text would need fills dark enough for 4.5:1, which
+   read as muddy next to the lane icons (every dark-theme hue is only
+   2.0–3.4:1 against white). Each first stop is the dark-theme lane hue
+   blended 22% toward neutral grey so a page of cards stays calm; the second
+   stop is 10% darker. All stops keep at least 4.8:1 against #111 text. */
+.curator-lane-for_you { --lane-badge-gradient: linear-gradient(145deg, #6192d4, #5783bf); --lane-badge-text: #111; }
+.curator-lane-similar { --lane-badge-gradient: linear-gradient(145deg, #78bdd1, #6caabc); --lane-badge-text: #111; }
+.curator-lane-best_bets { --lane-badge-gradient: linear-gradient(145deg, #e4a241, #cd923a); --lane-badge-text: #111; }
+.curator-lane-hunt { --lane-badge-gradient: linear-gradient(145deg, #d57a9d, #c06e8d); --lane-badge-text: #111; }
+.curator-lane-stretch { --lane-badge-gradient: linear-gradient(145deg, #60c3a0, #56b090); --lane-badge-text: #111; }
+.curator-lane-blind_spots { --lane-badge-gradient: linear-gradient(145deg, #da8b5f, #c47d56); --lane-badge-text: #111; }
+.curator-lane-dormant { --lane-badge-gradient: linear-gradient(145deg, #828cce, #757eb9); --lane-badge-text: #111; }
+.curator-lane-new_arrivals { --lane-badge-gradient: linear-gradient(145deg, #94c05e, #85ad55); --lane-badge-text: #111; }
+.curator-lane-revisit { --lane-badge-gradient: linear-gradient(145deg, #a98bd6, #987dc1); --lane-badge-text: #111; }
+.curator-lane-expand { --lane-badge-gradient: linear-gradient(145deg, #d6716a, #c1665f); --lane-badge-text: #111; }
+.curator-lane-prune { --lane-badge-gradient: linear-gradient(145deg, #9ca2ab, #8c929a); --lane-badge-text: #111; }
+
+.curator-tabs .nav-link svg {
+  color: var(--lane-color);
+}
+
+.curator-source-badge svg {
+  color: inherit;
+}
+
+.curator-controls {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: nowrap;
+  gap: 0.35rem 0.6rem;
+  height: 3rem;
+  justify-content: flex-end;
+}
+
+.curator-task-buttons {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.4rem;
+}
+
+.curator-tasks-runnow {
+  align-items: center;
+  display: flex;
+  gap: 0.6rem;
+  justify-content: space-between;
+  margin: 0.75rem 0;
+  max-width: 30rem;
+}
+
+.curator-tasks-runnow span {
+  color: var(--curator-text-muted);
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+/* Icon buttons carried whatever Bootstrap variant they happened to be
+   given (mostly the unset default, "primary" — a solid blue fill) with no
+   override, so the header read as a row of heavy filled blocks instead of
+   the mockup's uniformly bordered, --surface-background .icon-btn. Force
+   the same subtle treatment here regardless of variant. */
+.curator-icon-button {
+  align-items: center;
+  background: var(--curator-surface) !important;
+  border-color: var(--curator-border-strong) !important;
+  color: var(--curator-text-muted) !important;
+  display: inline-flex;
+  height: 1.8rem;
+  justify-content: center;
+  padding: 0;
+  width: 1.8rem;
+}
+
+.curator-icon-button:hover {
+  border-color: var(--curator-text-muted) !important;
+  color: var(--curator-text) !important;
+}
+
+/* Health/sync status popover (GH #150 Package 3): replaces the always-open
+   row of inline status spans with a single compact pill; full detail lives
+   in the HoverPopover content instead. */
+.curator-health-pill {
+  align-items: center;
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-border-strong);
+  border-radius: var(--curator-radius-sm);
+  color: var(--curator-text-muted);
+  display: inline-flex;
+  font-size: 0.78rem;
+  gap: 0.4rem;
+  padding: 0.3rem 0.7rem 0.3rem 0.55rem;
+}
+
+.curator-health-pulse {
+  border-radius: 50%;
+  display: inline-block;
+  height: 0.45rem;
+  width: 0.45rem;
+}
+
+.curator-health-pulse-ready {
+  background: #4fb08a;
+  box-shadow: 0 0 0 0.18rem rgba(79, 176, 138, 0.18);
+}
+
+.curator-health-pulse-running {
+  background: var(--curator-accent);
+  box-shadow: 0 0 0 0.18rem var(--curator-glow-color);
+}
+
+.curator-health-pulse-failed {
+  background: #e0645c;
+  box-shadow: 0 0 0 0.18rem rgba(224, 100, 92, 0.2);
+}
+
+.curator-health-pulse-idle {
+  background: var(--curator-border-strong);
+}
+
+.curator-health-pulse-pending,
+.curator-health-pulse-rebuilding {
+  background: var(--curator-accent-secondary);
+  box-shadow: 0 0 0 0.18rem color-mix(in srgb, var(--curator-accent-secondary) 22%, transparent);
+}
+
+.curator-health-panel {
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius);
+  box-shadow: var(--curator-shadow-lg);
+  color: var(--curator-text);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  min-width: 14rem;
+  padding: 0.75rem 0.85rem;
+}
+
+.curator-health-row {
+  align-items: center;
+  display: flex;
+  font-size: 0.75rem;
+  gap: 0.6rem;
+  justify-content: space-between;
+}
+
+.curator-health-row b {
+  color: var(--curator-text);
+  font-weight: 600;
+  text-align: right;
+}
+
+.curator-card-size-trigger {
+  position: relative;
+}
+
+.curator-card-size-trigger > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.curator-card-size-trigger > summary::-webkit-details-marker {
+  display: none;
+}
+
+.curator-card-size-trigger > summary:focus-visible {
+  outline: 2px solid var(--curator-accent);
+  outline-offset: 2px;
+}
+
+.curator-card-size-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.4rem);
+  z-index: 20;
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius);
+  box-shadow: var(--curator-shadow-lg);
+  color: var(--curator-text);
+  min-width: 11rem;
+  padding: 0.75rem 0.85rem;
+}
+
+.curator-card-size-head {
+  align-items: center;
+  display: flex;
+  font-size: 0.75rem;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.curator-card-size-head label {
+  font-weight: 600;
+  margin: 0;
+}
+
+.curator-card-size-head span {
+  color: var(--curator-text-muted);
+}
+
+.curator-card-size-panel .curator-range {
+  width: 100%;
+}
+
+.curator-task-indicator {
+  align-items: stretch;
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 0.18rem;
+  max-width: 15rem;
+  min-width: 8rem;
+  text-decoration: none;
+}
+
+.curator-task-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.18rem;
+  min-width: 0;
+}
+
+.curator-task-progress-meta {
+  align-items: baseline;
+  display: flex;
+  gap: 0.4rem;
+  justify-content: space-between;
+  line-height: 1;
+}
+
+.curator-task-progress-meta strong {
+  color: var(--curator-text-muted);
+  font-size: 0.72rem;
+}
+
+.curator-task-progress-meta span,
+.curator-task-progress-detail {
+  color: var(--curator-text-muted);
+  font-size: 0.65rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.curator-task-progress-track {
+  background: var(--curator-border-strong);
+  border-radius: var(--curator-radius-lg);
+  display: block;
+  height: 0.32rem;
+  overflow: hidden;
+  width: 100%;
+}
+
+.curator-task-progress-fill {
+  background: var(--primary, #7952b3);
+  border-radius: inherit;
+  display: block;
+  height: 100%;
+  min-width: 0;
+  transition: width 0.25s ease;
+}
+
+.curator-task-progress-indeterminate .curator-task-progress-fill {
+  animation: curator-task-progress 1.2s ease-in-out infinite;
+  min-width: 30%;
+  width: 30%;
+}
+
+.curator-task-indicator-failed .curator-task-progress-fill {
+  background: #dc3545;
+  width: 100%;
+}
+
+.curator-task-indicator-done .curator-task-progress-fill {
+  background: var(--success, #198754);
+  width: 100%;
+}
+
+.curator-task-indicator-done .curator-task-progress-meta strong {
+  color: var(--success, #198754);
+}
+
+.curator-task-indicator-idle .curator-task-progress-fill {
+  background: var(--success, #198754);
+  width: 100%;
+}
+
+.curator-task-indicator-idle {
+  max-width: 2.5rem;
+  min-width: 2.5rem;
+}
+
+.curator-task-indicator-failed .curator-task-progress-meta strong {
+  color: #dc3545;
+}
+
+.curator-task-indicator-idle .curator-task-progress-meta strong {
+  color: var(--success, #198754);
+}
+
+@keyframes curator-task-progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(333%); }
+}
+
+/* Keep the current stage readable without letting a long task name widen the header. */
+.curator-task-progress-detail {
+  line-height: 1;
+}
+
+/* Manage → Tasks panel (issue #211): worker status header, grouped job
+   sections, and per-job progress/summary rows. */
+.curator-tasks-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.curator-worker-status {
+  align-items: center;
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius-sm);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.6rem;
+  padding: 0.55rem 0.7rem;
+}
+
+.curator-worker-status-dot {
+  border-radius: 50%;
+  height: 0.6rem;
+  width: 0.6rem;
+}
+
+.curator-worker-status-running .curator-worker-status-dot {
+  background: var(--success, #198754);
+  box-shadow: 0 0 0 3px rgba(25, 135, 84, 0.15);
+}
+
+.curator-worker-status-idle .curator-worker-status-dot {
+  background: var(--curator-text-muted);
+}
+
+.curator-worker-status span:not(.curator-worker-status-dot) {
+  color: var(--curator-text-muted);
+  font-size: 0.82rem;
+}
+
+.curator-tasks-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.curator-tasks-section-title {
+  font-size: 0.85rem;
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--curator-text-muted);
+}
+
+.curator-tasks-completed summary {
+  color: var(--curator-text-muted);
+  cursor: pointer;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.curator-tasks-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.curator-task {
+  background: var(--curator-surface-raised);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.55rem 0.7rem;
+}
+
+.curator-task-head {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.6rem;
+}
+
+.curator-task-state {
+  border-radius: var(--curator-radius-sm);
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.1rem 0.45rem;
+  text-transform: uppercase;
+}
+
+.curator-task-state-running {
+  background: rgba(13, 110, 253, 0.15);
+  color: #0d6efd;
+}
+
+.curator-task-state-queued {
+  background: rgba(108, 117, 125, 0.15);
+  color: var(--curator-text-muted);
+}
+
+.curator-task-state-complete {
+  background: rgba(25, 135, 84, 0.15);
+  color: #198754;
+}
+
+.curator-task-state-failed {
+  background: rgba(220, 53, 69, 0.15);
+  color: #dc3545;
+}
+
+.curator-task-state-cancelled {
+  background: rgba(108, 117, 125, 0.15);
+  color: var(--curator-text-muted);
+}
+
+.curator-task-time {
+  color: var(--curator-text-muted);
+  font-size: 0.78rem;
+  margin-left: auto;
+}
+
+.curator-task-meta {
+  color: var(--curator-text-muted);
+  font-size: 0.82rem;
+}
+
+.curator-task-error {
+  color: #dc3545;
+  display: block;
+  margin-top: 0.2rem;
+  white-space: pre-wrap;
+}
+
+.curator-header-message {
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius-sm);
+  color: var(--curator-text-muted);
+  font-size: 0.78rem;
+  grid-column: 1 / -1;
+  margin: 0;
+  order: 3;
+  padding: 0.35rem 0.6rem;
+}
+
+.curator-setup-checklist {
+  grid-column: 1 / -1;
+  order: 2;
+}
+
+.curator-setup-checklist h2 {
+  font-size: 1.1rem;
+}
+
+.curator-setup-checklist ul {
+  display: grid;
+  gap: 0.3rem;
+  list-style: none;
+  padding: 0;
+}
+
+.curator-setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.curator-pruning > div {
+  align-items: center;
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.4rem 0;
+}
+
+.curator-pruning {
+  flex-basis: 100%;
+}
+
+.curator-pruning a {
+  min-width: 16rem;
+}
+
+/* Shared loading indicator for every async panel (Similar/Expand/
+   Recommendations/Prune/Sentiment review/Backups/Profiling/Diagnostics) —
+   previously text-only, with no visual cue that something was actually
+   happening while a card grid populated or refreshed. */
+.curator-loading {
+  align-items: center;
+  display: flex;
+  gap: 0.6rem;
+  margin: 1rem 0;
+  max-width: 28rem;
+}
+
+.curator-loading::before {
+  animation: curator-spin 0.7s linear infinite;
+  border: 2px solid var(--curator-border-strong);
+  border-radius: 50%;
+  border-top-color: var(--curator-accent);
+  content: "";
+  flex: 0 0 auto;
+  height: 1rem;
+  width: 1rem;
+}
+
+@keyframes curator-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.curator-loading > span {
+  color: var(--curator-text-muted);
+}
+
+/* --curator-card-min-width is set inline on .curator-page (see the header's
+   card-size button, CuratorPage's cardSize state) — Compact/Comfortable/
+   Spacious just change this one variable, cycling through 16rem/22rem/
+   28rem. */
+.curator-grid {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: repeat(auto-fill, minmax(var(--curator-card-min-width, 22rem), 1fr));
+}
+/* shortcut: loaded cards stay mounted to retain panels; use measured rows if retained card memory becomes a problem. */
+.curator-endless-cards > .curator-card {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 42rem;
+}
+.curator-find-endless .curator-find-thumbnail,
+.curator-find-endless .curator-preview-tile {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 14rem;
+}
+.curator-find-endless .curator-find-thumbnail.performer-card {
+  contain-intrinsic-block-size: auto 21rem;
+}
+.curator-find-endless > [data-endless-page],
+.curator-find-endless > [data-endless-page] > .curator-grid,
+.curator-find-endless > [data-endless-page] > .curator-preview-wall {
+  /* Keep batch components mounted while their cards share continuous rows. */
+  display: contents;
+}
+.curator-find-endless > :not([data-endless-page]),
+.curator-find-endless > [data-endless-page] > .curator-loading,
+.curator-find-endless > [data-endless-page] > .alert {
+  grid-column: 1 / -1;
+}
+
+.curator-grid-enter {
+  animation: curator-grid-enter 0.22s ease-out both;
+}
+
+@keyframes curator-grid-enter {
+  from { opacity: 0; transform: translateY(0.35rem); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .curator-rotate-icon-spinning,
+  .curator-grid-enter { animation: none; }
+  .curator-rotate-icon { transition: none; }
+}
+
+.curator-card {
+  /* Ratio of the current card width to the 22rem default, clamped so cards
+     smaller than default shrink their icon/text overlays proportionally
+     but cards larger than default don't grow them (nothing asked for
+     that, and it'd make big cards look cartoonish) — see the badge/
+     card-popovers/scene-specs-overlay rules below that consume this. */
+  --curator-card-text-scale: clamp(0.72, calc(var(--curator-card-min-width, 22rem) / 22rem), 1);
+  background: var(--curator-card-surface);
+  border: 1px solid var(--curator-card-border);
+  border-radius: var(--curator-radius-lg);
+  box-shadow: var(--curator-card-shadow);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+.curator-card:hover {
+  border-color: var(--curator-card-border-strong);
+  box-shadow: var(--curator-card-shadow-lg);
+}
+
+
+.curator-similar { --surface-color: var(--curator-hue-similar); }
+.curator-expand { --surface-color: var(--curator-hue-expand); }
+.curator-hunt { --surface-color: var(--curator-hue-hunt); }
+.curator-prune-page { --surface-color: var(--curator-hue-prune); }
+
+.curator-similar .curator-card,
+.curator-expand .curator-card,
+.curator-hunt .curator-card,
+.curator-prune-page .curator-card {
+  border-left: 3px solid var(--surface-color);
+}
+
+.curator-card > .scene-card {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  margin: 0;
+  position: relative;
+  width: 100%;
+}
+
+.curator-card .card-section {
+  background: transparent;
+  padding-bottom: 0.35rem;
+}
+
+/* Keep native card rows and their spacing consistent across themes. */
+.curator-card > .scene-card > .card-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.curator-card > .scene-card > hr {
+  display: none;
+}
+
+/* Stash core ships .scene-specs-overlay (the resolution/duration corner
+   badge) with no font-size of its own — it just inherits ambient size, so
+   at the smallest card widths it reads as oversized against the shrunk
+   thumbnail. calc() base matches its current unscaled look so default-size
+   cards render identically. */
+.curator-card .scene-specs-overlay {
+  font-size: calc(1rem * var(--curator-card-text-scale, 1));
+}
+
+/* bottom is tuned to vertically center these against .scene-card__date in
+   the same row, not against the card as a whole — the two aren't siblings
+   (card-popovers is a direct child of .scene-card; the date lives inside
+   .scene-card__details, nested under a sibling .card-section), so there's
+   no flex/grid relationship to align them automatically. Stable in
+   practice because .curator-card-description below is hidden (0 height)
+   and both the title (.card-section-title) and details row have fixed
+   min-heights regardless of content, so this row's position relative to
+   the card's bottom edge doesn't shift with title wrapping. */
+.curator-card .card-popovers {
+  bottom: 0.92rem;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  /* left shrinks with the same scale as the button row itself (below) —
+     otherwise this reserved gap stays 7.5rem regardless of card width and
+     the sibling date text (padding-right below) is left with almost no
+     room to breathe on narrow cards. */
+  left: calc(7.5rem * var(--curator-card-text-scale, 1));
+  margin: 0;
+  position: absolute;
+  right: 0.4rem;
+}
+
+.curator-card .card-popovers .btn {
+  /* Bootstrap's default .btn font-size (1rem) drives both the label and
+     the FontAwesomeIcon glyph next to it (the icon renders at 1em with no
+     fixed size prop) — scaling it is what keeps icon+count on one line
+     instead of wrapping into a stacked icon-over-number block once the
+     card gets narrow. */
+  font-size: calc(1rem * var(--curator-card-text-scale, 1));
+  padding-inline: calc(0.35rem * var(--curator-card-text-scale, 1));
+}
+
+/* Same root cause as .curator-external-popover-button below: these native
+   SceneCard overlay buttons (tag/performer count, organized toggle) get no
+   explicit variant, so Bootstrap's "primary" default fights Stash's own
+   .minimal utility (meant to strip background/border) and .curator-page
+   .btn-primary wins on specificity, painting a solid gradient pill over
+   what's meant to be a quiet on-image icon+count trigger — reads as
+   shouting for attention on every single card. First attempt used a dark
+   translucent overlay treatment, which read as "solid black" rather than
+   discreet; matches the actual .btn-secondary look used elsewhere (e.g. the
+   "More" menu trigger) instead. .minimal's own `border: none` shorthand
+   still collapses border-width/style even once border-color is overridden
+   here — border-color alone is invisible without them — so the border has
+   to be respecified in full, not just recolored. */
+.curator-page .curator-card .card-popovers .btn.minimal {
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-border-strong);
+  color: var(--curator-text);
+}
+
+.curator-page .curator-card .card-popovers .btn.minimal:hover {
+  background: var(--curator-surface-raised);
+  border-color: var(--curator-text-muted);
+  color: var(--curator-text);
+}
+
+.curator-card .card-popovers .fa-icon {
+  margin-right: calc(0.3rem * var(--curator-card-text-scale, 1));
+}
+
+.curator-card .scene-card__details {
+  min-height: 1.9rem;
+  /* Reserves room so the date doesn't sit under the absolutely-positioned
+     .card-popovers row (see its `left` above) — has to shrink in lockstep
+     with that row's own width or the date gets squeezed onto two lines
+     well before the buttons actually need the space. */
+  padding-right: calc(10rem * var(--curator-card-text-scale, 1));
+  font-size: calc(1rem * var(--curator-card-text-scale, 1));
+}
+
+.curator-card .card-section-title {
+  min-height: 2.4em;
+  /* Bootstrap's h5 default (1.25rem) is what this element renders at
+     without an explicit override — kept as the calc() base so default-size
+     cards look unchanged and only smaller cards shrink the title. */
+  font-size: calc(1.25rem * var(--curator-card-text-scale, 1));
+}
+
+.curator-card .scene-card__description {
+  display: none;
+}
+
+.curator-card .scene-card__details {
+  margin-bottom: 0.35rem;
+}
+
+.curator-card-body {
+  background: transparent;
+  border-top: 1px solid var(--curator-card-border);
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  padding: 0.45rem 0.7rem;
+}
+
+.curator-source-badge {
+  align-items: center;
+  background: var(--lane-badge-gradient, var(--curator-overlay));
+  border-radius: var(--curator-radius-sm);
+  color: var(--lane-badge-text, #fff);
+  display: inline-flex;
+  font-size: calc(0.625rem * var(--curator-card-text-scale, 1));
+  font-weight: 700;
+  gap: calc(0.3rem * var(--curator-card-text-scale, 1));
+  height: auto;
+  justify-content: center;
+  left: 0.5rem;
+  letter-spacing: 0.03em;
+  padding: calc(0.32rem * var(--curator-card-text-scale, 1)) calc(0.6rem * var(--curator-card-text-scale, 1));
+  position: absolute;
+  top: 0.5rem;
+  width: auto;
+  z-index: 3;
+}
+
+.curator-evidence .curator-explanation {
+  line-height: 1.45;
+  margin: 0.45rem 0;
+}
+
+.curator-card-details {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.8rem;
+}
+
+.curator-card .curator-score-stack > .curator-card-description {
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  display: -webkit-box;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  margin: 0 0 0.35rem;
+  opacity: 0.8;
+  overflow: hidden;
+}
+
+.curator-card-description-local {
+  padding: 0 0.65rem;
+}
+
+.curator-evidence,
+.curator-score {
+  margin: 0;
+}
+
+.curator-evidence summary,
+.curator-score summary,
+.curator-score-node summary {
+  cursor: pointer;
+}
+
+.curator-evidence ul {
+  padding-left: 1.25rem;
+}
+
+.curator-score-children {
+  border-left: 1px solid var(--curator-card-border);
+  margin-left: 0.4rem;
+  padding-left: 0.7rem;
+}
+
+.curator-score-leaf {
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.curator-feedback {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-left: auto;
+  padding: 0;
+}
+
+.curator-feedback-button.btn-link {
+  background: transparent;
+  border: 0;
+  color: var(--curator-card-text);
+  padding: 0.2rem 0.35rem;
+}
+
+.curator-feedback-button.btn-link:hover {
+  color: var(--primary, #b197fc);
+}
+
+.curator-similar-search,
+.curator-similar-search form,
+.curator-similar-candidates {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.curator-similar-search {
+  margin: 0.8rem 0;
+}
+
+.curator-similar-search form {
+  flex: 1 1 24rem;
+  min-width: 0;
+}
+
+.curator-similar-search input {
+  flex: 1;
+  min-width: 0;
+}
+
+.curator-similar-candidates {
+  margin-bottom: 0.8rem;
+}
+
+.curator-similar-source,
+.curator-similarity-reason {
+  margin: 0.35rem 0;
+}
+
+.curator-similar-feedback {
+  border-top: 1px solid var(--curator-card-border);
+  padding: 0.35rem 0.7rem;
+}
+
+.curator-prune-toolbar,
+.curator-prune-actions,
+.curator-pager {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.curator-pager {
+  justify-content: center;
+  margin-top: 0.8rem;
+}
+
+.curator-pager-ellipsis {
+  padding: 0.35rem 0.15rem;
+}
+
+.curator-pager .curator-pager-mobile {
+  display: none;
+}
+
+@media (max-width: 575px) {
+  .curator-pager {
+    flex-wrap: nowrap;
+    white-space: nowrap;
+  }
+
+  .curator-pager .curator-pager-page,
+  .curator-pager .curator-pager-ellipsis,
+  .curator-pager .curator-pager-desktop {
+    display: none;
+  }
+
+  .curator-pager .curator-pager-mobile {
+    display: inline-block;
+  }
+}
+
+.curator-prune-toolbar {
+  margin: 0.8rem 0;
+}
+
+.curator-prune-toolbar > label {
+  margin: 0 0.4rem 0 auto;
+}
+
+.curator-prune-aggressiveness,
+.curator-favorite-filter {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.45rem;
+  margin: 0;
+}
+
+.curator-prune-aggressiveness input {
+  width: 8rem;
+}
+
+.curator-prune-actions {
+  border-top: 1px solid var(--curator-card-border);
+  padding: 0.4rem 0.7rem;
+}
+
+.curator-prune-badge {
+  align-items: center;
+  background: #c92a2a;
+  border-radius: 50%;
+  display: inline-flex;
+  height: 1.8rem;
+  justify-content: center;
+  position: absolute;
+  right: 0.5rem;
+  top: 0.5rem;
+  width: 1.8rem;
+  z-index: 3;
+}
+
+.curator-expand-toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.8rem 0;
+}
+
+.curator-toolbar-select {
+  align-items: center;
+  background: var(--curator-surface-raised);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius-sm);
+  display: inline-flex;
+  gap: 0.35rem;
+  height: 2.15rem;
+  margin: 0;
+  padding-left: 0.55rem;
+  width: auto;
+}
+
+.curator-toolbar-select select {
+  background: transparent;
+  border: 0;
+  color: var(--curator-text);
+  height: 100%;
+  padding: 0 1.7rem 0 0.15rem;
+  width: auto;
+}
+
+.curator-toolbar-select select:focus {
+  box-shadow: none;
+  outline: 0;
+}
+
+.curator-toolbar-select option {
+  background: var(--curator-surface-raised);
+  color: var(--curator-text);
+}
+
+.curator-toolbar-check {
+  align-items: center;
+  background: var(--curator-surface-raised);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius-sm);
+  display: inline-flex;
+  gap: 0.35rem;
+  height: 2.15rem;
+  margin: 0;
+  padding: 0 0.55rem;
+  white-space: nowrap;
+}
+
+.curator-toolbar-check input {
+  margin: 0;
+}
+
+.curator-shortlist-tab {
+  border-left: 1px solid var(--curator-border);
+  margin-left: 0.35rem;
+}
+
+.curator-filter-panel-body {
+  margin: 0.4rem 0 0.8rem;
+}
+
+.curator-filter-panel-body > div {
+  align-items: end;
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  margin-top: 0.5rem;
+}
+
+.curator-filter-panel-body label {
+  font-size: 0.78rem;
+  margin: 0;
+}
+
+.curator-token-filter {
+  position: relative;
+}
+
+.curator-settings-together {
+  margin-top: 0.8rem;
+}
+
+.curator-mood-menu { position: relative; }
+.curator-mood-menu summary { align-items: center; display: inline-flex; gap: 0.4rem; list-style: none; max-width: 14rem; white-space: nowrap; }
+.curator-mood-menu summary > span { overflow: hidden; text-overflow: ellipsis; }
+.curator-mood-menu summary::-webkit-details-marker { display: none; }
+.curator-mood-menu summary::after {
+  border-left: 0.25rem solid transparent;
+  border-right: 0.25rem solid transparent;
+  border-top: 0.3rem solid currentColor;
+  content: "";
+  display: inline-block;
+  flex-shrink: 0;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+.curator-mood-menu summary[aria-disabled="true"] { cursor: default; opacity: 0.65; }
+.curator-mood-options {
+  background: var(--curator-surface-raised);
+  border: 1px solid var(--curator-border-strong);
+  border-radius: var(--curator-radius-sm);
+  box-shadow: var(--curator-shadow-sm);
+  margin-top: 0.35rem;
+  max-height: 20rem;
+  max-width: calc(100vw - 2rem);
+  overflow-y: auto;
+  padding: 0.3rem;
+  position: absolute;
+  right: 0;
+  width: 16rem;
+  z-index: 30;
+}
+.curator-mood-options button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: var(--curator-radius-sm);
+  color: var(--curator-text);
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  text-align: left;
+  width: 100%;
+}
+.curator-mood-options button:hover,
+.curator-mood-options button:focus-visible,
+.curator-mood-option[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--curator-accent) 15%, var(--curator-surface-raised));
+}
+.curator-mood-check { color: var(--curator-accent); flex: 0 0 1rem; }
+.curator-mood-option > span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.curator-mood-options .curator-mood-manage {
+  border-top: 1px solid var(--curator-border);
+  border-radius: 0;
+  margin-top: 0.3rem;
+}
+
+.curator-mood-create {
+  display: flex;
+  gap: 0.4rem;
+  margin: 0.4rem 0;
+}
+
+.curator-mood-create input { min-width: 0; }
+.curator-mood-create button { flex-shrink: 0; }
+
+.curator-together-picker {
+  border: 0;
+  margin: 0.4rem 0;
+  max-width: 28rem;
+  min-width: 0;
+  padding: 0;
+}
+
+.curator-token-filter > span,
+.curator-match-filter > span {
+  display: block;
+  margin-bottom: 0.2rem;
+}
+
+.curator-token-input {
+  align-items: center;
+  background: var(--curator-surface-raised);
+  border: 1px solid var(--curator-border-strong);
+  border-radius: var(--curator-radius-sm);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem;
+  min-height: 2rem;
+  padding: 0.2rem;
+}
+
+.curator-token-input button {
+  background: var(--curator-surface-raised);
+  border: 0;
+  border-radius: var(--curator-radius-sm);
+  color: var(--curator-text);
+  font-size: 0.75rem;
+}
+
+.curator-token-input input {
+  background: transparent;
+  border: 0;
+  flex: 1 1 5rem;
+  min-width: 4rem;
+  outline: 0;
+  color: var(--curator-text);
+}
+
+.curator-page .form-control,
+.curator-saved-filters input:not([type="checkbox"]),
+.curator-saved-filters select {
+  background: var(--curator-surface-raised);
+  border: 1px solid var(--curator-border-strong);
+  color: var(--curator-text);
+}
+
+.curator-page input::placeholder {
+  color: var(--curator-text-muted);
+}
+
+.curator-filter-panel {
+  background: var(--curator-wash-recessed);
+  border-radius: var(--curator-radius);
+  padding: 0.55rem;
+}
+
+.curator-filter-count {
+  align-items: center;
+  background: var(--curator-accent);
+  border-radius: var(--curator-radius-sm);
+  color: #fff;
+  display: inline-flex;
+  font-size: 0.68rem;
+  font-weight: 700;
+  height: 1rem;
+  justify-content: center;
+  margin-left: 0.3rem;
+  min-width: 1rem;
+  padding: 0 0.25rem;
+}
+
+.curator-saved-filters,
+.curator-saved-filter-create {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  grid-column: 1 / -1;
+}
+
+.curator-saved-filter-create {
+  margin-top: 0.4rem;
+}
+
+.curator-saved-filters summary {
+  cursor: pointer;
+}
+
+.curator-saved-filters input:not([type="checkbox"]),
+.curator-saved-filters select {
+  border-radius: var(--curator-radius-sm);
+  min-height: 2rem;
+  padding: 0.25rem 0.45rem;
+}
+
+.curator-saved-filters label {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.curator-token-options {
+  background: var(--curator-surface-raised);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius-sm);
+  display: flex;
+  flex-direction: column;
+  left: 0;
+  max-height: 14rem;
+  overflow-y: auto;
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 20;
+}
+
+.curator-token-options button {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: var(--curator-text);
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+  width: 100%;
+}
+
+.curator-token-options button:hover {
+  background: var(--curator-surface-raised);
+}
+
+.curator-token-source-badge {
+  background: var(--curator-wash-recessed);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius-sm);
+  color: var(--curator-text);
+  flex: 0 0 auto;
+  font-size: 0.7rem;
+  font-weight: 600;
+  line-height: 1.1;
+  padding: 0.1rem 0.45rem;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.curator-match-filter input {
+  width: 100%;
+}
+
+.curator-icon-action {
+  align-items: center;
+  display: inline-flex;
+  height: 1.9rem;
+  justify-content: center;
+  padding: 0;
+  width: 2rem;
+}
+
+.curator-whisparr-logo {
+  align-items: center;
+  background: #241c1f;
+  border-radius: 50%;
+  color: #a66cff;
+  display: inline-flex;
+  font-family: Georgia, serif;
+  font-size: 0.8rem;
+  font-style: italic;
+  font-weight: bold;
+  height: 1rem;
+  justify-content: center;
+  line-height: 1;
+  position: relative;
+  width: 1rem;
+}
+
+.curator-whisparr-logo img {
+  inset: 0;
+  position: absolute;
+}
+
+/* Marks a Find scene Curator has sent to Whisparr: the logo on a dark
+   rounded square at the image's bottom-right (the Deck lays it out in its
+   badge row). */
+.curator-whisparr-badge {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.65);
+  border-radius: var(--curator-radius-sm);
+  bottom: 0.4rem;
+  display: inline-flex;
+  height: 1.5rem;
+  justify-content: center;
+  position: absolute;
+  right: 0.4rem;
+  width: 1.5rem;
+  z-index: 3;
+}
+
+.curator-whisparr-status {
+  flex-basis: 100%;
+}
+
+.curator-similar-reference {
+  align-items: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin: 0.6rem 0;
+  max-width: 38rem;
+}
+
+.curator-source-reference {
+  align-items: center;
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius);
+  color: var(--curator-text);
+  display: flex;
+  gap: 0.7rem;
+  min-height: 4.5rem;
+  overflow: hidden;
+  padding-right: 0.8rem;
+  width: 100%;
+}
+
+.curator-source-reference:hover {
+  border-color: var(--curator-accent);
+  color: var(--curator-text);
+  text-decoration: none;
+}
+
+.curator-similar .curator-source-reference {
+  border-left: 3px solid var(--surface-color);
+}
+
+.curator-source-reference img {
+  align-self: stretch;
+  height: 5.5rem;
+  object-fit: cover;
+  object-position: top;
+  width: 7.5rem;
+}
+
+.curator-source-reference.curator-source-reference-performer img {
+  aspect-ratio: 2 / 3;
+  flex: 0 0 auto;
+  height: 6rem;
+  min-width: 4rem;
+  width: 4rem;
+}
+
+.curator-source-reference span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.curator-source-reference small {
+  color: var(--text-muted, var(--curator-text-muted));
+  margin-top: 0.2rem;
+}
+
+.curator-external-thumbnail {
+  aspect-ratio: 16 / 9;
+  background: var(--curator-wash-recessed);
+  overflow: hidden;
+  position: relative;
+}
+
+.curator-external-thumbnail > a,
+.curator-external-thumbnail img {
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.curator-external-performer .curator-external-thumbnail {
+  aspect-ratio: 2 / 3;
+}
+
+.curator-external-performer .curator-external-thumbnail img {
+  object-fit: contain;
+}
+
+.curator-external-studio-overlay {
+  font-weight: 900;
+  max-width: 45%;
+  position: absolute;
+  right: 0.7rem;
+  text-align: right;
+  text-shadow: 0 0 3px #000;
+  top: 0.7rem;
+}
+
+.curator-external-studio-name {
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.curator-page .curator-metadata-more {
+  flex: 0 0 auto;
+  background: transparent;
+  color: var(--curator-text-muted);
+  font: inherit;
+  padding: 0;
+  text-decoration: none;
+}
+
+.curator-page .curator-metadata-more.sticky-pill--more {
+  border: 1px dashed var(--chip-border);
+  font-size: 0.88rem;
+  padding: 4px 10px;
+}
+
+.popover.curator-metadata-popover {
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-border);
+  color: var(--curator-text);
+  padding: 0.6rem;
+}
+
+.curator-external-details,
+.curator-external-card .scene-card__details {
+  color: var(--text-muted, var(--curator-card-text-muted));
+  display: flex;
+  justify-content: space-between;
+  min-height: 1.4rem;
+}
+
+.curator-external-card .card-section {
+  padding: 0.5rem 0.7rem 0.35rem;
+}
+
+.curator-external-card .card-section a {
+  color: var(--curator-card-text);
+  text-decoration: none;
+}
+
+.curator-external-card .card-section-title {
+  font-size: 1.05rem;
+  margin: 0 0 0.35rem;
+}
+
+.curator-external-card .card-popovers {
+  align-items: center;
+  bottom: auto;
+  gap: 0.1rem;
+  justify-content: flex-end;
+  left: auto;
+  margin: 0;
+  min-height: 0;
+  padding: 0;
+  position: static;
+  right: auto;
+}
+
+.curator-external-card .card-popovers .curator-external-popover-button {
+  font-size: 0.85rem;
+  height: 1.65rem;
+  padding: 0 0.25rem;
+}
+
+/* This button gets no explicit `variant` prop, so React-Bootstrap's default
+   ("primary") still applies the .btn-primary class alongside Stash's own
+   .minimal utility (meant to strip background/border entirely) — and
+   .curator-page .btn-primary (0,2,0 specificity) beats .minimal (0,1,1),
+   so the gradient painted over what should read as a plain ghost icon+count
+   trigger. Force it back to transparent specifically for this button. */
+.curator-page .curator-external-popover-button.minimal {
+  background: none;
+  border-color: transparent;
+  color: var(--curator-text-muted);
+}
+
+.curator-page .curator-external-popover-button.minimal:hover {
+  background: var(--curator-wash-raised);
+  color: var(--curator-text);
+}
+
+.curator-external-popover-links {
+  display: flex;
+  gap: 0.3rem;
+  max-height: 20rem;
+  overflow-y: auto;
+}
+
+.curator-external-tags-popover {
+  flex-wrap: wrap;
+  max-width: 28rem;
+}
+
+.curator-external-performers-popover {
+  flex-wrap: wrap;
+  max-width: 32rem;
+}
+
+.curator-external-performers-popover .performer-tag-container {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin: 0.25rem;
+  width: 6rem;
+}
+
+.curator-performer-image-actions {
+  display: inline-block;
+  min-height: 1.75rem;
+  position: relative;
+}
+
+.curator-performer-image-actions > .performer-tag {
+  display: block;
+  padding: 0;
+}
+
+.curator-performer-image-actions .image-thumbnail {
+  display: block;
+}
+
+.curator-performer-image-actions + a.tag-item,
+.curator-performer-image-actions + .tag-item > a {
+  padding-inline: 0.5rem;
+}
+
+.curator-external-performers-popover .curator-performer-image-actions {
+  width: 100%;
+}
+
+.curator-performer-hunt {
+  align-items: center;
+  background: rgba(16, 18, 22, 0.35);
+  bottom: 0.25rem;
+  border-radius: 0.25rem;
+  color: var(--curator-hue-hunt);
+  display: inline-flex;
+  font-size: 0.85rem;
+  height: 1.5rem;
+  justify-content: center;
+  position: absolute;
+  right: 0.25rem;
+  width: 1.5rem;
+}
+
+.curator-performer-hunt:hover,
+.curator-performer-hunt:focus-visible {
+  color: var(--curator-hue-hunt);
+  outline: 2px solid currentColor;
+}
+
+.curator-external-performers-popover .performer-tag {
+  padding: 0;
+}
+
+.curator-external-performers-popover .image-thumbnail {
+  height: 8rem;
+  object-fit: cover;
+  width: 6rem;
+}
+
+.curator-external-performers-popover .tag-item {
+  max-width: 6rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.curator-external-card .curator-card-body p {
+  margin: 0.35rem 0;
+}
+
+.curator-external-card .curator-card-body > small {
+  margin-top: auto;
+}
+
+.curator-external-card .curator-prune-actions {
+  margin-top: 0;
+}
+
+.curator-wildcard-badge {
+  background: #e67700;
+  border-radius: var(--curator-radius-sm);
+  font-size: 0.75rem;
+  padding: 0.25rem 0.4rem;
+  position: absolute;
+  right: 0.5rem;
+  top: 0.5rem;
+  z-index: 3;
+}
+
+.curator-phash-badge {
+  background: #2b8a3e;
+  border-radius: var(--curator-radius-sm);
+  font-size: 0.75rem;
+  left: 0.5rem;
+  padding: 0.25rem 0.4rem;
+  position: absolute;
+  top: 0.5rem;
+  z-index: 3;
+}
+
+.curator-local-badge {
+  background: #2b8a3e;
+  border-radius: var(--curator-radius-sm);
+  font-size: 0.7rem;
+  left: 0.5rem;
+  padding: 0.2rem 0.35rem;
+  position: absolute;
+  top: 0.5rem;
+  z-index: 3;
+}
+
+.curator-include-owned {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+}
+
+.curator-external-card.curator-external-local {
+  background: rgba(43, 138, 62, 0.07);
+  outline: 2px solid #2b8a3e;
+  outline-offset: 2px;
+}
+
+.curator-entity-panel { background: var(--curator-wash-raised); border: 1px solid var(--curator-text-muted); border-radius: 0.5rem; color: var(--curator-text); margin: 1rem 0; padding: 0.4rem 0.6rem; width: 100%; }
+.curator-entity-summary { align-items: center; cursor: pointer; display: flex; gap: 0.5rem; list-style: none; }
+.curator-entity-summary::-webkit-details-marker { display: none; }
+.curator-entity-summary::before { content: "▸"; }
+.curator-entity-panel[open] > .curator-entity-summary::before { transform: rotate(90deg); }
+.curator-entity-panel[open] > .curator-entity-summary { margin-bottom: 0.8rem; }
+.curator-entity-summary > .curator-context-group { background: none; border: 0; border-radius: 0; flex: 1; min-width: 0; padding: 0; }
+.curator-entity-summary .curator-context-button-similar { margin-left: auto; }
+.curator-entity-summary .curator-context-group-scene .curator-affinity-gauge-ring { display: none; }
+.curator-entity-panel-host { min-width: 0; width: 100%; }
+.curator-entity-panel-host.curator-entity-panel-inline {
+  display: inline-flex;
+  margin-left: 0.3rem;
+  vertical-align: middle;
+  width: auto;
+}
+body[data-curator-detail-page-controls="small"] #performer-page .performer-head .quality-group {
+  width: 100%;
+}
+#performer-page .quality-group > .curator-entity-panel-inline {
+  margin-left: auto;
+}
+body[data-curator-detail-page-controls="small"] .curator-entity-panel:not([open]) {
+  border-radius: 999px;
+  margin: 0;
+  max-width: 100%;
+  padding: 0.15rem 0.4rem;
+  width: max-content;
+}
+body[data-curator-detail-page-controls="small"] .curator-entity-panel:not([open]) .curator-affinity-confidence {
+  display: none;
+}
+body[data-curator-detail-page-controls="off"] .curator-entity-panel-host {
+  display: none;
+}
+.curator-entity-specifics { border-top: 1px solid var(--curator-border); margin-top: 0.8rem; padding-top: 0.8rem; }
+.curator-entity-specifics h4 { font-size: 1rem; }
+.curator-entity-specifics h5 { font-size: 0.9rem; margin-top: 0.9rem; }
+.curator-entity-specifics ul { margin: 0.6rem 0; padding-left: 1.25rem; }
+.curator-entity-specifics li { margin: 0.35rem 0; overflow-wrap: anywhere; }
+.curator-entity-tiles { display: grid; gap: 0.65rem; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); }
+.curator-entity-tile { background: var(--curator-wash-recessed); border: 1px solid var(--curator-border); border-radius: 0.45rem; display: flex; flex-direction: column; gap: 0.3rem; padding: 0.8rem; }
+.curator-entity-tile > span { color: var(--curator-text-muted); font-size: 0.8rem; }
+.curator-entity-tile strong { font-size: 1.4rem; }
+.curator-entity-tile small, .curator-entity-note { color: var(--curator-text-muted); }
+.curator-entity-positive { color: #5cc19c; }
+.curator-entity-negative { color: #e0645c; }
+.curator-entity-panel p { margin: 0.8rem 0 0; }
+.curator-entity-evidence { border-top: 1px solid var(--curator-border); margin-top: 0.8rem; padding-top: 0.65rem; }
+.curator-entity-evidence summary { cursor: pointer; font-weight: 600; }
+.curator-entity-evidence .curator-explanation-view { margin-top: 0.65rem; }
+
+.curator-context-group {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.45rem;
+  vertical-align: middle;
+}
+.curator-context-button {
+  align-items: center;
+  background: var(--curator-gradient-brand) !important;
+  border-radius: var(--curator-radius-lg);
+  box-shadow: var(--curator-shadow-glow);
+  color: var(--curator-text);
+  display: inline-flex;
+  height: 1.9rem;
+  justify-content: center;
+  text-decoration: none;
+  width: 1.9rem;
+}
+.curator-context-button:hover,
+.curator-context-button:focus {
+  text-decoration: none;
+}
+:is(.curator-context-group-performer, .curator-context-group-scene) {
+  background: linear-gradient(135deg, var(--curator-surface-raised), var(--curator-surface));
+  border: 1px solid var(--curator-text-muted);
+  border-radius: 999px;
+  flex-shrink: 0;
+  gap: 0.15rem;
+  padding: 0.2rem 0.4rem;
+}
+:is(.curator-context-group-performer, .curator-context-group-scene) .curator-context-button {
+  background: transparent !important;
+  border-radius: 50%;
+  box-shadow: none;
+  flex-shrink: 0;
+}
+.curator-context-brand {
+  align-items: center;
+  color: var(--curator-text-muted);
+  display: inline-flex;
+  padding: 0 0.2rem;
+}
+#performer-page .curator-context-group-performer .curator-context-button svg,
+#performer-page .curator-context-group-performer .curator-context-brand svg {
+  height: 1rem;
+  margin: 0;
+  width: 1rem;
+}
+:is(.curator-context-group-performer, .curator-context-group-scene) .curator-affinity-gauge {
+  align-items: center;
+  display: inline-flex;
+  padding: 0 0.2rem;
+  width: auto;
+}
+:is(.curator-context-group-performer, .curator-context-group-scene) .curator-affinity-gauge::after {
+  background: var(--curator-text-muted);
+  content: "";
+  flex-shrink: 0;
+  height: 1.1rem;
+  margin-left: 0.4rem;
+  width: 1px;
+}
+#performer-page .curator-context-group-performer .curator-affinity-gauge-ring {
+  display: none;
+}
+:is(.curator-context-group-performer, .curator-context-group-scene) .curator-affinity-gauge-value {
+  font-size: 0.8rem;
+  position: static;
+  transform: none;
+}
+.curator-affinity-readout {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.curator-affinity-confidence {
+  color: var(--curator-text-muted);
+  font-size: 0.6rem;
+  line-height: 1;
+  white-space: nowrap;
+}
+:is(.curator-context-group-performer, .curator-context-group-scene) .curator-context-button:hover {
+  background: var(--curator-wash-raised) !important;
+}
+.curator-hide-card-badges .performer-card .curator-performer-card-badge,
+.curator-hide-card-badges .scene-card .curator-scene-card-badge {
+  display: none;
+}
+
+.performer-card .curator-performer-card-badge,
+.scene-card .curator-scene-card-badge {
+  bottom: 0.45rem;
+  gap: 0.1rem;
+  padding: 0.15rem 0.3rem;
+  position: absolute;
+  right: 0.45rem;
+  z-index: 2;
+}
+.scene-card .curator-scene-card-badge {
+  bottom: 0.75rem;
+  left: 0.45rem;
+  right: auto;
+}
+.performer-card .thumbnail-section:has(.hon-battle-rank-badge) .curator-performer-card-badge {
+  /* shortcut: reserve Ascension's two-row badge; measure dynamically if its layout changes. */
+  bottom: 4.5rem;
+}
+@media (max-width: 575.98px) {
+  .performer-card .thumbnail-section:has(.hon-battle-rank-badge) .curator-performer-card-badge {
+    bottom: 2.9rem;
+  }
+}
+:is(.curator-performer-card-badge, .curator-scene-card-badge, .curator-scene-page-pill) .curator-context-button {
+  height: 1.55rem;
+  width: 1.55rem;
+}
+.performer-card .curator-performer-card-badge .curator-context-button svg,
+.performer-card .curator-performer-card-badge .curator-context-brand svg,
+.scene-card .curator-scene-card-badge .curator-context-button svg,
+.scene-card .curator-scene-card-badge .curator-context-brand svg,
+.curator-scene-page-pill .curator-context-button svg,
+.curator-scene-page-pill .curator-context-brand svg {
+  height: 1rem;
+  width: 1rem;
+}
+:is(.curator-performer-card-badge, .curator-scene-card-badge, .curator-scene-page-pill) .curator-affinity-gauge-ring {
+  display: none;
+}
+:is(.curator-performer-card-badge, .curator-scene-card-badge, .curator-scene-page-pill) .curator-affinity-gauge {
+  height: 1.55rem;
+}
+:is(.curator-performer-card-badge, .curator-scene-card-badge, .curator-scene-page-pill) .curator-affinity-gauge-value {
+  font-size: 0.75rem;
+}
+:is(.curator-context-group-performer, .curator-context-group-scene) .curator-context-button-similar {
+  color: var(--curator-hue-similar);
+}
+.curator-context-group-performer .curator-context-button-hunt {
+  color: var(--curator-hue-hunt);
+}
+:is(.curator-context-group-performer, .curator-context-group-scene) .curator-context-button:focus-visible,
+.curator-affinity-gauge:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+.curator-affinity-gauge {
+  height: 1.9rem;
+  position: relative;
+  width: 1.9rem;
+}
+.curator-affinity-gauge-ring {
+  display: block;
+  height: 100%;
+  width: 100%;
+}
+.curator-affinity-gauge-value {
+  color: var(--curator-text);
+  font-size: 0.5rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  left: 0;
+  line-height: 1;
+  position: absolute;
+  right: 0;
+  text-align: center;
+  top: 50%;
+  transform: translateY(-50%);
+}
+.curator-affinity-gauge.curator-affinity-positive .curator-affinity-gauge-value {
+  color: #5cc19c;
+}
+.curator-affinity-gauge.curator-affinity-negative .curator-affinity-gauge-value {
+  color: #e0645c;
+}
+.curator-preview-wall {
+  display: grid;
+  gap: 0.6rem;
+  grid-template-columns: repeat(auto-fill, minmax(var(--curator-card-min-width, 22rem), 1fr));
+}
+.curator-preview-tile {
+  aspect-ratio: 16 / 9;
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius);
+  box-shadow: var(--curator-shadow-sm);
+  overflow: hidden;
+  position: relative;
+}
+.curator-preview-link {
+  display: block;
+  height: 100%;
+  width: 100%;
+}
+.curator-preview-video {
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+.curator-preview-tile .card-section {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  padding: 0;
+}
+/* SFW switch: Stash's scene-card classes break custom wall tiles, so mirror its
+   blur by detecting when wall media is blurred (syncSfwBlur observer) and
+   applying a strong Curator-side blur only then. */
+.curator-sfw .curator-preview-tile .card-section {
+  filter: blur(24px) !important;
+}
+.curator-preview-affinity {
+  align-items: center;
+  color: var(--curator-text);
+  display: inline-flex;
+  font-size: 0.72rem;
+  font-weight: 600;
+  gap: 0.18rem;
+  line-height: 1;
+}
+.curator-preview-tile.curator-affinity-positive .curator-preview-affinity {
+  color: #5cc19c;
+}
+.curator-preview-tile.curator-affinity-negative .curator-preview-affinity {
+  color: #e0645c;
+}
+.curator-preview-lane {
+  align-items: center;
+  background: var(--curator-overlay);
+  border-radius: 0.25rem;
+  display: inline-flex;
+  font-size: 0.7rem;
+  height: 1.15rem;
+  justify-content: center;
+  left: 0.35rem;
+  line-height: 1;
+  position: absolute;
+  top: 0.35rem;
+  width: 1.15rem;
+  z-index: 1;
+}
+.curator-preview-hover {
+  align-items: center;
+  background: var(--curator-overlay);
+  bottom: 0;
+  display: flex;
+  gap: 0.3rem;
+  left: 0;
+  padding: 0.28rem 0.4rem;
+  position: absolute;
+  right: 0;
+  z-index: 2;
+}
+.curator-preview-hover-title {
+  color: var(--curator-text);
+  flex: 1;
+  font-size: 0.75rem;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.curator-card > .performer-card {
+  background: transparent;
+  border: 0;
+  margin: 0;
+  max-width: 100%;
+  padding-bottom: 0;
+  width: 100%;
+}
+
+/* The wrapper owns the surface and shadow; theme styling must be painted once. */
+.curator-card > :is(.scene-card, .performer-card).card {
+  background: transparent !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+
+/* Issue #215: Similar performer cards must never bleed horizontally out of
+   their grid cell. Stash's native performer-card internals (Bootstrap .row
+   negative margins, fixed-width thumbnails, nowrap name rows) can force the
+   card wider than its column, so contain the card and its rows and zero the
+   row gutters. */
+.curator-card > .performer-card .row,
+.curator-card > .performer-card .card-section,
+.curator-card > .performer-card .performer-card-image {
+  margin-left: 0;
+  margin-right: 0;
+  max-width: 100%;
+}
+
+.curator-card > .performer-card .card-section-title,
+.curator-card > .performer-card .performer-card-name {
+  overflow-wrap: anywhere;
+}
+
+.curator-grid > * {
+  min-width: 0;
+}
+
+.curator-more {
+  position: relative;
+}
+
+.curator-more > summary {
+  list-style: none;
+}
+
+.curator-more-menu {
+  background: var(--curator-surface-raised);
+  border-radius: var(--curator-radius-sm);
+  box-shadow: var(--curator-shadow-lg);
+  bottom: calc(100% + 0.35rem);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  left: 0;
+  padding: 0.5rem;
+  position: absolute;
+  width: max-content;
+  z-index: 10;
+}
+
+@media (max-width: 75rem) {
+  .curator-page {
+    padding-inline: calc(0.65rem + 15px);
+  }
+
+  .curator-tabs .nav-link {
+    white-space: nowrap;
+  }
+
+  .curator-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .curator-filter-panel-body > div {
+    grid-template-columns: 1fr;
+  }
+
+  .curator-profile-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 36rem) {
+  .curator-mood-options {
+    left: 0;
+    right: auto;
+  }
+
+  .curator-view-guidance {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  /* Brand shrinks to its icon mark only, freeing width for the scrollable
+     nav strip next to it — same trade the mockup makes at this width
+     (brand-word: none). Measured: without this, brand+controls alone ate
+     278px of a 390px viewport, leaving the nav ~22px — room for a sliver
+     of one pill, nothing scrollable in any useful sense. */
+  .curator-header h1 {
+    display: none;
+  }
+
+  .curator-icon-button {
+    height: 1.6rem;
+    width: 1.6rem;
+  }
+
+  .curator-health-pill-label {
+    display: none;
+  }
+
+  /* Shrink, don't strip: the mockup's primary-nav keeps every pill's text
+     label at every width, relying on horizontal scroll (plus this fade
+     mask at the edges) rather than going icon-only. Icon-only pills lose
+     their visual anchor once the background/border is gone on the
+     inactive ones — they read as disconnected floating icons instead of
+     a nav row, which is exactly what looked broken here before. */
+  .curator-tabs {
+    -webkit-mask-image: linear-gradient(90deg, transparent, #000 1rem, #000 calc(100% - 1rem), transparent);
+    mask-image: linear-gradient(90deg, transparent, #000 1rem, #000 calc(100% - 1rem), transparent);
+  }
+
+  /* The fade mask alone isn't a strong enough affordance when the active
+     pill happens to fill the visible strip edge-to-edge (no sliver of the
+     next pill peeks through to hint "more here") — a narrow first-load
+     viewport with only "Recommendations" visible reads as the complete nav,
+     not a scrollable one. A persistent chevron makes the affordance
+     unambiguous regardless of scroll position or which pill is active. */
+  .curator-navigation {
+    position: relative;
+  }
+
+  .curator-navigation::after {
+    border-right: 2px solid var(--curator-text-muted);
+    border-top: 2px solid var(--curator-text-muted);
+    content: "";
+    height: 0.4rem;
+    opacity: 0.65;
+    pointer-events: none;
+    position: absolute;
+    right: 0.2rem;
+    top: 50%;
+    transform: translateY(-50%) rotate(45deg);
+    width: 0.4rem;
+  }
+
+  .curator-tabs .nav-link {
+    font-size: 0.78rem;
+    padding: 0.4rem 0.55rem;
+  }
+
+  .curator-lane-switcher {
+    gap: 0.4rem;
+  }
+
+  .curator-lane-card {
+    width: 10.5rem;
+  }
+
+  .curator-similar-search form {
+    flex-basis: 100%;
+  }
+}
+
+/* ---- Score bar ---- */
+.curator-match-row {
+  align-items: center;
+  display: flex;
+  flex: 1 1 100%;
+  gap: 0.5rem;
+  margin: 0.3rem 0;
+  width: 100%;
+}
+
+.curator-match-label {
+  color: var(--curator-card-text-muted);
+  flex: 0 0 auto;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.curator-match-value {
+  color: var(--curator-card-text-muted);
+  flex: 0 0 auto;
+  font-size: 0.75rem;
+}
+
+.curator-match-row .curator-score-bar {
+  flex: 1 1 auto;
+  margin: 0;
+}
+
+.curator-score-bar {
+  display: flex;
+  height: 6px;
+  border-radius: var(--curator-radius-sm);
+  overflow: hidden;
+  margin: 6px 0 4px;
+  /* Same track token as .curator-score-scale so the Appeal and Rank bars
+     match in both themes: --bs-secondary-bg stays dark in Stash's own
+     chrome, so Curator's light-mode data-theme toggle never reached it. */
+  background: var(--curator-wash-recessed);
+}
+.curator-score-bar-seg {
+  display: block;
+  height: 100%;
+  transition: width 0.3s ease;
+}
+.curator-score-app { background: var(--st-flush, #50b86c); }
+
+.curator-score-bar-clipped {
+  background: repeating-linear-gradient(45deg, var(--st-flush, #50b86c), var(--st-flush, #50b86c) 4px, #d59a52 4px, #d59a52 8px);
+}
+
+/* ---- Relationship chips ---- */
+.curator-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.curator-chip {
+  display: inline-block;
+  font-size: 0.75rem;
+  padding: 2px 7px;
+  border-radius: var(--curator-radius-lg);
+  white-space: nowrap;
+}
+/* Literal (not alpha-blended) colors, each independently measured against
+   white text — the previous versions used a base hue at full opacity for
+   "same_X" and the identical hue at ~67% alpha for "similar_X" to convey
+   "weaker match" via transparency. That let the "same_X" solids fail WCAG
+   AA outright (3.34:1/2.50:1/2.85:1 measured for blue/green/orange) and
+   made "similar_X" contrast depend on whatever's behind the chip (a card
+   surface that's white in light theme), which can't be guaranteed to pass
+   at all. Darker solids for "same_X", and a lighter-but-still-AA-passing
+   solid of the same hue for "similar_X" (instead of alpha) keep the same
+   visual distinction with contrast that holds regardless of backdrop.
+   multi_hop already passed (4.67:1) and is unchanged. */
+.curator-chip-same_performer      { background: #1d5fb8; color: #fff; }
+.curator-chip-similar_performer   { background: #316bb0; color: #fff; }
+.curator-chip-shared_content      { background: #1e7e34; color: #fff; }
+.curator-chip-similar_structure   { background: #278041; color: #fff; }
+.curator-chip-same_studio         { background: #a0530a; color: #fff; }
+.curator-chip-multi_hop           { background: #9b59b6; color: #fff; }
+.curator-chip-tags                { background: #555; color: #ddd; }
+
+.curator-curate {
+  margin-top: 1rem;
+}
+
+.curator-curate > h2 {
+  font-size: 1.2rem;
+}
+
+.curator-curate-setup {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+}
+
+.curator-curate-setup label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.curator-curate-tag-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+}
+
+.curator-curate-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: center;
+  width: 100%;
+}
+
+.curator-curate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+.curator-curate-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.curator-curate-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: center;
+  margin-bottom: 0.25rem;
+}
+
+.curator-curate-controls {
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.curator-curate-rating {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem;
+}
+
+.curator-curate-score {
+  min-width: 1.8rem;
+}
+
+.curator-curate-score.curator-curate-active {
+  outline: 2px solid var(--sc, #6b8e23);
+}
+
+.curator-curate-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  align-items: center;
+}
+
+.curator-curate-rated {
+  font-size: 0.8rem;
+  color: var(--curator-text-muted);
+}
+
+.curator-curate-policy {
+  font-size: 0.8rem;
+  color: var(--curator-text-muted);
+  margin: 0.25rem 0 0;
+}
+
+.curator-curate-verdict {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius-sm);
+}
+
+.curator-curate-verdict {
+  color: var(--curator-text);
+}
+
+.curator-curate-verdict h3 {
+  font-size: 1rem;
+  color: var(--curator-text);
+}
+
+.curator-curate-custom {
+  margin-top: 1rem;
+}
+
+.curator-curate-custom summary {
+  cursor: pointer;
+}
+
+.curator-curate-setup-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: flex-end;
+  margin-top: 0.5rem;
+}
+
+.curator-curate-meta {
+  font-size: 0.8rem;
+  color: var(--curator-text-muted);
+  display: flex;
+  gap: 0.5rem;
+}
+
+.curator-curate-media {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+}
+
+.curator-curate-media .scene-card-link,
+.curator-curate-media .scene-card-image,
+.curator-curate-media .curator-curate-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.curator-curate-preview {
+  position: absolute;
+  inset: 0;
+  background: var(--curator-wash-recessed);
+  cursor: pointer;
+}
+
+.curator-curate-details {
+  font-size: 0.8rem;
+  color: var(--curator-text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin: 0.25rem 0;
+}
+
+.curator-curate-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.curator-tag-question {
+  margin-bottom: 1rem;
+}
+
+.curator-tag-question-modes {
+  margin-bottom: 0.75rem;
+}
+
+.curator-tag-question h3 {
+  font-size: 1.05rem;
+  margin: 0 0 0.25rem;
+}
+
+.curator-tag-question-progress,
+.curator-tag-question-reason,
+.curator-tag-question-done {
+  color: var(--curator-text-muted);
+  font-size: 0.85rem;
+  margin: 0 0 0.5rem;
+}
+
+.curator-tag-question-examples {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+  max-width: 640px;
+  margin-bottom: 0.75rem;
+}
+
+.curator-tag-question-example {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  border-radius: 6px;
+  aspect-ratio: 16 / 9;
+  background: var(--curator-border);
+}
+
+.curator-tag-question-example video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Outside card-section, so it stays readable while the SFW Switch blurs the clip. */
+.curator-tag-question-marker {
+  position: absolute;
+  top: 0.25rem;
+  left: 0.25rem;
+  padding: 0 0.35rem;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+
+.curator-tag-question-description {
+  font-size: 0.9rem;
+  margin: 0 0 0.5rem;
+  max-width: 640px;
+}
+
+@media (max-width: 576px) {
+  .curator-tag-question-examples {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.curator-tag-question-answer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  max-width: 640px;
+}
+
+.curator-tag-question-answer .curator-sentiment {
+  flex: 1 1 280px;
+  min-width: 0;
+}
+
+/* The question and review cards' slider (TagSentimentControl large): the
+   track gets its own full-width row and a thumb-sized hit area, and every
+   stop keeps its label, so a tap lands where it is aimed on a phone. */
+.curator-tag-question-answer .curator-sentiment-large { flex-basis: 100%; }
+
+.curator-sentiment-large.curator-sentiment-labelled {
+  column-gap: 0.75rem;
+  grid-template-columns: 1fr auto;
+  max-width: 560px;
+  overflow: visible;
+  row-gap: 0;
+}
+
+.curator-sentiment-large.curator-sentiment-labelled > .curator-sentiment-scale { font-size: 0.72rem; grid-column: 1 / -1; }
+.curator-sentiment-large.curator-sentiment-labelled > .curator-sentiment-scale > span,
+.curator-sentiment-large.curator-sentiment-labelled > .curator-sentiment-scale > span:not(:first-child):not(:last-child) { display: block; max-width: 14%; }
+.curator-sentiment-large.curator-sentiment-labelled .curator-sentiment-track { grid-column: 1 / -1; height: 2.75rem; }
+.curator-sentiment-large.curator-sentiment-labelled .curator-sentiment-current { font-size: 0.85rem; grid-column: 1; grid-row: 3; }
+.curator-sentiment-large.curator-sentiment-labelled > .btn { grid-column: 2; grid-row: 3; }
+.curator-sentiment-large .curator-sentiment-rail { height: 6px; border-radius: 3px; }
+.curator-sentiment-large .curator-sentiment-stop { height: 10px; width: 10px; }
+.curator-sentiment-large .curator-sentiment-stop-never { height: 12px; width: 12px; }
+.curator-sentiment-large .curator-sentiment-thumb { height: 24px; width: 24px; }
+.curator-sentiment-large .curator-sentiment-model-dot { height: 10px; width: 10px; }
+
+@media (max-width: 576px) {
+  .curator-curate-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .curator-curate-media {
+    aspect-ratio: 16 / 9;
+    max-height: 180px;
+  }
+}
+
+/* ── Impact report (verdict) ────────────────────────────────────────────── */
+
+.curator-impact {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--curator-border);
+}
+
+.curator-impact-heading {
+  font-size: 1rem;
+  margin: 0 0 0.2rem;
+}
+
+.curator-impact-ago {
+  font-size: 0.8rem;
+  color: var(--curator-text-muted);
+  margin: 0 0 0.75rem;
+}
+
+.curator-impact-legend {
+  font-size: 0.72rem;
+  color: var(--curator-text-muted);
+  margin: 0 0 0.75rem;
+  line-height: 1.35;
+}
+
+.curator-impact-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.curator-impact-group-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--curator-text-muted);
+  margin-bottom: 0.4rem;
+}
+
+.curator-impact-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+}
+
+@media (max-width: 576px) {
+  .curator-impact-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .curator-impact-scene-row {
+    flex-wrap: wrap;
+  }
+  .curator-impact-thumb {
+    width: 2.5rem;
+    height: 1.6rem;
+  }
+  .curator-impact-correct {
+    font-size: 0.65rem;
+    padding: 0.12rem 0.35rem;
+  }
+}
+
+.curator-impact-list-title {
+  font-size: 0.72rem;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+}
+
+.curator-impact-up .curator-impact-list-title {
+  color: #8fbf4f;
+}
+
+.curator-impact-down .curator-impact-list-title {
+  color: #d96a6a;
+}
+
+.curator-impact-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.curator-impact-scene {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius-sm);
+  padding: 0.35rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+.curator-impact-scene:hover {
+  border-color: var(--curator-border-strong);
+  background: var(--curator-wash-raised);
+}
+
+.curator-impact-thumb {
+  width: 3.2rem;
+  height: 2rem;
+  object-fit: cover;
+  border-radius: var(--curator-radius-sm);
+  flex-shrink: 0;
+  background: var(--curator-wash-recessed);
+}
+
+.curator-impact-scene-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.curator-impact-scene-title {
+  font-size: 0.8rem;
+  color: var(--curator-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.curator-impact-scene-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  width: 100%;
+}
+
+.curator-impact-scene-row .curator-impact-scene {
+  flex: 1;
+  min-width: 0;
+}
+
+.curator-impact-correct {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  padding: 0.15rem 0.4rem;
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius-sm);
+  background: var(--curator-wash-raised);
+  color: var(--curator-text-muted);
+  cursor: pointer;
+}
+
+.curator-impact-correct:hover:not(:disabled) {
+  border-color: var(--curator-border-strong);
+  color: var(--curator-text);
+}
+
+.curator-impact-correct:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.curator-impact-person {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius-sm);
+  padding: 0.3rem 0.45rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+.curator-impact-person:hover {
+  border-color: var(--curator-border-strong);
+  background: var(--curator-wash-raised);
+}
+
+.curator-impact-avatar {
+  width: 1.6rem;
+  height: 1.6rem;
+  object-fit: cover;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--curator-wash-recessed);
+}
+
+.curator-impact-person-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8rem;
+  color: var(--curator-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.curator-impact-tag {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius-lg);
+  padding: 0.15rem 0.5rem;
+  color: inherit;
+  text-decoration: none;
+  align-self: flex-start;
+}
+
+.curator-impact-tag:hover {
+  border-color: var(--curator-border-strong);
+  background: var(--curator-wash-raised);
+}
+
+.curator-impact-tag-name {
+  font-size: 0.78rem;
+  color: var(--curator-text);
+}
+
+.curator-impact-delta {
+  font-size: 0.7rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.curator-impact-delta.up {
+  color: #8fbf4f;
+}
+
+.curator-impact-delta.down {
+  color: #d96a6a;
+}
+
+.curator-impact-scene-why {
+  font-size: 0.68rem;
+  color: var(--curator-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.curator-impact-weak {
+  font-size: 0.75rem;
+  color: var(--curator-accent-secondary);
+  margin: 0 0 0.4rem;
+}
+
+/* Impact view: the full-curate-outcome summary strip. */
+.curator-impact-summary {
+  align-items: center;
+  background: color-mix(in srgb, var(--curator-accent) 8%, var(--curator-surface));
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.2rem;
+  margin-bottom: 0.9rem;
+  padding: 0.5rem 0.7rem;
+}
+
+.curator-impact-summary span {
+  font-size: 0.8rem;
+}
+
+/* Declared-vs-inferred divergence rows with a jump into Tag sentiment. */
+.curator-sentiment-divergence {
+  margin: 1rem 0;
+}
+
+.curator-sentiment-divergence h3 {
+  font-size: 0.95rem;
+  margin: 0 0 0.2rem;
+}
+
+.curator-sentiment-divergence-row {
+  align-items: center;
+  border-bottom: 1px solid var(--curator-border);
+  display: flex;
+  gap: 0.8rem;
+  justify-content: space-between;
+  padding: 0.45rem 0;
+}
+
+.curator-sentiment-divergence-row:last-of-type {
+  border-bottom: 0;
+}
+
+.curator-sentiment-divergence-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.curator-sentiment-divergence-copy strong {
+  font-size: 0.85rem;
+}
+
+.curator-sentiment-divergence-copy span {
+  color: var(--curator-text-muted);
+  font-size: 0.75rem;
+}
+
+.curator-score-headline { color: var(--curator-text); font-size: 0.82rem; font-weight: 600; }
+.curator-explanation-view,
+.curator-score-breakdown { display: grid; gap: 0.55rem; }
+.curator-appeal-hero { display: grid; gap: 0.15rem; padding: 0.55rem 0.65rem; border: 1px solid var(--curator-border); border-radius: var(--curator-radius-sm); background: var(--curator-wash-raised); }
+/* Issue #213: the prose lead in "Why this?" gets the section's visual
+   language instead of bare body text. */
+.curator-explanation-view > .curator-explanation {
+  background: var(--curator-wash-raised);
+  border-left: 3px solid var(--curator-accent-secondary);
+  border-radius: var(--curator-radius-sm);
+  color: var(--curator-text);
+  font-size: 0.88rem;
+  line-height: 1.5;
+  margin: 0;
+  padding: 0.5rem 0.65rem;
+}
+.curator-appeal-hero strong { font-size: 1.05rem; }
+.curator-appeal-hero span, .curator-fingerprint-confidence, .curator-score-row small { color: var(--curator-text-muted); font-size: 0.72rem; }
+.curator-score-positive { color: #8fbf4f; }
+.curator-score-negative { color: #d96a6a; }
+.curator-score-scale { background: var(--curator-wash-recessed); border-radius: 999px; height: 0.42rem; overflow: hidden; position: relative; }
+.curator-score-fill { border-radius: inherit; display: block; height: 100%; position: absolute; top: 0; }
+.curator-score-scale-signed .curator-score-zero { background: var(--curator-border-strong); bottom: 0; left: 50%; position: absolute; top: 0; width: 1px; z-index: 1; }
+.curator-score-fill.curator-score-positive { background: var(--st-flush, #5cae84); }
+.curator-score-fill.curator-score-negative { background: #c45e65; }
+.curator-score-row-head { display: flex; justify-content: space-between; gap: 0.75rem; font-size: 0.78rem; }
+.curator-score-row-missing { opacity: 0.65; }
+.curator-evidence-rows { display: grid; gap: 0.3rem; }
+.curator-evidence-row { display: grid; grid-template-columns: 4.2rem 1fr auto; gap: 0.35rem; align-items: baseline; font-size: 0.76rem; }
+.curator-evidence-row > span { color: var(--curator-text-muted); font-size: 0.68rem; text-transform: uppercase; }
+.curator-evidence-row small { color: var(--curator-text-muted); }
+.curator-evidence-negative > span { color: #d96a6a; }
+.curator-evidence-positive > span { color: #8fbf4f; }
+.curator-lane-callout { border-left: 3px solid var(--curator-accent-secondary); margin: 0; padding-left: 0.6rem; font-size: 0.78rem; }
+.curator-card .curator-selection-reason {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  margin: 0 0 0.5rem;
+  padding: 0;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+.curator-technical-details pre { max-height: 12rem; overflow: auto; white-space: pre-wrap; }
+.curator-evidence-fingerprint { display: grid; gap: 0.35rem; }
+.curator-fingerprint-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.35rem 0.7rem; }
+.curator-fingerprint-axis { display: grid; gap: 0.15rem; font-size: 0.68rem; text-transform: capitalize; }
+.curator-fingerprint-bars { background: var(--curator-wash-recessed); border-radius: 999px; display: flex; height: 0.32rem; overflow: hidden; }
+.curator-fingerprint-support { background: #5cae84; display: block; }
+.curator-fingerprint-caution { background: #c45e65; display: block; }
+.curator-fingerprint-missing { color: var(--curator-text-muted); opacity: 0.7; }
+@media (max-width: 560px) {
+  .curator-fingerprint-grid { grid-template-columns: 1fr; }
+  .curator-evidence-row { grid-template-columns: 3.5rem 1fr; }
+  .curator-evidence-row small { grid-column: 2; }
+}
+
+.curator-fingerprint-svg { display: block; height: auto; max-width: 22rem; overflow: visible; width: 100%; }
+.curator-fingerprint-ring { fill: none; stroke: var(--curator-border); stroke-width: 0.7; }
+.curator-fingerprint-spoke { stroke: var(--curator-border-strong); stroke-width: 0.7; }
+.curator-fingerprint-spoke-missing { stroke-dasharray: 2 2; opacity: 0.6; }
+.curator-fingerprint-support-shape { fill: rgba(92, 174, 132, 0.28); stroke: #5cae84; stroke-width: 1.6; }
+.curator-fingerprint-caution-shape { fill: rgba(196, 94, 101, 0.2); stroke: #c45e65; stroke-width: 1.3; }
+.curator-fingerprint-neutral-marker { fill: #adb5bd; stroke: var(--curator-surface); stroke-width: 1; }
+.curator-fingerprint-label { fill: var(--curator-text); font-size: 9px; font-weight: 500; }
+.curator-fingerprint-label-missing { fill: var(--curator-text-muted); }
+.curator-fingerprint-legend { display: flex; flex-wrap: wrap; gap: 0.7rem; color: var(--curator-text-muted); font-size: 0.7rem; }
+.curator-fingerprint-legend-support::before, .curator-fingerprint-legend-caution::before, .curator-fingerprint-legend-neutral::before { border-radius: 50%; content: ""; display: inline-block; height: 0.45rem; margin-right: 0.25rem; width: 0.45rem; }
+.curator-fingerprint-legend-support::before { background: #5cae84; }
+.curator-fingerprint-legend-caution::before { background: #c45e65; }
+.curator-fingerprint-legend-neutral::before { background: #adb5bd; }
+.curator-fingerprint-accessible { border: 0; clip: rect(0 0 0 0); height: 1px; margin: -1px; overflow: hidden; padding: 0; position: absolute; white-space: nowrap; width: 1px; }
+.curator-score-headline-bar { margin: 0.1rem 0 0.35rem; max-width: 18rem; }
+
+.curator-score-appeal-row { align-items: center; display: grid; flex: 1 1 100%; gap: 0.5rem; grid-template-columns: minmax(8.5rem, 10rem) minmax(0, 1fr) auto; width: 100%; }
+.curator-score-appeal-row .curator-score-headline { font-size: 0.68rem; }
+.curator-score-appeal-row .curator-score-headline-bar { margin: 0; max-width: none; }
+.curator-why-row { flex: 1 1 100%; width: 100%; }
+
+.curator-score-stack { display: grid; flex: 1 1 100%; gap: 0.35rem; min-width: 0; width: 100%; }
+.curator-why-row { border-bottom: 1px solid var(--curator-border); padding: 0 0.15rem 0.3rem; }
+.curator-why-row .curator-evidence { width: 100%; }
+.curator-why-row .curator-evidence summary { color: var(--curator-text-muted); font-size: 0.78rem; font-weight: 600; padding: 0.2rem 0; }
+.curator-match-row { display: grid; grid-template-columns: minmax(8.5rem, 10rem) minmax(0, 1fr) auto; margin: 0.05rem 0 0; }
+.curator-evidence-fingerprint { background: var(--curator-wash-raised); border: 1px solid var(--curator-border); border-radius: var(--curator-radius-sm); padding: 0.55rem 0.65rem; }
+.curator-score-appeal-row .curator-score-headline { color: var(--curator-card-text-muted); font-size: 0.68rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.curator-score-headline-value { color: var(--curator-card-text-muted); flex: 0 0 auto; font-size: 0.75rem; font-weight: 600; }
+.curator-compact-card .curator-score-stack { display: flex; flex-wrap: wrap; gap: 0.25rem 0.6rem; }
+.curator-compact-card .curator-score-appeal-row { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.curator-compact-card .curator-score-headline-bar { flex: 1 1 2rem; min-width: 2rem; }
+.curator-compact-card .curator-card-date { color: var(--curator-text-muted); font-size: 0.75rem; white-space: nowrap; }
+.curator-compact-card .curator-score-headline { flex: 0 0 auto; }
+.curator-compact-card .curator-match-row { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0; }
+.curator-compact-card .curator-match-label { flex: 0 1 auto; max-width: 50%; min-width: 0; }
+.curator-compact-card .curator-match-row .curator-score-bar { flex: 1 1 2rem; min-width: 2rem; }
+.curator-compact-card .curator-match-row .card-popovers { flex: 0 0 auto; }
+.curator-compact-card .curator-why-row { border: 0; flex: 1 1 auto; padding: 0; width: auto; }
+.curator-compact-card .curator-score { flex: 0 1 auto; margin: 0; }
+.curator-compact-card .curator-score > summary { color: var(--curator-text-muted); font-size: 0.78rem; font-weight: 600; padding: 0.2rem 0; }
+.curator-compact-card .curator-why-row:has(.curator-evidence[open]),
+.curator-compact-card .curator-score[open] { flex-basis: 100%; width: 100%; }
+.curator-metadata-status { border-top: 1px solid var(--curator-border); color: var(--curator-text-muted); font-size: 0.75rem; padding-top: 0.35rem; }
+.curator-metadata-complete { color: #8fbf4f; }
+.curator-metadata-incomplete { color: var(--curator-text-muted); }
+
+.curator-compact-card .curator-why-row { align-items: center; display: flex; flex-wrap: wrap; gap: 0.35rem; width: 100%; }
+.curator-compact-card .curator-why-row .curator-evidence { flex: 1 1 auto; width: auto; min-width: 0; }
+.curator-compact-card .curator-why-row .curator-evidence[open] { flex-basis: 100%; width: 100%; }
+.curator-compact-card .curator-why-row .curator-prune-actions { margin: 0; }
+.curator-compact-card .curator-score-stack > .curator-card-description { flex-basis: 100%; width: 100%; margin: 0; padding: 0; }
+
+.curator-compact-card .card-section { padding-bottom: 0.1rem; }
+.curator-compact-card .card-section-title { min-height: 0; margin-bottom: 0.1rem; }
+.curator-compact-card .curator-card-body { padding-top: 0.2rem; }
+.curator-compact-card .scene-card__details { margin-bottom: 0.1rem; }
+.curator-compact-card .curator-why-row > .curator-external-tag-rating { flex-basis: 100%; order: 1; }
+
+.curator-compact-card .card-section-title { font-size: calc(1.05rem * var(--curator-card-text-scale, 1)); }
+
+/* Match Expand's divider and compact metadata row below Affinity. */
+.curator-compact-card > .scene-card > .card-section {
+  padding-inline: var(--card-pad, 0.7rem);
+}
+.curator-compact-card > .scene-card .scene-card__details {
+  align-items: center;
+  border-top: 1px solid var(--curator-card-border);
+  color: var(--curator-text-muted);
+  display: flex;
+  font-size: 0.75rem;
+  margin-inline: calc(-1 * var(--card-pad, 0.7rem));
+  margin-top: 0.1rem;
+  min-height: calc(1.85rem + 1px);
+  padding: 0.2rem calc(10rem * var(--curator-card-text-scale, 1) + var(--card-pad, 0.7rem)) 0 var(--card-pad, 0.7rem);
+}
+.curator-compact-card > .scene-card > .card-popovers {
+  align-items: center;
+  bottom: 0.2rem;
+  gap: 0.1rem;
+  left: auto;
+  right: var(--card-pad, 0.7rem);
+}
+.curator-compact-card > .scene-card > .card-popovers .btn {
+  font-size: 0.85rem;
+  height: 1.65rem;
+  padding: 0 0.25rem;
+}
+.curator-compact-card > .scene-card + .curator-card-body {
+  border-top: 0;
+}
+
+.curator-card .card-section > .curator-card-affinity { margin-bottom: 0.5rem; width: 100%; }
+.curator-card-affinity > .curator-score-stack { display: block; }
+/* Roulette keeps Stash's player mounted while its clipped container changes shape. */
+.curator-page .curator-roulette-launch.btn { position: relative; isolation: isolate; overflow: hidden; color: #2b1b08; font-weight: 600; border-color: #e1bc72; background: linear-gradient(125deg, #dbad55, #f6d995 45%, #d6a24b 78%, #e9c77e); box-shadow: inset 0 1px 0 #fff0c788, 0 2px 9px #d9ab4526; transition: transform .2s ease, box-shadow .2s ease; }
+.curator-page .curator-roulette-launch.btn::after { content: ""; position: absolute; z-index: -1; inset: 0; pointer-events: none; background: linear-gradient(110deg, transparent 30%, #fff7da88 50%, transparent 70%); transform: translateX(-150%); animation: curator-roulette-button-shimmer 6s ease-in-out infinite; }
+@keyframes curator-roulette-button-shimmer { 0%, 65% { transform: translateX(-150%); } 90%, 100% { transform: translateX(150%); } }
+.curator-page .curator-roulette-launch.btn:not(:disabled):is(:hover, :focus-visible) { color: #241504; border-color: #f7d996; background: linear-gradient(125deg, #e6bc6b, #ffe7b3 45%, #dfb05e 78%, #f2d795); transform: translateY(-2px); box-shadow: inset 0 1px 0 #fff5d6aa, 0 5px 18px #e6b65566, 0 0 20px #e6b65533; }
+.curator-page .curator-roulette-launch.btn:focus-visible { outline: 2px solid #ffe9b2; outline-offset: 3px; }
+.curator-page .curator-roulette-launch.btn:not(:disabled):active { transform: translateY(0) scale(.98); }
+.curator-page .curator-roulette-launch.btn:disabled { box-shadow: none; }
+.curator-page .curator-roulette-launch.btn:disabled::after { animation: none; }
+@media (prefers-reduced-motion: reduce) {
+  .curator-page .curator-roulette-launch.btn { transition: none; }
+  .curator-page .curator-roulette-launch.btn::after { animation: none; }
+  .curator-page .curator-roulette-launch.btn:not(:disabled):is(:hover, :focus-visible, :active) { transform: none; }
+}
+.curator-roulette-dialog {
+  padding: 0;
+  border: 0;
+  margin: 0;
+  width: 100vw;
+  max-width: none;
+  height: 100dvh;
+  max-height: none;
+  overflow: hidden;
+  color: #eee;
+  background: transparent;
+}
+.curator-roulette-dialog::backdrop { background: #000b; }
+.curator-roulette-dialog:has([data-intro=true]:is([data-phase=loading], [data-phase=assembling]))::backdrop { background: #0003; }
+.curator-roulette-stage { --curator-roulette-thumbnail-size: min(360px, 26vw); --curator-roulette-wheel-size: calc(var(--curator-roulette-thumbnail-size) * 600 / var(--curator-roulette-card-width, 60)); position: relative; isolation: isolate; width: 100%; height: 100%; overflow: hidden; }
+.curator-roulette-stage[data-animated=false] .curator-roulette-spinner { display: none; }
+.curator-roulette-stage::before { content: ""; position: absolute; inset: 0; z-index: -1; background: radial-gradient(ellipse at 50% 38%, #244d3b88, transparent 65%), radial-gradient(#ffffff05 .6px, transparent .7px), #081511; background-size: auto, 4px 4px; }
+.curator-roulette-stage:is([data-phase=revealing], [data-phase=playing], [data-phase=returning]) { background: #060609; }
+.curator-roulette-stage:is([data-phase=revealing], [data-phase=playing], [data-phase=returning])::before { transition: opacity 1.3s cubic-bezier(.4,0,.2,1); }
+.curator-roulette-stage:is([data-phase=revealing], [data-phase=playing])::before { opacity: 0; }
+.curator-roulette-stage[data-phase=returning]::before { transition-duration: 1.1s; }
+.curator-roulette-stage[data-animated=false]::before { transition-duration: .22s; }
+.curator-roulette-stage[data-intro=true][data-phase=loading]::before { opacity: .25; }
+.curator-roulette-stage[data-phase=assembling]::before { animation: curator-roulette-table-arrive 2.35s ease both; }
+@keyframes curator-roulette-table-arrive { from { opacity: .25; } 60%, to { opacity: 1; } }
+.curator-roulette-spinner { position: absolute; z-index: 1; inset: 0; pointer-events: none; opacity: 0; }
+.curator-roulette-stage:is([data-phase=assembling], [data-phase=spinning], [data-phase=rewinding], [data-phase=celebrating], [data-phase=landing], [data-phase=revealing], [data-phase=returning]) .curator-roulette-spinner { opacity: 1; }
+.curator-roulette-wheel-wrap { position: absolute; left: 50%; top: calc(40% - var(--curator-roulette-wheel-size) * .1); width: var(--curator-roulette-wheel-size); aspect-ratio: 1; transform: translateX(-50%) scale(var(--camera-zoom, 1)); transform-origin: 50% 0; }
+.curator-roulette-wheel-wrap::before { content: ""; position: absolute; inset: var(--curator-roulette-outer-inset, 5%); border: 7px solid transparent; border-radius: 50%; background: radial-gradient(ellipse at 50% 0, #225244, #0a221c 65%) padding-box, linear-gradient(125deg, #705032, #f5d69b 40%, #9a6d39 65%, #e9c78b) border-box; box-shadow: 0 0 0 3px #1b1710, 0 0 0 5px #a17b4899, 0 25px 100px #0009, inset 0 0 0 3px #071510, inset 0 0 70px #000a; }
+.curator-roulette-wheel-wrap::after { content: ""; position: absolute; inset: var(--curator-roulette-inner-inset, 15%); border: 2px solid #bc995f99; border-radius: 50%; box-shadow: 0 0 0 5px #071c1688, inset 0 15px 90px #0008; pointer-events: none; }
+.curator-roulette-wheel-wrap svg { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; overflow: visible; will-change: transform; }
+/* Native card padding shifts Firefox's SVG screen coordinates under rotation. */
+.curator-roulette-wheel-wrap.scene-card > svg.scene-card-image { padding: 0; margin: 0; border: 0; }
+.curator-roulette-wedge { fill: transparent; stroke: #bf9a63; stroke-width: 3; vector-effect: non-scaling-stroke; }
+.curator-roulette-wedge.selected { stroke: #857457; }
+.curator-roulette-slot.winning .curator-roulette-wedge { stroke: #ffe0a4; stroke-width: 4; }
+.curator-roulette-pointer { position: absolute; z-index: 3; left: 50%; top: calc(var(--curator-roulette-wheel-size) * var(--curator-roulette-card-top, .07)); transform: translate(-50%, -100%); width: 64px; height: 86px; filter: drop-shadow(0 5px 8px #000b); }
+.curator-roulette-pointer::before { content: ""; position: absolute; z-index: 1; top: 0; left: 17px; width: 30px; height: 30px; border: 3px solid #e9cc92; border-radius: 50%; background: radial-gradient(circle at 35% 25%, #e8ca8d, #96652f 65%, #50351e); box-shadow: inset 0 0 0 4px #473119, 0 0 15px #edc58044; }
+.curator-roulette-pointer-tip { position: absolute; inset: 16px 8px 0; transform-origin: 50% 0; background: linear-gradient(100deg, #f8dea5, #b18043 55%, #e3bb72); clip-path: polygon(0 0, 100% 0, 50% 100%); }
+.curator-roulette-pointer-tip::after { content: ""; position: absolute; inset: 5px 7px 10px; background: linear-gradient(90deg, #6f201d, #d96046 55%, #972c25); clip-path: polygon(0 0, 100% 0, 50% 100%); }
+.curator-roulette-flight { position: absolute; z-index: 4; left: 0; top: 0; padding: 0; margin: 0; min-width: 0; border: 1px solid #e1c591; border-radius: 3px; background: #122b22; box-shadow: 0 8px 25px #0008; will-change: transform; }
+.curator-roulette-flight.scene-card .scene-card-image { display: block; position: absolute; inset: 0; padding: 0; margin: 0; width: 100%; height: 100%; object-fit: cover; border-radius: 2px; }
+.curator-roulette-hit { position: absolute; z-index: 4; border: 3px solid #fff3ce; box-shadow: 0 0 18px #eac57bcc, inset 0 0 12px #eac57b55; will-change: opacity, transform; }
+.curator-roulette-hit::after { content: ""; position: absolute; inset: -8px; border: 2px solid #ffe5a8; border-radius: 8px; animation: curator-roulette-release .65s ease-out both; }
+@keyframes curator-roulette-release { from { opacity: .8; transform: scale(1); } to { opacity: 0; transform: scale(1.35); } }
+.curator-roulette-aura { position: absolute; z-index: 2; pointer-events: none; left: 50%; top: calc(var(--curator-roulette-wheel-size) * var(--curator-roulette-card-top, .07)); width: min(78vw, 620px); aspect-ratio: 1; transform: translate(-50%, -50%); opacity: 0; background: radial-gradient(circle, #f7d38722, #e9ad490d 35%, transparent 68%); }
+.curator-roulette-stage[data-phase=spinning] .curator-roulette-aura { opacity: calc(.3 + var(--spin-progress, 0) * .7); }
+.curator-roulette-aura::before { content: ""; position: absolute; inset: 8%; border-radius: 50%; background: conic-gradient(transparent 40%, #edc47d33 65%, #fff0bb99 80%, transparent 82%); mask-image: radial-gradient(circle, transparent 66%, #000 67%, #000 69%, transparent 70%); transform: rotate(var(--roulette-orbit, 0deg)); }
+.curator-roulette-aura i { position: absolute; inset: 0; border: 1px solid #f5cf8d; border-radius: 50%; opacity: 0; }
+.curator-roulette-stage[data-phase=spinning] .curator-roulette-aura i { animation: curator-roulette-converge 2.1s ease-in infinite; animation-delay: calc(var(--ring) * -.7s); }
+@keyframes curator-roulette-converge { from { opacity: 0; transform: scale(1); } 25% { opacity: .3; } to { opacity: 0; transform: scale(.1); } }
+.curator-roulette-stage[data-phase=celebrating] .curator-roulette-aura { opacity: 1; background: radial-gradient(circle, #ffe2a438, #e9ad4912 35%, transparent 65%); }
+.curator-roulette-player { position: absolute; z-index: 2; inset: 0; visibility: hidden; background: #060609; }
+.curator-roulette-stage:is([data-phase=playing], [data-phase=revealing], [data-phase=returning], [data-phase=error]) .curator-roulette-player { visibility: visible; }
+.curator-roulette-scene,
+.curator-roulette-player .VideoPlayer,
+.curator-roulette-player .video-wrapper,
+.curator-roulette-player .video-js { width: 100% !important; height: 100% !important; padding: 0 !important; max-height: none !important; }
+.curator-roulette-player video { width: 100%; height: 100%; object-fit: contain; }
+.curator-roulette-stage[data-animated=true]:is([data-phase=revealing], [data-phase=returning]) video { object-fit: cover; }
+.curator-roulette-stage:is([data-phase=revealing], [data-phase=returning]) .vjs-control-bar,
+.curator-roulette-player .vjs-fullscreen-control { display: none; }
+.curator-roulette-hud { position: absolute; z-index: 6; top: 0; left: 0; right: 0; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 1rem; padding: 1.25rem; background: linear-gradient(#000b, transparent); }
+.curator-roulette-hud > span { color: #e5be7e; font-size: .8rem; letter-spacing: .1rem; }
+.curator-roulette-hud > div, .curator-roulette-controls { display: flex; justify-content: center; flex-wrap: wrap; gap: .5rem; }
+.curator-roulette-settings .dropdown-toggle::after { display: none; }
+.curator-roulette-settings .dropdown-menu { width: min(21rem, calc(100vw - 1.5rem)); padding: .75rem; color: #eee; background: #172c24; border: 1px solid #d5b87b66; border-radius: .75rem; box-shadow: 0 8px 24px #0008; }
+.curator-roulette-settings .curator-settings-field { margin: 0; padding: 0; gap: .75rem; }
+.curator-roulette-hud > .curator-roulette-controls { flex: 1 1 auto; min-width: 0; max-width: 100%; justify-content: center; }
+.curator-roulette-navigation, .curator-roulette-actions { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: .5rem; }
+.curator-roulette-actions { pointer-events: auto; min-inline-size: 0; max-width: 100%; margin: 0; padding: 0; border: 0; }
+.curator-roulette-hud > div { align-items: center; justify-content: flex-end; }
+.curator-roulette-navigation button { min-width: 5rem; }
+.curator-roulette-actions .curator-feedback { margin: 0; }
+.curator-roulette-controls .curator-roulette-actions button { min-width: 2.75rem; }
+.curator-roulette-rating { display: inline-flex; align-items: center; }
+.curator-roulette-controls .curator-roulette-rating button { min-width: 2rem; }
+.curator-roulette-controls button { pointer-events: auto; min-width: 5rem; }
+.curator-roulette-dialog :is(.curator-roulette-hud, .curator-roulette-controls) .btn:not(.minimal) { position: relative; border: 1px solid #ffffff26; border-radius: .6rem; color: #f0f1f3; font-weight: 500; background: #343b45eb; box-shadow: 0 2px 5px #0003; transition: background .18s ease, box-shadow .18s ease, border-color .18s ease; }
+.curator-roulette-dialog :is(.curator-roulette-hud, .curator-roulette-controls) .btn:not(.minimal):not(:disabled):not([aria-disabled=true]):is(:hover, :focus-visible) { color: #fff; background: #46505dec; border-color: #ffffff50; box-shadow: 0 3px 10px #0004; }
+.curator-roulette-dialog :is(.curator-roulette-hud, .curator-roulette-controls) .btn:not(.minimal):not(:disabled):active { background: #252b33; }
+.curator-roulette-dialog .curator-roulette-navigation .btn-primary:not(.minimal) { color: #302007; border-color: #ebc77c; background: linear-gradient(125deg, #c7953f, #ffe3a1 48%, #d3a34c); box-shadow: inset 0 1px 0 #fff7, 0 3px 14px #dbaf4938; }
+.curator-roulette-dialog .curator-roulette-navigation .btn-primary:not(.minimal):not(:disabled):not([aria-disabled=true]):is(:hover, :focus-visible) { color: #241704; background: linear-gradient(125deg, #d5a64d, #ffe8b0 48%, #dfb45f); box-shadow: inset 0 1px 0 #fff9, 0 5px 22px #eac36466; }
+.curator-roulette-actions .curator-feedback small { color: #e5d5a9; font-size: .7rem; }
+.curator-roulette-dialog .curator-roulette-actions .curator-feedback[data-reaction=thumb_up] button[aria-label=Useful] { color: #c5ffe2; border-color: #79e8b399; background: #21513f; animation: curator-roulette-feedback-pop .55s ease-out; }
+.curator-roulette-dialog .curator-roulette-actions .curator-feedback[data-reaction=thumb_down] button[aria-label="Not for me"] { color: #ffe1d8; border-color: #ec9d8999; background: #663b35; animation: curator-roulette-feedback-pop .55s ease-out; }
+@keyframes curator-roulette-feedback-pop { 45% { box-shadow: 0 0 16px #e5cc8677; } }
+.curator-roulette-o-burst { position: absolute; inset: 0; pointer-events: none; }
+.curator-roulette-o-burst i { position: absolute; left: 50%; top: 25%; width: 7px; height: 10px; border-radius: 70% 30% 65% 35%; background: #b2ecf7; box-shadow: 0 0 6px #b2ecf788; animation: curator-roulette-drop .7s ease-out both; }
+@keyframes curator-roulette-drop { from { opacity: .9; transform: translate(-50%, 0) scale(.4); } to { opacity: 0; transform: translate(calc((var(--drop) - 1) * 22px), -35px) rotate(30deg) scale(1); } }
+.curator-roulette-status { position: absolute; z-index: 6; left: 1.25rem; right: 1.25rem; top: 100%; text-align: center; pointer-events: none; color: #eee; font-size: .875rem; line-height: 1.4; text-wrap: balance; text-shadow: 0 1px 5px #000; }
+.curator-roulette-stage :is(.curator-roulette-hud, .curator-roulette-controls, .curator-roulette-status) { transition: opacity .25s; }
+.curator-roulette-quiet[data-phase=playing]:not(:has(:is(.curator-roulette-hud, .curator-roulette-controls) :focus-visible)) :is(.curator-roulette-hud, .curator-roulette-controls, .curator-roulette-status) { opacity: 0; pointer-events: none; }
+.curator-roulette-quiet[data-phase=playing]:not(:has(:is(.curator-roulette-hud, .curator-roulette-controls) :focus-visible)) .curator-roulette-controls :is(button, .curator-roulette-actions) { pointer-events: none; }
+.curator-roulette-quiet[data-phase=playing]:not(:has(:is(.curator-roulette-hud, .curator-roulette-controls) :focus-visible)) { cursor: none; }
+.curator-roulette-quiet[data-phase=playing]:has(.curator-roulette-settings.show) { cursor: auto; }
+.curator-roulette-quiet[data-phase=playing]:has(.curator-roulette-settings.show) .curator-roulette-hud { opacity: 1; pointer-events: auto; }
+.curator-roulette-stage:is([data-phase=error], [data-phase=exhausted], [data-phase=loading]) .curator-roulette-status { top: 40vh; padding: 1rem; background: #111e; border-radius: .5rem; }
+.curator-roulette-dialog button:focus-visible { outline: 2px solid #e5be7e; outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) {
+  .curator-roulette-stage :is(.curator-roulette-hud, .curator-roulette-controls, .curator-roulette-status) { transition: none; }
+  .curator-roulette-stage::before { animation: none !important; transition: none !important; }
+  .curator-roulette-aura, .curator-roulette-o-burst, .curator-roulette-hit::after { display: none; }
+  .curator-roulette-dialog :is(.curator-roulette-hud, .curator-roulette-controls) .btn { transition: none; animation: none !important; }
+  .curator-roulette-dialog :is(.curator-roulette-hud, .curator-roulette-controls) .btn:not(:disabled):not([aria-disabled=true]):is(:hover, :focus-visible, :active) { transform: none; }
+}
+@media (max-width: 760px) {
+  .curator-roulette-stage { --curator-roulette-thumbnail-size: min(240px, 68vw); }
+  .curator-roulette-hud { padding: .75rem; align-items: flex-start; gap: .75rem; }
+  .curator-roulette-hud > span { flex-basis: 100%; font-size: .65rem; }
+  .curator-roulette-hud > div { gap: .5rem; justify-content: flex-start; }
+  .curator-roulette-hud button { padding: .35rem; font-size: .75rem; }
+  .curator-roulette-hud .btn:not(.minimal) { min-height: 2.25rem; }
+  .curator-roulette-navigation button { min-width: 4rem; }
+  .curator-roulette-hud > .curator-roulette-controls { flex-basis: 100%; order: 1; justify-content: flex-start; }
+  .curator-roulette-actions { justify-content: flex-start; }
+  .curator-roulette-status { left: .75rem; right: .75rem; text-align: left; }
+}
+
+/* Phones: eight stop labels do not fit on one line above the large slider,
+   so each one is tilted 45 degrees and starts at its stop, the way plots fit
+   crowded tick labels; the right padding leaves room for the last label's
+   tail. The Tag sentiment page's slider takes its own full-width line in the
+   card instead of a fixed 10rem. */
+@media (max-width: 576px) {
+  .curator-sentiment-large.curator-sentiment-labelled { padding-right: 2.75rem; }
+  .curator-sentiment-large.curator-sentiment-labelled > .curator-sentiment-scale { height: 4.4rem; }
+  .curator-sentiment-large.curator-sentiment-labelled > .curator-sentiment-scale > span,
+  .curator-sentiment-large.curator-sentiment-labelled > .curator-sentiment-scale > span:not(:first-child):not(:last-child) {
+    bottom: 0.1rem;
+    max-width: none;
+    text-align: left;
+    transform: translateX(-0.2rem) rotate(-45deg);
+    transform-origin: left bottom;
+    white-space: nowrap;
+    width: auto;
+  }
+  .curator-sentiment-large.curator-sentiment-labelled > .curator-sentiment-scale > span:first-child { transform: translateX(0.35rem) rotate(-45deg); }
+  .curator-taste-item > .curator-sentiment-slider { flex: 1 1 100%; flex-wrap: nowrap; }
+  .curator-taste-item > .curator-sentiment-slider .curator-sentiment-range-wrap { flex: 1 1 auto; min-width: 0; }
+  .curator-taste-item > .curator-sentiment-slider .curator-sentiment-track { flex: 1 1 auto; width: auto; }
+}
+
+/* Why these?: one scene, its preview, and one-tap reason
+   chips. Chips wrap, stay thumb-sized on phones, and fill with the card's
+   tone (green for what works, orange for what puts you off) when picked. */
+.curator-reason-card { --tone: #2f9e44; }
+.curator-reason-scene { display: block; max-width: 560px; }
+.curator-reason-scene video { aspect-ratio: 16 / 9; border-radius: 6px; display: block; object-fit: cover; width: 100%; }
+.curator-reason-title { font-weight: 600; margin: 0.5rem 0 0.75rem; }
+.curator-reason-group { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.6rem; max-width: 560px; }
+.curator-reason-chip {
+  align-items: center;
+  background: transparent;
+  border: 1px solid var(--curator-border, #495057);
+  border-radius: 999px;
+  color: var(--curator-text, inherit);
+  display: inline-flex;
+  font-size: 0.85rem;
+  gap: 0.4rem;
+  min-height: 2.25rem;
+  padding: 0.25rem 0.85rem;
+}
+.curator-reason-chip img { border-radius: 50%; height: 1.75rem; margin-left: -0.6rem; object-fit: cover; width: 1.75rem; }
+.curator-reason-hit { --tone: #2f9e44; }
+.curator-reason-miss { --tone: #e8590c; }
+.curator-reason-chip[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--tone) 28%, transparent);
+  border-color: var(--tone);
+}
+.curator-reason-missing { margin-bottom: 0.75rem; max-width: 560px; position: relative; }
+.curator-reason-matches {
+  background: var(--curator-surface, #30404d);
+  border: 1px solid var(--curator-border, #495057);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  left: 0;
+  padding: 0.25rem 0;
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 5;
+}
+.curator-reason-matches .btn { text-align: left; }
+
+/* The thumb follow-up floats at the bottom of the viewport so it is seen
+   wherever the rated card was: a corner panel on desktop, a bottom sheet
+   above Stash's bottom navigation bar on phones. Only the latest shows. */
+.curator-reason-follow-up.curator-tag-follow-up {
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-border);
+  bottom: 1rem;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  margin: 0;
+  max-height: 70vh;
+  max-width: 460px;
+  overflow-y: auto;
+  position: fixed;
+  right: 1rem;
+  width: calc(100% - 2rem);
+  z-index: 1040;
+}
+@media (max-width: 576px) {
+  .curator-reason-follow-up.curator-tag-follow-up {
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 3.75rem);
+    left: 0.5rem;
+    max-width: none;
+    right: 0.5rem;
+    width: auto;
+  }
+}
+
+/* "+ N more" reveals the rest of a scene's ranked tags. */
+.curator-reason-chip.curator-reason-more { border-style: dashed; color: var(--curator-text-muted, inherit); }
+
+/* What your answers moved: the newest build's biggest moves, shown where the
+   answers were given. Green moved up, orange moved down. */
+.curator-what-moved { max-width: 560px; }
+.curator-moved-row { align-items: baseline; display: flex; gap: 0.5rem; margin-top: 0.4rem; }
+.curator-moved-label { flex: 0 0 5.5rem; font-size: 0.8rem; opacity: 0.8; }
+.curator-moved-items { display: flex; flex-wrap: wrap; gap: 0.35rem; }
+.curator-moved-chip { border: 1px solid var(--mc); border-radius: 999px; font-size: 0.8rem; padding: 0.1rem 0.6rem; }
+.curator-moved-up { --mc: #2f9e44; }
+.curator-moved-down { --mc: #e8590c; }
+.curator-moved-scene { border: 2px solid var(--mc); border-radius: 4px; display: inline-block; overflow: hidden; position: relative; width: 5.5rem; }
+.curator-moved-scene img,
+.curator-moved-scene img.card-section { aspect-ratio: 16 / 9; display: block; margin: 0; object-fit: cover; padding: 0; width: 100%; }
+.curator-moved-scene span { background: rgba(0, 0, 0, 0.7); bottom: 0; color: #fff; font-size: 0.7rem; padding: 0 0.3rem; position: absolute; right: 0; }
+.curator-moved-more { display: inline-block; font-size: 0.8rem; margin-top: 0.5rem; }
+@media (max-width: 576px) {
+  .curator-moved-row { flex-direction: column; gap: 0.2rem; }
+  .curator-moved-label { flex: none; }
+}
+
+/* Instant "Curator's view of X: before -> about after" under an answer. */
+.curator-answer-estimate { font-size: 0.85rem; margin: 0.25rem 0 0.5rem; max-width: 560px; opacity: 0.85; }
+
+/* The arrow on a picked chip: which way Curator's view of it will move. */
+.curator-reason-trend { font-weight: 700; margin-left: 0.1rem; }
+.curator-reason-trend-up { color: #51cf66; }
+.curator-reason-trend-down { color: #ff8a3d; }
+
+/* After a flip: how strongly Curator has it wrong. */
+.curator-reason-strength { margin-top: 0.5rem; }
+
+/* A StashDB scene hidden with Not interested / Not now: a quiet stub that
+   keeps its grid slot until the next fetch, with Undo outside card-section. */
+.curator-external-card.curator-external-dismissed {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 7rem;
+  padding: 0.75rem;
+  border-style: dashed;
+  color: var(--curator-text-muted);
+}
+
+.curator-external-dismissed .card-section-title {
+  font-size: 0.95rem;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.curator-external-dismissed-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Find's seen sweep: fixed to the bottom of the viewport (a sticky bar after
+   an endless list would only appear at its end), centred and only as wide
+   as its controls. */
+.curator-sweep-bar {
+  position: fixed;
+  left: 50%;
+  bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 1030;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: max-content;
+  max-width: calc(100vw - 2rem);
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--curator-border-strong);
+  border-radius: 999px;
+  background: var(--curator-surface-raised);
+  box-shadow: var(--curator-card-shadow-lg);
+  color: var(--curator-text);
+}
+
+.curator-sweep-bar small { color: var(--curator-text-muted); }
+
+/* Seen cards: dashed when the sweep would hide them, solid with the reason
+   when it keeps them. The outline sits inside the card so the grid does not
+   clip it. */
+.curator-external-card[data-curator-sweep] {
+  outline-offset: -2px;
+  outline-width: 2px;
+}
+
+.curator-external-card[data-curator-sweep="hide"] {
+  outline-style: dashed;
+  outline-color: var(--curator-insight-less);
+}
+
+.curator-external-card[data-curator-sweep="keep"] {
+  outline-style: solid;
+  outline-color: var(--curator-hue-stretch);
+}
+
+.curator-external-card[data-curator-sweep="keep"]::after {
+  content: attr(data-curator-sweep-reason);
+  position: absolute;
+  top: 0.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  padding: 0.15rem 0.4rem;
+  border-radius: var(--curator-radius-sm);
+  background: var(--curator-hue-stretch);
+  color: #0b1f17;
+  font-size: 0.7rem;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+/* A thumbnail hidden in this view keeps its slot, dimmed, until the next fetch. */
+.curator-find-thumbnail-hidden { opacity: 0.3; }
+
+.curator-external-dismissal-history {
+  margin-top: 1.5rem;
+}
+
+/* "What put you off?" after Not interested: a popover anchored under the
+   dismissed card, not Curate's viewport-fixed follow-up. */
+.popover.curator-dismiss-popover {
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-card-border-strong);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+  color: var(--curator-card-text);
+  max-width: min(28rem, calc(100vw - 1rem));
+  padding: 0.75rem;
+  z-index: 1070;
+}
+
+.curator-dismiss-popover .curator-tag-follow-up {
+  margin: 0;
+}
+
+/* A scene dismissed earlier, shown because Hide dismissed scenes is off. */
+.curator-hidden-badge {
+  background: #495057;
+  border-radius: var(--curator-radius-sm);
+  font-size: 0.75rem;
+  padding: 0.25rem 0.4rem;
+  position: absolute;
+  right: 0.5rem;
+  top: 0.5rem;
+  z-index: 3;
+}
+
+.curator-wildcard-badge ~ .curator-hidden-badge {
+  top: 2.25rem;
+}
+
+.curator-external-hidden .scene-card-image {
+  opacity: 0.55;
+}
+
+/* Stash front page: Curator lane rows among the native rows. The header
+   icon takes the lane hue so the rows read as Curator's. */
+.curator-home-row-title {
+  align-items: center;
+  display: inline-flex;
+  gap: 0.45rem;
+}
+.curator-home-row-icon {
+  color: var(--lane-color, var(--curator-accent));
+}
+.curator-home-row-links {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  justify-content: flex-end;
+}
+.curator-home-error {
+  padding: 15px 0;
+}
+/* Customize labels Curator's rows, whose headings Stash leaves empty. */
+.curator-home-editor {
+  display: contents;
+}
+.curator-home-editor h2[data-curator-label]:empty::before {
+  content: attr(data-curator-label);
+}
+
+/* Insights -> Your taste. Sections are cards in a responsive grid; the
+   diverging pair (more / less than your library) is validated for both
+   themes. */
+.curator-sfw-probe {
+  height: 1px;
+  left: -9999px;
+  pointer-events: none;
+  position: fixed;
+  top: 0;
+  width: 1px;
+}
+.curator-insights {
+  align-items: start;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  margin-top: 1rem;
+}
+.curator-insight-section {
+  background: var(--curator-surface);
+  border: 1px solid var(--curator-border);
+  border-radius: var(--curator-radius-lg);
+  box-shadow: var(--curator-shadow-sm);
+  color: var(--curator-text);
+  min-width: 0;
+  padding: 1rem 1.1rem;
+  transition: filter 0.25s ease;
+}
+.curator-insight-section h3 {
+  font-size: 1.05rem;
+  font-weight: 650;
+  margin: 0 0 0.25rem;
+}
+.curator-insight-hint,
+.curator-insight-caption {
+  color: var(--curator-text-muted);
+  font-size: 0.85rem;
+  margin: 0 0 0.75rem;
+}
+.curator-insight-caption {
+  margin: 0.5rem 0 0;
+}
+.curator-insight-hero,
+.curator-insight-likes,
+.curator-insight-again {
+  grid-column: 1 / -1;
+}
+.curator-insight-hero {
+  position: relative;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--curator-insight-more) 22%, var(--curator-surface)), var(--curator-surface) 70%);
+}
+.curator-insight-hero h2 {
+  font-family: var(--curator-font-display);
+  font-size: 1.9rem;
+  margin: 0 0 0.25rem;
+}
+.curator-insight-hero p {
+  color: var(--curator-text-muted);
+  margin: 0;
+}
+.curator-insight-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 2rem;
+  margin: 1rem 0 0;
+}
+.curator-insight-stats dt {
+  color: var(--curator-text-muted);
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.curator-insight-stats dd {
+  font-size: 1.6rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  margin: 0;
+}
+.curator-insight-list {
+  display: grid;
+  gap: 0.15rem 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+  list-style: none;
+  margin: 0 0 0.75rem;
+  padding: 0;
+}
+.curator-insight-list li {
+  align-items: center;
+  border-bottom: 1px solid var(--curator-border);
+  display: flex;
+  gap: 0.6rem;
+  min-height: 2.6rem;
+}
+.curator-insight-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.curator-insight-said {
+  color: var(--curator-insight-more);
+  font-size: 0.8em;
+  margin-left: 0.4rem;
+}
+.curator-insight-value {
+  color: var(--curator-text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.curator-insight-spark {
+  flex: none;
+  overflow: visible;
+}
+.curator-insight-spark polyline {
+  fill: none;
+  stroke: var(--curator-insight-more);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+.curator-insight-spark-area {
+  fill: var(--curator-insight-more);
+  fill-opacity: 0.16;
+  stroke: none;
+}
+.curator-insight-spark-base {
+  stroke: var(--curator-border);
+  stroke-width: 1;
+}
+.curator-insight-spark-dot,
+.curator-insight-spark-end {
+  fill: var(--curator-insight-more);
+}
+.curator-insight-spark-end {
+  stroke: var(--curator-surface);
+  stroke-width: 2;
+}
+.curator-insight-spark-hit {
+  fill: transparent;
+}
+.curator-insight-spark-hit:hover {
+  fill: var(--curator-wash-raised);
+}
+.curator-insight-apart-section h4 {
+  color: var(--curator-text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  margin: 0.75rem 0 0.35rem;
+  text-transform: uppercase;
+}
+.curator-insight-apart-key {
+  display: flex;
+  font-size: 0.75rem;
+  gap: 1rem;
+  margin: 0;
+}
+.curator-insight-apart-key span::before {
+  border-radius: 2px;
+  content: "";
+  display: inline-block;
+  height: 0.6rem;
+  margin-right: 0.35rem;
+  width: 0.9rem;
+}
+.curator-insight-apart-key-you::before {
+  background: var(--curator-insight-more);
+}
+.curator-insight-apart-key-library::before {
+  background: var(--curator-text-muted);
+  opacity: 0.5;
+}
+.curator-insight-apart {
+  display: grid;
+  gap: 0.35rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.curator-insight-apart li {
+  align-items: center;
+  display: grid;
+  font-size: 0.85rem;
+  gap: 0.15rem 0.6rem;
+  grid-template-areas: "name ratio" "bars shares";
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.curator-insight-apart-name {
+  grid-area: name;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.curator-insight-apart-ratio {
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+  grid-area: ratio;
+  text-align: right;
+}
+.curator-insight-more .curator-insight-apart-ratio {
+  color: var(--curator-insight-more);
+}
+.curator-insight-less .curator-insight-apart-ratio {
+  color: var(--curator-insight-less);
+}
+.curator-insight-apart-bars {
+  display: grid;
+  gap: 2px;
+  grid-area: bars;
+}
+.curator-insight-apart-bars span {
+  border-radius: 0 3px 3px 0;
+  display: block;
+  height: 5px;
+  min-width: 2px;
+}
+.curator-insight-apart-you {
+  background: var(--curator-insight-more);
+}
+.curator-insight-apart-library {
+  background: var(--curator-text-muted);
+  opacity: 0.5;
+}
+.curator-insight-apart-shares {
+  color: var(--curator-text-muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  grid-area: shares;
+  text-align: right;
+  white-space: nowrap;
+}
+.curator-insight-shift .curator-insight-list {
+  grid-template-columns: 1fr;
+}
+.curator-insight-shift-up svg {
+  color: var(--curator-insight-more);
+}
+.curator-insight-shift-down svg {
+  color: var(--curator-insight-less);
+}
+.curator-insight-chips {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.75rem;
+}
+.curator-insight-chips-label {
+  color: var(--curator-text-muted);
+  flex-basis: 100%;
+  font-size: 0.8rem;
+}
+.curator-insight-chip {
+  background: var(--curator-surface-raised);
+  border: 1px solid var(--curator-border);
+  border-left: 3px solid var(--curator-insight-more);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  padding: 0.15rem 0.6rem;
+  white-space: nowrap;
+}
+.curator-insight-chip-less {
+  border-left-color: var(--curator-insight-less);
+}
+.curator-insight-chip small {
+  color: var(--curator-text-muted);
+}
+.curator-insight-rediscovered .curator-insight-caption {
+  padding: 0 0.75rem 0.75rem;
+}
+.curator-insight-rediscovered {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr));
+}
+/* SFW Switch (or Stash's SFW content mode): blur every Insights card,
+   names and charts included; hovering one peeks, like Stash's own cards. */
+.curator-sfw .curator-insight-section,
+.sfw-content-mode .curator-insight-section {
+  filter: blur(12px);
+}
+.curator-sfw .curator-insight-section:hover,
+.sfw-content-mode .curator-insight-section:hover {
+  filter: blur(0);
+}
+@media (max-width: 576px) {
+  .curator-insight-hero h2 {
+    font-size: 1.5rem;
+  }
+  .curator-insight-spark {
+    width: 96px;
+  }
+}
+
+/* Find Deck: one Stash-box scene at a time. The card takes every touch
+   gesture (touch-action: none); the page still scrolls outside it. */
+.curator-deck {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.75rem auto 0;
+  max-width: 34rem;
+  width: 100%;
+}
+
+.curator-deck-status {
+  color: var(--curator-text-muted);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.curator-deck-status strong {
+  color: var(--curator-text);
+}
+
+.curator-deck-stage {
+  display: grid;
+  width: 100%;
+}
+
+.curator-deck-stage > * {
+  grid-area: 1 / 1;
+}
+
+.curator-deck-card {
+  background: var(--curator-card-surface);
+  border: 1px solid var(--curator-card-border);
+  border-radius: var(--curator-radius-lg);
+  box-shadow: var(--curator-card-shadow-lg);
+  color: var(--curator-card-text);
+  cursor: grab;
+  overflow: hidden;
+  position: relative;
+  touch-action: none;
+  transition: transform 0.18s ease-out, opacity 0.18s ease-out;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.curator-deck-card.curator-deck-dragging {
+  cursor: grabbing;
+}
+
+.curator-deck-card-back {
+  opacity: 0.6;
+  pointer-events: none;
+  transform: scale(0.96) translateY(0.5rem);
+}
+
+.curator-deck-leaving-left {
+  opacity: 0;
+  transform: translateX(-120%) rotate(-8deg) !important;
+}
+
+.curator-deck-leaving-right {
+  opacity: 0;
+  transform: translateX(120%) rotate(8deg) !important;
+}
+
+.curator-deck-leaving-up {
+  opacity: 0;
+  transform: translateY(-80%) !important;
+}
+
+.curator-deck-image {
+  aspect-ratio: 16 / 9;
+  background: var(--curator-wash-recessed);
+  position: relative;
+}
+
+.curator-deck-image .scene-card-image {
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+  width: 100%;
+}
+
+.curator-deck-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  left: 0.5rem;
+  position: absolute;
+  top: 0.5rem;
+}
+
+.curator-deck-badges > span {
+  position: static;
+}
+
+.curator-deck-badge {
+  background: var(--curator-accent);
+  border-radius: var(--curator-radius-sm);
+  font-size: 0.7rem;
+  padding: 0.2rem 0.35rem;
+}
+
+.curator-deck-card .card-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.65rem 0.8rem 0.8rem;
+}
+
+.curator-deck-card .card-section-title {
+  font-size: 1.05rem;
+  margin: 0;
+}
+
+.curator-deck-meta {
+  color: var(--curator-card-text-muted);
+  display: flex;
+  font-size: 0.85rem;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.curator-deck-score {
+  white-space: nowrap;
+}
+
+.curator-deck-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.curator-deck-people {
+  display: flex;
+  gap: 0.5rem;
+  overflow-x: auto;
+  padding: 0 0.8rem 0.7rem;
+  touch-action: pan-x;
+}
+
+.curator-deck-person {
+  display: flex;
+  flex: 0 0 4.5rem;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.curator-deck-person-photo {
+  aspect-ratio: 2 / 3;
+  background: var(--curator-wash-recessed);
+  border: 2px solid transparent;
+  border-radius: var(--curator-radius-sm);
+  display: block;
+  overflow: hidden;
+  width: 4.5rem;
+}
+
+.curator-deck-person-local .curator-deck-person-photo {
+  border-color: #2b8a3e;
+}
+
+.curator-deck-person-photo img {
+  display: block;
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.curator-deck-person-photo .curator-card-placeholder {
+  align-items: center;
+  display: flex;
+  font-size: 1.4rem;
+  height: 100%;
+  justify-content: center;
+}
+
+.curator-deck-person-name {
+  color: var(--curator-card-text);
+  font-size: 0.75rem;
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.curator-deck-person-local .curator-deck-person-name {
+  color: #8ce99a;
+}
+
+.curator-deck-people > .curator-deck-more {
+  align-self: center;
+  flex: 0 0 auto;
+}
+
+.curator-deck-more {
+  color: var(--curator-card-text-muted);
+  font-size: 0.8rem;
+}
+
+.curator-deck-reason {
+  color: var(--curator-card-text-muted);
+  display: -webkit-box;
+  font-size: 0.85rem;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.curator-deck-reason-full {
+  display: block;
+}
+
+.curator-deck-details {
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.curator-deck-title-link {
+  color: inherit;
+}
+
+.curator-deck-title-link:hover {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.curator-deck-link {
+  display: inline-block;
+  font-size: 0.85rem;
+  padding: 0 0.8rem 0.7rem;
+}
+
+/* The swipe hint over the cover: the light action, the hold bar, then the
+   strong action. The current step is lit; a passed step is struck out. */
+.curator-deck-hint {
+  background: var(--curator-overlay);
+  border: 1px solid var(--curator-border-strong);
+  border-radius: var(--curator-radius);
+  box-shadow: var(--curator-card-shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  left: 50%;
+  min-width: 12rem;
+  padding: 0.55rem 0.8rem;
+  position: absolute;
+  top: 1rem;
+  transform: translateX(-50%);
+  z-index: 4;
+}
+
+.curator-deck-hint-step {
+  color: var(--curator-text-muted);
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+  opacity: 0.7;
+}
+
+.curator-deck-hint-step small {
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.curator-deck-hint-step span {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.curator-deck-hint-step.curator-deck-hint-current {
+  color: var(--curator-deck-tone);
+  opacity: 1;
+}
+
+.curator-deck-hint-step.curator-deck-hint-current span {
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.curator-deck-hint-step.curator-deck-hint-passed {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.curator-deck-hint-not_now,
+.curator-deck-hint-skip { --curator-deck-tone: #e9ecef; }
+.curator-deck-hint-not_interested { --curator-deck-tone: #ff6b6b; }
+.curator-deck-hint-shortlist { --curator-deck-tone: #74c0fc; }
+.curator-deck-hint-whisparr { --curator-deck-tone: #ffd43b; }
+
+.curator-deck-hold {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+  height: 0.35rem;
+  overflow: hidden;
+}
+
+.curator-deck-hold > span {
+  background: var(--curator-deck-tone);
+  display: block;
+  height: 100%;
+}
+
+.curator-deck-follow-up,
+.curator-deck-empty {
+  align-items: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 14rem;
+  text-align: center;
+}
+
+.curator-deck-follow-up .curator-tag-follow-up {
+  position: static;
+  text-align: left;
+  width: 100%;
+}
+
+.curator-deck-actions {
+  background: var(--curator-bg);
+  bottom: 0;
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  padding: 0.4rem 0;
+  position: sticky;
+  width: 100%;
+  z-index: 5;
+}
+
+.curator-deck-action.btn {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  height: 2.75rem;
+  justify-content: center;
+  padding: 0;
+  width: 2.75rem;
+}
+
+.curator-deck-action-not_interested.btn:not(:disabled) { color: #ff6b6b; }
+.curator-deck-action-shortlist.btn:not(:disabled) { color: #74c0fc; }
+
+.curator-deck-notice {
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.curator-deck-shortcuts {
+  color: var(--curator-text-muted);
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .curator-deck-card {
+    transition: none;
+  }
+}
+
+/* Ranking plugins' slots (the stash-ranking events). Their modals are dark
+   whatever Stash's theme, so the panel carries its own colours. */
+.curator-ranking {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  color: #e9ecef;
+  margin: 0.5rem auto;
+  max-width: 56rem;
+  padding: 0.6rem 0.75rem;
+  position: relative;
+  text-align: left;
+}
+
+/* Hides the comments for the session; kept clear of the text. */
+.curator-ranking-dismiss {
+  background: none;
+  border: 0;
+  color: #adb5bd;
+  cursor: pointer;
+  font-size: 1.15rem;
+  line-height: 1;
+  padding: 0.25rem 0.4rem;
+  position: absolute;
+  right: 0.25rem;
+  top: 0.2rem;
+}
+
+.curator-ranking-dismiss:hover,
+.curator-ranking-dismiss:focus-visible {
+  color: #f1f3f5;
+}
+
+.curator-ranking-match,
+.curator-ranking-wrap {
+  padding-right: 2rem;
+}
+
+.curator-ranking-wrap {
+  align-items: flex-start;
+  display: flex;
+  gap: 0.25rem 0.6rem;
+  margin-bottom: 0.75rem;
+}
+
+/* A slot in a dialog footer (Cherry Pick) takes a row of its own above the
+   buttons; the footer is always in view, so nothing needs pinning. */
+.modal-footer > [data-ranking-slot]:not(:empty) {
+  flex: 0 0 100%;
+  margin: 0 0 0.5rem;
+  position: static;
+}
+
+.modal-footer > [data-ranking-slot] .curator-ranking-match {
+  border-left-width: 2px;
+  border-radius: 8px;
+  box-shadow: none;
+  flex-wrap: nowrap;
+  gap: 0.5rem;
+  margin: 0;
+  max-width: none;
+  padding: 0.2rem 2rem 0.2rem 0.5rem;
+}
+
+/* Every pixel of a footer comes out of the dialog's body, so there the strip
+   is compact: a small face, the sender's name as a chat app shows it, and
+   one short line per message. */
+.modal-footer > [data-ranking-slot] .curator-ranking-name {
+  font-size: 0.62rem;
+  line-height: 1;
+  padding-left: 0.5rem;
+}
+
+.modal-footer > [data-ranking-slot] .curator-ranking-mood {
+  font-size: 1.1rem;
+}
+
+.modal-footer > [data-ranking-slot] .curator-ranking-speech {
+  gap: 0.2rem;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.modal-footer > [data-ranking-slot] .curator-ranking-bubble {
+  font-size: 0.85rem;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0.15rem 0.65rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal-footer > [data-ranking-slot] .curator-ranking-typing {
+  padding: 0.4rem 0.65rem;
+}
+
+.modal-footer > [data-ranking-slot] .curator-ranking-dismiss {
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+@media (max-width: 576px) {
+  .modal-footer > [data-ranking-slot] .curator-ranking-tally {
+    display: none;
+  }
+}
+
+.curator-ranking-muted {
+  color: #adb5bd;
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.curator-ranking-head {
+  align-items: center;
+  display: flex;
+  font-size: 0.9rem;
+  font-weight: 600;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.curator-ranking-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.curator-ranking-picks {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+}
+
+.curator-ranking-pick.scene-card {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  overflow: hidden;
+  padding: 0;
+  text-align: left;
+  width: auto;
+}
+
+.curator-ranking-pick.scene-card:hover,
+.curator-ranking-pick.scene-card:focus-visible {
+  border-color: #5cc19c;
+}
+
+.curator-ranking-thumb.scene-card-image {
+  aspect-ratio: 16 / 9;
+  background: #111;
+  display: block;
+  overflow: hidden;
+  width: 100%;
+}
+
+.curator-ranking-thumb img {
+  height: 100%;
+  object-fit: cover;
+  width: 100%;
+}
+
+.curator-ranking-text.card-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.35rem 0.5rem 0.45rem;
+}
+
+.curator-ranking-pick-title.card-section-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.curator-ranking-reason {
+  color: #adb5bd;
+  display: -webkit-box;
+  font-size: 0.72rem;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.curator-ranking-result .curator-ranking-picks {
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+}
+
+/* A match area can be taller than the view (Ascension's is at least 600px in
+   a scrolling modal), so the match slot is pinned to the bottom as a strip. */
+[data-ranking-slot="match"]:not(:empty) {
+  bottom: 0;
+  position: sticky;
+  z-index: 5;
+}
+
+.curator-ranking-match {
+  align-items: center;
+  backdrop-filter: blur(6px);
+  background: rgba(22, 24, 28, 0.94);
+  border-left: 3px solid #adb5bd;
+  border-radius: 10px 10px 0 0;
+  box-shadow: 0 -0.4rem 1rem rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.6rem;
+  margin: 0.5rem auto 0;
+  padding: 0.5rem 0.75rem;
+}
+
+.curator-ranking-dependable,
+.curator-ranking-agree {
+  border-left-color: #5cc19c;
+}
+
+.curator-ranking-surprise,
+.curator-ranking-twist {
+  border-left-color: #f0b84a;
+}
+
+.curator-ranking-unknown {
+  border-left-color: #7aa7e0;
+}
+
+.curator-ranking-mood {
+  animation: curator-ranking-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1);
+  font-size: 1.6rem;
+  line-height: 1;
+}
+
+.curator-ranking-speech {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 12rem;
+}
+
+.curator-ranking-name {
+  color: #adb5bd;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding-left: 0.6rem;
+  text-transform: uppercase;
+}
+
+.curator-ranking-bubble {
+  align-self: flex-start;
+  animation: curator-ranking-in 0.25s ease-out;
+  background: #34373d;
+  border-radius: 1.1rem 1.1rem 1.1rem 0.3rem;
+  color: #f1f3f5;
+  font-size: 0.95rem;
+  line-height: 1.35;
+  max-width: 100%;
+  padding: 0.35rem 0.85rem 0.4rem;
+}
+
+/* Curator's comments beside the Recommendations heading. They float in the
+   empty space on the heading's line and never take layout room of their own. */
+.curator-page-chat-anchor {
+  display: contents;
+}
+
+.curator-page-chat-probe {
+  left: -9999px;
+  position: absolute;
+  top: 0;
+  visibility: hidden;
+  white-space: nowrap;
+}
+
+.curator-page-chat {
+  align-items: center;
+  display: flex;
+  gap: 0.35rem;
+  pointer-events: none;
+  position: absolute;
+  transform: translateY(-50%);
+  white-space: nowrap;
+  z-index: 5;
+}
+
+/* No room on the heading's line: the chat gets a line of its own under it,
+   in a slot held open for the visit so bubbles never push the page. */
+.curator-page-chat-slot {
+  display: block;
+  height: 3.4rem;
+  margin: 0.1rem 0 0.3rem;
+  position: relative;
+}
+
+.curator-page-chat.curator-page-chat-inline {
+  left: 0;
+  max-width: 100%;
+  top: 0.1rem;
+  transform: none;
+  white-space: normal;
+  width: fit-content;
+}
+
+.curator-page-chat-ask.curator-page-chat-ask-inline {
+  left: 0;
+  top: 100%;
+}
+
+/* Stash's scene and performer pages: the host takes no room unless the
+   chat holds a slot in it. */
+.curator-page-chat-host {
+  height: auto;
+  position: relative;
+}
+
+.curator-page-chat-host-scene .curator-page-chat-slot {
+  margin: 0.4rem 0 0;
+}
+
+/* The SFW Switch blurs what Curator says too; hover peeks. */
+.curator-sfw .curator-page-chat-bubble {
+  filter: blur(6px);
+}
+
+.curator-sfw .curator-page-chat:hover .curator-page-chat-bubble {
+  filter: none;
+}
+
+/* Names in a comment open their Stash page. */
+.curator-page-chat-bubble .curator-page-chat-link {
+  color: inherit;
+  pointer-events: auto;
+  text-decoration: underline;
+  text-decoration-color: rgba(255, 255, 255, 0.45);
+  text-underline-offset: 0.15em;
+}
+
+.curator-page-chat-bubble .curator-page-chat-link:hover,
+.curator-page-chat-bubble .curator-page-chat-link:focus-visible {
+  text-decoration-color: currentColor;
+}
+
+.curator-page-chat-mood {
+  animation: curator-ranking-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1);
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.curator-page-chat .curator-page-chat-bubble {
+  box-shadow: 0 0.25rem 0.8rem rgba(0, 0, 0, 0.3);
+  font-size: 0.9rem;
+  font-weight: 400;
+}
+
+.curator-page-chat-dismiss {
+  align-items: center;
+  background: #4a4e56;
+  border: 0;
+  border-radius: 50%;
+  color: #f1f3f5;
+  cursor: pointer;
+  display: flex;
+  font-size: 0.85rem;
+  height: 1.1rem;
+  justify-content: center;
+  line-height: 1;
+  opacity: 0.7;
+  padding: 0;
+  pointer-events: auto;
+  position: absolute;
+  right: -0.45rem;
+  top: -0.55rem;
+  transition: opacity 0.15s;
+  width: 1.1rem;
+}
+
+.curator-page-chat:hover .curator-page-chat-dismiss,
+.curator-page-chat-dismiss:focus-visible {
+  opacity: 1;
+}
+
+.curator-page-chat-welcome,
+.curator-page-chat-lane,
+.curator-page-chat-react {
+  pointer-events: auto;
+}
+
+.curator-page-chat-ask {
+  background: #2b2e33;
+  border: 1px solid #45494f;
+  border-radius: 0.5rem;
+  box-shadow: 0 0.5rem 1.4rem rgba(0, 0, 0, 0.45);
+  color: #f1f3f5;
+  display: flex;
+  flex-direction: column;
+  font-size: 0.85rem;
+  gap: 0.15rem;
+  padding: 0.6rem;
+  position: absolute;
+  width: 15rem;
+  z-index: 6;
+}
+
+.curator-page-chat-ask-text {
+  margin-bottom: 0.25rem;
+}
+
+.curator-page-chat-ask button {
+  background: none;
+  border: 0;
+  border-radius: 0.3rem;
+  color: inherit;
+  padding: 0.3rem 0.45rem;
+  text-align: left;
+}
+
+.curator-page-chat-ask button:hover,
+.curator-page-chat-ask button:focus-visible {
+  background: #3a3e45;
+}
+
+.curator-page-chat-ask .curator-page-chat-off {
+  color: #8bb8f0;
+}
+
+.curator-page-chat-ask small {
+  color: #adb5bd;
+  margin-top: 0.25rem;
+}
+
+/* The untyped rest of the line keeps its space so the bubble doesn't grow. */
+.curator-ranking-ghost {
+  visibility: hidden;
+}
+
+.curator-ranking-typing {
+  display: inline-flex;
+  gap: 0.25rem;
+  padding: 0.65rem 0.85rem;
+}
+
+.curator-ranking-typing i {
+  animation: curator-ranking-dot 1s infinite ease-in-out;
+  background: #adb5bd;
+  border-radius: 50%;
+  display: block;
+  height: 0.45rem;
+  width: 0.45rem;
+}
+
+.curator-ranking-typing i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.curator-ranking-typing i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+.curator-ranking-sr {
+  clip: rect(0 0 0 0);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
+.curator-ranking-kicker.curator-ranking-bubble {
+  background: #2f5f50;
+  color: #d8f5ea;
+}
+
+.curator-ranking-kicker-broken.curator-ranking-bubble,
+.curator-ranking-kicker-puzzled.curator-ranking-bubble,
+.curator-ranking-kicker-flip.curator-ranking-bubble {
+  background: #6a5222;
+  color: #fbe7bf;
+}
+
+.curator-ranking-kicker-milestone.curator-ranking-bubble,
+.curator-ranking-kicker-upset.curator-ranking-bubble,
+.curator-ranking-kicker-opener.curator-ranking-bubble,
+.curator-ranking-kicker-cheer.curator-ranking-bubble,
+.curator-ranking-kicker-reunion.curator-ranking-bubble,
+.curator-ranking-kicker-night.curator-ranking-bubble,
+.curator-ranking-kicker-morning.curator-ranking-bubble,
+.curator-ranking-kicker-rematch.curator-ranking-bubble {
+  background: #2f4b72;
+  color: #dbe8f8;
+}
+
+.curator-ranking-kicker-roll.curator-ranking-bubble,
+.curator-ranking-kicker-theme.curator-ranking-bubble {
+  background: #673a5a;
+  color: #f8dcef;
+}
+
+.curator-ranking-twist {
+  animation: curator-ranking-shake 0.4s ease-in-out;
+}
+
+.curator-ranking-meter {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  display: inline-block;
+  height: 0.35rem;
+  margin-right: 0.4rem;
+  overflow: hidden;
+  vertical-align: middle;
+  width: 3.5rem;
+}
+
+.curator-ranking-meter-fill {
+  background: linear-gradient(90deg, #f0b84a, #5cc19c);
+  display: block;
+  height: 100%;
+  transition: width 0.5s ease;
+}
+
+
+.curator-ranking-tally {
+  color: #adb5bd;
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.curator-ranking-result .curator-ranking-muted {
+  margin: 0;
+}
+
+@keyframes curator-ranking-dot {
+  0%, 60%, 100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-0.2rem);
+  }
+}
+
+@keyframes curator-ranking-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+}
+
+@keyframes curator-ranking-shake {
+  25% { transform: translateX(-4px); }
+  50% { transform: translateX(4px); }
+  75% { transform: translateX(-2px); }
+}
+
+@keyframes curator-ranking-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.3rem);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .curator-ranking-mood,
+  .curator-ranking-bubble,
+  .curator-ranking-typing i,
+  .curator-ranking-twist {
+    animation: none;
+  }
+}

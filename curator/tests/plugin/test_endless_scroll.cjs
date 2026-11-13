@@ -1,0 +1,243 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+const source = fs.readFileSync(path.join(__dirname, "../../plugin/stash-curator.js"), "utf8");
+const hooks = [];
+let cursor = 0;
+let effects = [];
+let dirty = false;
+let top = 0;
+let frame;
+let next;
+let restarts = 0;
+let calls = [];
+let queriedIDs = [];
+let metadataError = null;
+const listeners = new Map();
+const rootListeners = new Map();
+const observers = [];
+const warmedImages = [];
+const dom = { getBoundingClientRect: () => ({ top, width: 800 }), scrollIntoView: () => { top = 0; },
+  querySelectorAll: () => (hooks.find(Array.isArray) || []).map((entry, index) => ({ dataset: { endlessItem: String(entry.scene_id) }, getBoundingClientRect: () => ({ top: top + index * 100, bottom: top + (index + 1) * 100 }) })),
+  querySelector: () => dom.querySelectorAll()[0],
+  addEventListener: (name, fn) => rootListeners.set(name, fn), removeEventListener: name => rootListeners.delete(name),
+};
+const context = {
+  rotationLane: () => ({ seed: 1 }), cachedConfigUpdatedAtMs: 1,
+  sessionStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+  React: {
+    Fragment: "fragment",
+    useState(initial) {
+      const index = cursor++;
+      if (!(index in hooks)) hooks[index] = typeof initial === "function" ? initial() : initial;
+      return [hooks[index], (value) => { hooks[index] = typeof value === "function" ? value(hooks[index]) : value; dirty = true; }];
+    },
+    useRef(initial) {
+      const index = cursor++;
+      return hooks[index] ||= { current: initial };
+    },
+    useEffect(fn, deps) {
+      const index = cursor++;
+      const old = hooks[index];
+      if (!old || deps.some((value, i) => value !== old.deps[i])) {
+        effects.push(() => { old?.cleanup?.(); hooks[index] = { deps, cleanup: fn() }; });
+      }
+    },
+    createElement(type, props, ...children) {
+      if (props?.ref && typeof props.ref === "object") props.ref.current = dom;
+      return { type, props, children };
+    },
+  },
+  window: {
+    scrollBy: ({ top: distance }) => { top -= distance; },
+    innerHeight: 600, IntersectionObserver: true,
+    getComputedStyle: () => ({ gridTemplateColumns: "190px 190px 190px 190px", columnGap: "10px" }),
+    addEventListener: (name, fn) => listeners.set(name, fn),
+    removeEventListener: (name) => listeners.delete(name),
+  },
+  IntersectionObserver: class {
+    constructor(fn, options) { this.fn = fn; this.options = options; observers.push(this); }
+    observe(node) { this.node = node; }
+    disconnect() { this.disconnected = true; }
+  },
+  Image: class { set src(value) { warmedImages.push({ src: value, priority: this.fetchPriority }); } },
+  requestAnimationFrame: (fn) => { frame = fn; return 1; }, cancelAnimationFrame() {},
+  GQL: { useFindScenesQuery: ({ variables, skip }) => {
+    queriedIDs = skip ? [] : variables.scene_ids;
+    return { loading: false, error: metadataError, data: { findScenes: { scenes: queriedIDs.filter((id) => id !== 122).map((id) => ({ id: String(id), title: `Scene ${id}` })) } } };
+  } },
+  loadSlate: async (...args) => { calls.push(args); if (next instanceof Error) throw next; return next; },
+  Button: "button", ThumbnailTile: "thumbnail", PreviewTile: "preview", RecommendationCard: "card",
+};
+vm.createContext(context);
+vm.runInContext(source.slice(source.indexOf('  const ENDLESS_CACHE_KEY'), source.indexOf('  function EndlessFindResults(')), context);
+vm.runInContext(source.slice(source.indexOf("  function virtualWallRange("), source.indexOf("  function RecommendationCard(")), context);
+const range = context.virtualWallRange(10000, 4, 120, 6000, 600);
+assert.equal(range.first, 192);
+assert.equal(range.last, 228);
+assert.equal(range.height, 300000);
+assert.equal(range.offset, 5760);
+assert.equal(context.virtualWallRange(0, 4, 120, 0, 600).last, 0);
+assert.equal(context.virtualWallRange(3, 4, 120, 0, 600).last, 3);
+const items = Array.from({ length: 120 }, (_, index) => ({ scene_id: String(index + 1), impression_id: "first", position: index }));
+const slate = { items, page: 1, has_more: true, model_id: "model", config_updated_at_ms: 1, mood_id: "", lane: "for_you" };
+const props = { slate, visibleItems: items, scenes: new Map(items.map((item) => [item.scene_id, { id: item.scene_id }])), lane: "for_you", filters: { includeTags: [{ id: "tag", name: "Tag" }], excludeTags: [], performers: [], studios: [], gender: "FEMALE" }, thumbnails: true, onRestart: () => { restarts++; } };
+function render() {
+  let tree;
+  let runs = 0;
+  do {
+    dirty = false; cursor = 0; effects = [];
+    tree = context.EndlessRecommendations(props);
+    for (const effect of effects) effect();
+    assert.ok(++runs < 20, "render loop");
+  } while (dirty);
+  return tree;
+}
+const tiles = (tree) => tree.children[0].children[0].children[0];
+const load = (tree) => tree.children[1].children.at(-1).props.onClick();
+(async () => {
+  let tree = render();
+  assert.equal(observers.at(-1).options.rootMargin, "0px 0px 2400px 0px");
+  assert.ok(tiles(tree).length < 40); // DOM size depends on viewport, not loaded count.
+  assert.equal(queriedIDs.length, 0);
+  let failPrefetch;
+  next = new Promise((resolve, reject) => { failPrefetch = reject; });
+  const prefetch = observers.at(-1);
+  prefetch.fn([{ isIntersecting: true }]);
+  prefetch.fn([{ isIntersecting: true }]);
+  assert.equal(calls.length, 1); // Only one request may be in flight.
+  assert.equal(calls[0][2], true);
+  failPrefetch(new Error("Prefetch failed"));
+  await new Promise(setImmediate);
+  tree = render();
+  assert.equal(tree.children[1].children.at(-1).children[0], "Retry");
+  calls = [];
+  top = -2000; listeners.get("scroll")(); frame();
+  tree = render();
+  assert.notEqual(tiles(tree)[0].props.entry.scene_id, "1");
+  next = { ...slate, page: 2, items: [items[0], { scene_id: "121" }, { scene_id: "122" }], has_more: true };
+  await load(tree);
+  tree = render();
+  assert.deepEqual(calls[0].slice(0, 3), ["for_you", 2, false]);
+  assert.equal(calls[0][3], props.filters);
+  assert.equal(hooks.find(Array.isArray).length, 121); // Duplicate and deleted scenes are omitted.
+  assert.ok(warmedImages.some((image) => image.src === "/scene/121/screenshot" && image.priority === "low"));
+  assert.ok(warmedImages.every((image) => image.src.endsWith("/screenshot")));
+  assert.ok(!warmedImages.some((image) => image.src === "/scene/122/screenshot"));
+  assert.ok(queriedIDs.length <= 3); // Metadata fetches stay bounded to one page.
+  next = new Error("Offline");
+  await load(tree);
+  tree = render();
+  assert.equal(tree.children[1].children[0].children[0], "Offline");
+  assert.equal(tree.children[1].children.at(-1).children[0], "Retry");
+  next = { ...slate, page: 3, items: [{ scene_id: "123" }], has_more: false };
+  metadataError = { message: "Metadata failed" };
+  await load(tree);
+  tree = render();
+  assert.equal(hooks.find(value => value?.has_more !== undefined).page, 2); // Metadata failure must not advance the cursor.
+  metadataError = null;
+  await load(tree);
+  tree = render();
+  assert.equal(hooks.find(Array.isArray).length, 122);
+  assert.equal(tree.children[1].children.at(-1).children[0], "End of recommendations");
+  assert.equal(calls[3][1], 3); // Retry requests the same page.
+  hooks[hooks.findIndex(value => value?.has_more !== undefined)] = { ...next, has_more: true };
+  tree = render();
+  next = { ...slate, page: 4, model_id: "new-model" };
+  await load(tree);
+  assert.equal(restarts, 1); // Never mix model/config generations.
+  for (const hook of hooks) hook?.cleanup?.();
+  context.clearEndlessCache(); // The next render is a fresh list, not a return.
+  assert.equal(listeners.size, 0);
+  hooks.length = 0;
+  const recorded = [];
+  let timer;
+  context.setTimeout = (fn, delay) => { assert.equal(delay, 1000); timer = fn; return 1; };
+  context.clearTimeout = () => { timer = null; };
+  context.enqueue = (event) => recorded.push(event);
+  const seen = new Set();
+  const tileProps = { entry: { item: items[0], scene_id: "1", slate }, thumbnails: true, index: 0, seen };
+  function renderTile() {
+    cursor = 0; effects = [];
+    context.EndlessRecommendationTile(tileProps);
+    for (const effect of effects) effect();
+  }
+  renderTile();
+  const observer = observers.at(-1);
+  observer.fn([{ intersectionRatio: 0.5 }]);
+  assert.ok(timer);
+  observer.fn([{ intersectionRatio: 0 }]);
+  assert.equal(timer, null); // Passing through overscan must not count as viewed.
+  observer.fn([{ intersectionRatio: 0.5 }]);
+  timer();
+  assert.equal(recorded.length, 1);
+  for (const hook of hooks) hook?.cleanup?.();
+  context.clearEndlessCache();
+  hooks.length = 0;
+  renderTile();
+  assert.equal(recorded.length, 1); // Remounting must not record a second impression.
+  for (const hook of hooks) hook?.cleanup?.();
+  hooks.length = 0;
+  top = 0;
+  props.cards = true;
+  props.onRemove = () => {};
+  props.onReaction = () => {};
+  tree = render();
+  assert.equal(tree.children[0].type, "section");
+  assert.equal(tree.children[0].props.className, "curator-grid curator-endless-cards");
+  const firstCard = tree.children[0].children[0][0];
+  assert.equal(firstCard.props.onRemove, props.onRemove);
+  assert.equal(firstCard.props.onReaction, props.onReaction);
+  assert.equal(listeners.size, 2); // Cards track scroll and pagehide; they do not measure rows.
+  next = { ...slate, page: 2, items: [{ scene_id: "121", impression_id: "second" }], has_more: false };
+  await load(tree);
+  tree = render();
+  const cards = tree.children[0].children[0];
+  assert.equal(cards.length, 121);
+  assert.equal(cards[0].props.key, firstCard.props.key); // Appending preserves existing card state.
+  assert.equal(cards.at(-1).props.slate.page, 2);
+  assert.equal(cards.at(-1).props.item.impression_id, "second");
+  assert.equal(tree.children[1].children.at(-1).children[0], "End of recommendations");
+  for (const hook of hooks) hook?.cleanup?.();
+  // Restore a long card list around its visible scene without requesting earlier pages.
+  context.clearEndlessCache();
+  hooks.length = 0; calls = []; top = 0;
+  const cachedPages = Array.from({ length: 100 }, (_, index) => {
+    const item = { scene_id: String(index + 1), impression_id: "saved" };
+    const batch = { ...slate, page: index + 1, items: [item], has_more: true };
+    return { page: batch.page, slate: batch, items: [{ scene_id: item.scene_id, scene: { id: item.scene_id }, item, slate: batch }] };
+  });
+  const key = context.endlessBatchKey(slate, ["recommendations", "for_you", props.filters, { seed: 1 }, true, true]);
+  context.saveEndlessCache(key, cachedPages, { page: 90, item: "90", offset: -25 });
+  tree = render(); frame(); tree = render();
+  assert.equal(hooks.find(Array.isArray).length, 12);
+  assert.equal(top, -525);
+  assert.equal(calls.length, 0);
+  next = Error("Earlier failed");
+  await tree.children[2].children[0].props.onClick();
+  tree = render();
+  next = { ...slate, page: 84, items: [{ scene_id: "84" }], has_more: true };
+  await load(tree);
+  tree = render(); frame(); tree = render();
+  assert.equal(calls[0][1], 84);
+  assert.equal(calls[1][1], 84);
+  assert.equal(top, -625);
+  listeners.get("scroll")(); rootListeners.get("click")();
+  for (const hook of hooks) hook?.cleanup?.();
+  assert.equal(context.readEndlessCache(key).anchor.item, "90");
+  assert.equal(context.readEndlessRecommendationFilters().filters.gender, "FEMALE");
+  assert.equal(context.readEndlessRecommendationFilters().filters.includeTags[0].name, "Tag");
+  assert.equal(context.readEndlessRecommendationFilters().configUpdatedAtMs, 1);
+  // A lane switch renders once with the new lane but the previous lane's
+  // slate; unmounting then must not save those items as the new lane's list.
+  context.clearEndlessCache();
+  hooks.length = 0; top = 0;
+  render();
+  props.lane = "best_bets";
+  render();
+  for (const hook of hooks) hook?.cleanup?.();
+  const otherLane = context.endlessBatchKey(slate, ["recommendations", "best_bets", props.filters, { seed: 1 }, true, true]);
+  assert.equal(context.readEndlessCache(otherLane), null);
+  assert.ok(context.readEndlessCache(context.endlessBatchKey(slate, ["recommendations", "for_you", props.filters, { seed: 1 }, true, true])));
+})().catch((error) => { console.error(error); process.exitCode = 1; });

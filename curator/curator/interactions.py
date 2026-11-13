@@ -1,0 +1,793 @@
+"""Idempotent impressions, feedback, and direct player-session persistence."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from collections.abc import Iterable
+from dataclasses import asdict, replace
+from typing import Any
+
+from curator.events import (
+    IMPRESSION_ATTRIBUTION_WINDOW_MS,
+    OBSERVED_PLAYBACK_SQL,
+    DirectSessionInput,
+    PlayedRange,
+    SessionOrigin,
+    quick_replacement_outcome,
+    viewing_outcome,
+)
+from curator.features.tag_roles import effective_tag_role_config_version
+from curator.model import ModelUpdateCoordinator
+from curator.ranking import Slate
+from curator.storage import transaction
+
+FEEDBACK_TYPES = {
+    "thumb_up",
+    "thumb_down",
+    "not_now",
+    "never_show",
+    "prune",
+    "metadata_wrong",
+}
+TAG_SENTIMENT_VALUES = {-1.0, -0.75, -0.5, 0.0, 0.5, 0.75, 1.0}
+BLOCKED_TAG_VALUE = -1.0  # Stored value when blocked=1; the blocked flag drives exclusion.
+SCENE_REASON_SUBJECTS = {"performer", "tag", "studio", "missing_tag", "scene"}
+SCENE_REASON_LIMIT = 20
+EXTERNAL_SCENE_REASON_SUBJECTS = {"performer", "tag", "studio"}
+SCENE_REASON_FLIP_STRENGTHS = {"mild", "strong"}
+
+
+class InteractionStore:
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+
+    def record_impression(
+        self,
+        impression_id: str,
+        slate: Slate,
+        requested_at_ms: int,
+        context: dict[str, object] | None = None,
+    ) -> None:
+        self.record_ranked_impression(
+            impression_id,
+            slate.lane,
+            slate.model_id,
+            (
+                (item.scene_id, item.position, item.final_utility, item.reason_ids)
+                for item in slate.items
+            ),
+            requested_at_ms,
+            context,
+        )
+
+    def record_ranked_impression(
+        self,
+        impression_id: str,
+        lane: str,
+        model_id: str,
+        items: Iterable[tuple[str, int, float, tuple[str, ...]]],
+        requested_at_ms: int,
+        context: dict[str, object] | None = None,
+    ) -> None:
+        with transaction(self.connection):
+            cursor = self.connection.execute(
+                """
+                INSERT OR IGNORE INTO impression(
+                    impression_id, requested_at_ms, lane, model_id, config_version,
+                    request_context_json
+                ) VALUES (?, ?, ?, ?, 'builtin', ?)
+                """,
+                (
+                    impression_id,
+                    requested_at_ms,
+                    lane,
+                    model_id,
+                    json.dumps(context or {}, sort_keys=True, separators=(",", ":")),
+                ),
+            )
+            if not cursor.rowcount:
+                return
+            self.connection.executemany(
+                """
+                INSERT INTO impression_item(
+                    impression_id, scene_id, position, policy_score, reason_snapshot_json
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    (
+                        impression_id,
+                        scene_id,
+                        position,
+                        policy_score,
+                        json.dumps(reason_ids, separators=(",", ":")),
+                    )
+                    for scene_id, position, policy_score, reason_ids in items
+                ),
+            )
+
+    def qualify_impressions(self, entries: list[dict[str, Any]]) -> int:
+        normalized = [self._impression_entry(entry) for entry in entries]
+        inserted = 0
+        with transaction(self.connection):
+            for entry in normalized:
+                cursor = self.connection.execute(
+                    """
+                    UPDATE impression_item SET qualified_at_ms=?
+                    WHERE impression_id=? AND scene_id=? AND qualified_at_ms IS NULL
+                    """,
+                    (entry["occurred_at_ms"], entry["impression_id"], entry["scene_id"]),
+                )
+                if not cursor.rowcount:
+                    continue
+                impression = self.connection.execute(
+                    "SELECT lane FROM impression WHERE impression_id=?",
+                    (entry["impression_id"],),
+                ).fetchone()
+                assert impression is not None
+                self.connection.execute(
+                    """
+                    INSERT INTO recommendation_history(
+                        history_id, scene_id, impression_id, lane, shown_at_ms
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"{entry['impression_id']}:{entry['scene_id']}",
+                        entry["scene_id"],
+                        entry["impression_id"],
+                        impression["lane"],
+                        entry["occurred_at_ms"],
+                    ),
+                )
+                inserted += 1
+        return inserted
+
+    def submit_feedback(self, entries: list[dict[str, Any]]) -> int:
+        normalized = [self._feedback_entry(entry) for entry in entries]
+        inserted = 0
+        with transaction(self.connection):
+            for entry in normalized:
+                cursor = self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO feedback(
+                        feedback_id, scene_id, feedback_type, value, occurred_at_ms,
+                        impression_id, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry["feedback_id"],
+                        entry["scene_id"],
+                        entry["feedback_type"],
+                        entry["value"],
+                        entry["occurred_at_ms"],
+                        entry["impression_id"],
+                        json.dumps(entry["payload"], sort_keys=True, separators=(",", ":")),
+                    ),
+                )
+                if not cursor.rowcount:
+                    continue
+                inserted += 1
+                self._apply_feedback(entry)
+            if inserted:
+                ModelUpdateCoordinator(self.connection).request("direct_feedback")
+        return inserted
+
+    def correct_feedback(
+        self,
+        feedback_id: str,
+        correction_id: str,
+        feedback_type: str | None,
+        occurred_at_ms: int,
+    ) -> None:
+        if feedback_type is not None and feedback_type not in FEEDBACK_TYPES:
+            raise ValueError(f"unknown feedback type: {feedback_type}")
+        if not feedback_id or not correction_id or occurred_at_ms < 0:
+            raise ValueError("feedback_id, correction_id, and occurred_at_ms are required")
+        with transaction(self.connection):
+            original = self.connection.execute(
+                """
+                SELECT scene_id, feedback_type, occurred_at_ms, reversed_by_id
+                FROM feedback WHERE feedback_id=?
+                """,
+                (feedback_id,),
+            ).fetchone()
+            if original is None:
+                raise ValueError("unknown feedback")
+            if original["reversed_by_id"] is not None:
+                raise ValueError("feedback was already corrected")
+            if occurred_at_ms < int(original["occurred_at_ms"]):
+                raise ValueError("correction cannot predate feedback")
+            scene_id = str(original["scene_id"])
+            correction = {
+                "feedback_id": correction_id,
+                "scene_id": scene_id,
+                "feedback_type": feedback_type or "reversal",
+                "value": None,
+                "occurred_at_ms": occurred_at_ms,
+                "impression_id": None,
+                "payload": {"replaces_feedback_id": feedback_id},
+            }
+            self.connection.execute(
+                """
+                INSERT INTO feedback(
+                    feedback_id, scene_id, feedback_type, value, occurred_at_ms,
+                    impression_id, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    correction_id,
+                    scene_id,
+                    correction["feedback_type"],
+                    correction["value"],
+                    occurred_at_ms,
+                    correction["impression_id"],
+                    json.dumps(correction["payload"], separators=(",", ":")),
+                ),
+            )
+            self.connection.execute(
+                "UPDATE feedback SET reversed_by_id=? WHERE feedback_id=?",
+                (correction_id, feedback_id),
+            )
+            if feedback_type is not None:
+                self._apply_feedback(correction)
+            if not self.connection.execute(
+                """
+                SELECT 1 FROM feedback
+                WHERE scene_id=? AND feedback_type='never_show' AND reversed_by_id IS NULL
+                """,
+                (scene_id,),
+            ).fetchone():
+                self.connection.execute(
+                    """
+                    UPDATE exclusion SET reversed_at_ms=?
+                    WHERE entity_type='scene' AND entity_id=? AND exclusion_type='never_show'
+                    AND reversed_at_ms IS NULL
+                    """,
+                    (occurred_at_ms, scene_id),
+                )
+            if str(original["feedback_type"]) in {"thumb_down", "never_show", "prune"} and not (
+                self.connection.execute(
+                    """
+                    SELECT 1 FROM feedback
+                    WHERE scene_id=? AND feedback_type IN ('thumb_down', 'never_show', 'prune')
+                    AND reversed_by_id IS NULL
+                    """,
+                    (scene_id,),
+                ).fetchone()
+            ):
+                self.connection.execute(
+                    "DELETE FROM pruning_candidate WHERE scene_id=? AND state='review'",
+                    (scene_id,),
+                )
+            ModelUpdateCoordinator(self.connection).request("feedback_correction")
+
+    def submit_tag_preferences(self, entries: list[dict[str, Any]]) -> int:
+        """Store direct tag answers; a retried preference_id is ignored.
+
+        An answer for a tag that is gone or no longer has a tag role can never
+        be stored, so it is dropped rather than failing the batch; otherwise
+        the browser outbox would retry it, and every later answer, forever.
+        """
+        normalized = [
+            item
+            for item in (self._tag_preference_entry(entry) for entry in entries)
+            if item is not None
+        ]
+        inserted = 0
+        with transaction(self.connection):
+            for entry in normalized:
+                current = self.connection.execute(
+                    """
+                    SELECT preference_id, occurred_at_ms FROM direct_tag_preference
+                    WHERE tag_id=?
+                    """,
+                    (entry["tag_id"],),
+                ).fetchone()
+                cursor = self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO direct_tag_preference_history(
+                        preference_id, tag_id, value, blocked, occurred_at_ms
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry["preference_id"],
+                        entry["tag_id"],
+                        entry["value"],
+                        int(entry["blocked"]),
+                        entry["occurred_at_ms"],
+                    ),
+                )
+                if not cursor.rowcount:
+                    continue
+                inserted += 1
+                if current and (
+                    int(current["occurred_at_ms"]),
+                    str(current["preference_id"]),
+                ) >= (entry["occurred_at_ms"], entry["preference_id"]):
+                    self.connection.execute(
+                        """
+                        UPDATE direct_tag_preference_history SET replaced_by_id=?
+                        WHERE preference_id=?
+                        """,
+                        (current["preference_id"], entry["preference_id"]),
+                    )
+                    continue
+                if current:
+                    self.connection.execute(
+                        """
+                        UPDATE direct_tag_preference_history SET replaced_by_id=?
+                        WHERE preference_id=?
+                        """,
+                        (entry["preference_id"], current["preference_id"]),
+                    )
+                if entry["value"] is None:
+                    self.connection.execute(
+                        "DELETE FROM direct_tag_preference WHERE tag_id=?", (entry["tag_id"],)
+                    )
+                else:
+                    self.connection.execute(
+                        """
+                        INSERT INTO direct_tag_preference(
+                            tag_id, preference_id, value, blocked, occurred_at_ms
+                        ) VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(tag_id) DO UPDATE SET
+                            preference_id=excluded.preference_id,
+                            value=excluded.value,
+                            blocked=excluded.blocked,
+                            occurred_at_ms=excluded.occurred_at_ms
+                        """,
+                        (
+                            entry["tag_id"],
+                            entry["preference_id"],
+                            entry["value"],
+                            int(entry["blocked"]),
+                            entry["occurred_at_ms"],
+                        ),
+                    )
+            if inserted:
+                ModelUpdateCoordinator(self.connection).request("direct_tag_preference")
+        return inserted
+
+    def submit_scene_reasons(self, entries: list[dict[str, Any]]) -> int:
+        """Store Why these? answers; a retried answer_id is ignored.
+
+        Answers for a scene that is no longer in the library are dropped, like
+        tag answers for a removed tag.
+        """
+        normalized = [
+            item
+            for item in (self._scene_reason_entry(entry) for entry in entries)
+            if item is not None
+        ]
+        inserted = 0
+        with transaction(self.connection):
+            for entry in normalized:
+                cursor = self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO scene_reason_answer(
+                        answer_id, scene_id, polarity, flipped, flip_strength, occurred_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry["answer_id"],
+                        entry["scene_id"],
+                        entry["polarity"],
+                        int(entry["flipped"]),
+                        entry["flip_strength"],
+                        entry["occurred_at_ms"],
+                    ),
+                )
+                if not cursor.rowcount:
+                    continue
+                inserted += 1
+                self.connection.executemany(
+                    """
+                    INSERT OR IGNORE INTO scene_reason(answer_id, subject_type, subject_id)
+                    VALUES (?, ?, ?)
+                    """,
+                    [(entry["answer_id"], kind, subject) for kind, subject in entry["reasons"]],
+                )
+            if inserted:
+                ModelUpdateCoordinator(self.connection).request("scene_reason")
+        return inserted
+
+    def submit_external_scene_reasons(self, endpoint: str, entries: list[dict[str, Any]]) -> int:
+        """Store "What put you off?" answers for StashDB scenes; retries are ignored."""
+        normalized = [self._external_scene_reason_entry(entry) for entry in entries]
+        inserted = 0
+        with transaction(self.connection):
+            for entry in normalized:
+                cursor = self.connection.execute(
+                    """
+                    INSERT OR IGNORE INTO external_scene_reason_answer(
+                        answer_id, endpoint, external_id, polarity, occurred_at_ms
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        entry["answer_id"],
+                        endpoint.casefold(),
+                        entry["external_id"],
+                        entry["polarity"],
+                        entry["occurred_at_ms"],
+                    ),
+                )
+                if not cursor.rowcount:
+                    continue
+                inserted += 1
+                self.connection.executemany(
+                    """
+                    INSERT OR IGNORE INTO external_scene_reason(answer_id, subject_type, subject_id)
+                    VALUES (?, ?, ?)
+                    """,
+                    [(entry["answer_id"], kind, subject) for kind, subject in entry["reasons"]],
+                )
+            if inserted:
+                ModelUpdateCoordinator(self.connection).request("scene_reason")
+        return inserted
+
+    @staticmethod
+    def _external_scene_reason_entry(entry: dict[str, Any]) -> dict[str, Any]:
+        answer_id = str(entry.get("answer_id") or "")
+        external_id = str(entry.get("external_id") or "")
+        occurred_at_ms = int(entry.get("occurred_at_ms", -1))
+        if not answer_id or not external_id or occurred_at_ms < 0:
+            raise ValueError("answer_id, external_id, and occurred_at_ms are required")
+        polarity = entry.get("polarity")
+        if isinstance(polarity, bool) or not isinstance(polarity, int) or polarity not in (-1, 1):
+            raise ValueError("polarity must be 1 or -1")
+        reasons = entry.get("reasons")
+        if not isinstance(reasons, list) or not reasons or len(reasons) > SCENE_REASON_LIMIT:
+            raise ValueError("reasons must be a list of 1 to 20 items")
+        subjects: list[tuple[str, str]] = []
+        for reason in reasons:
+            if not isinstance(reason, dict):
+                raise ValueError("each reason must be an object")
+            kind = str(reason.get("subject_type") or "")
+            if kind not in EXTERNAL_SCENE_REASON_SUBJECTS:
+                raise ValueError(f"unsupported reason subject: {kind}")
+            subject = str(reason.get("subject_id") or "")
+            if not subject:
+                raise ValueError("reason subject_id is required")
+            subjects.append((kind, subject))
+        return {
+            "answer_id": answer_id,
+            "external_id": external_id,
+            "polarity": polarity,
+            "reasons": subjects,
+            "occurred_at_ms": occurred_at_ms,
+        }
+
+    def _scene_reason_entry(self, entry: dict[str, Any]) -> dict[str, Any] | None:
+        answer_id = str(entry.get("answer_id") or "")
+        scene_id = str(entry.get("scene_id") or "")
+        occurred_at_ms = int(entry.get("occurred_at_ms", -1))
+        if not answer_id or not scene_id or occurred_at_ms < 0:
+            raise ValueError("answer_id, scene_id, and occurred_at_ms are required")
+        polarity = entry.get("polarity")
+        if isinstance(polarity, bool) or not isinstance(polarity, int) or polarity not in (-1, 1):
+            raise ValueError("polarity must be 1 or -1")
+        reasons = entry.get("reasons")
+        if not isinstance(reasons, list) or len(reasons) > SCENE_REASON_LIMIT:
+            raise ValueError("reasons must be a list of at most 20 items")
+        subjects: list[tuple[str, str]] = []
+        for reason in reasons:
+            if not isinstance(reason, dict):
+                raise ValueError("each reason must be an object")
+            kind = str(reason.get("subject_type") or "")
+            if kind not in SCENE_REASON_SUBJECTS:
+                raise ValueError(f"unsupported reason subject: {kind}")
+            subject = "" if kind == "scene" else str(reason.get("subject_id") or "")
+            if kind != "scene" and not subject:
+                raise ValueError("reason subject_id is required")
+            subjects.append((kind, subject))
+        flipped = bool(entry.get("flipped", False))
+        flip_strength = str(entry.get("flip_strength") or "mild")
+        if flip_strength not in SCENE_REASON_FLIP_STRENGTHS:
+            raise ValueError("flip_strength must be mild or strong")
+        if not subjects and not flipped:
+            raise ValueError("an answer needs a reason or a flip")
+        if (
+            self.connection.execute(
+                "SELECT 1 FROM source_scene WHERE scene_id=?", (scene_id,)
+            ).fetchone()
+            is None
+        ):
+            return None
+        return {
+            "answer_id": answer_id,
+            "scene_id": scene_id,
+            "polarity": polarity,
+            "flipped": flipped,
+            "flip_strength": flip_strength,
+            "reasons": subjects,
+            "occurred_at_ms": occurred_at_ms,
+        }
+
+    def submit_sessions(self, entries: list[dict[str, Any]]) -> int:
+        sessions = [self._session(entry) for entry in entries]
+        inserted = 0
+        signaled = False
+        with transaction(self.connection):
+            for session in sessions:
+                if session.impression_id is None:
+                    session = self._attribute_impression(session)
+                try:
+                    cursor = self.connection.execute(
+                        """
+                        INSERT OR IGNORE INTO play_session(
+                            session_id, scene_id, started_at_ms, ended_at_ms, active_seconds,
+                            provenance, confidence, impression_id, summary_json
+                        ) VALUES (?, ?, ?, ?, ?, 'direct_player', 1, ?, ?)
+                        """,
+                        (
+                            session.session_id,
+                            session.scene_id,
+                            session.started_at_ms,
+                            session.ended_at_ms,
+                            session.active_seconds,
+                            session.impression_id,
+                            json.dumps(asdict(session), sort_keys=True, separators=(",", ":")),
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    # The live tracker reports whatever scene Stash is playing, which can name
+                    # a scene added after Curator's last sync. OR IGNORE does not cover foreign
+                    # key violations, so this scene_id would otherwise abort the whole batch;
+                    # drop just this session and keep going, since a later sync plus a later
+                    # watch will record it normally.
+                    continue
+                if not cursor.rowcount:
+                    continue
+                inserted += 1
+                # Without observed playback there is no viewing evidence to grade; reading the
+                # empty session as a short exit would penalize a scene the user may have watched.
+                if session.observed_playback:
+                    outcome = viewing_outcome(session.active_seconds, session.ended_at_ms)
+                    if outcome is not None:
+                        signaled |= self._insert_signal(
+                            f"{session.session_id}:view",
+                            session.scene_id,
+                            session.session_id,
+                            outcome,
+                        )
+                signaled |= self._insert_replacement(session)
+            # A session that merely opened a scene without any observed playback or
+            # replacement evidence carries no preference signal; requesting a model update
+            # for it would repeatedly wake "Apply recent Curator feedback" on plain browsing.
+            if signaled:
+                ModelUpdateCoordinator(self.connection).request("session_outcome")
+        return inserted
+
+    def _attribute_impression(self, session: DirectSessionInput) -> DirectSessionInput:
+        """Attribute a play that arrived without a direct impression_id to the
+        most recent impression of the same scene shown within the attribution
+        window, marking the link inferred rather than observed."""
+        row = self.connection.execute(
+            """
+            SELECT i.impression_id
+            FROM impression_item ii
+            JOIN impression i ON i.impression_id = ii.impression_id
+            WHERE ii.scene_id=? AND i.requested_at_ms<=? AND i.requested_at_ms>=?
+            ORDER BY i.requested_at_ms DESC, i.impression_id DESC
+            LIMIT 1
+            """,
+            (
+                session.scene_id,
+                session.started_at_ms,
+                session.started_at_ms - IMPRESSION_ATTRIBUTION_WINDOW_MS,
+            ),
+        ).fetchone()
+        if row is None:
+            return session
+        return replace(session, impression_id=str(row[0]), impression_provenance="inferred")
+
+    def _apply_feedback(self, entry: dict[str, Any]) -> None:
+        feedback_type = entry["feedback_type"]
+        if feedback_type == "never_show":
+            self.connection.execute(
+                """
+                INSERT INTO exclusion(
+                    exclusion_id, entity_type, entity_id, exclusion_type, created_at_ms
+                ) VALUES (?, 'scene', ?, 'never_show', ?)
+                ON CONFLICT(entity_type, entity_id, exclusion_type) DO UPDATE SET
+                    created_at_ms=excluded.created_at_ms, reversed_at_ms=NULL, expires_at_ms=NULL
+                """,
+                (f"exclusion:{entry['scene_id']}", entry["scene_id"], entry["occurred_at_ms"]),
+            )
+            self._reopen_pruning(entry, "Never show")
+        elif feedback_type == "thumb_down":
+            self._reopen_pruning(entry, "Thumbs down")
+        elif feedback_type == "prune":
+            self.connection.execute(
+                """
+                INSERT INTO pruning_candidate(
+                    scene_id, state, created_at_ms, updated_at_ms, reason
+                ) VALUES (?, 'review', ?, ?, ?)
+                ON CONFLICT(scene_id) DO UPDATE SET state='review',
+                    updated_at_ms=excluded.updated_at_ms, reason=excluded.reason
+                """,
+                (
+                    entry["scene_id"],
+                    entry["occurred_at_ms"],
+                    entry["occurred_at_ms"],
+                    entry["value"],
+                ),
+            )
+
+    def _reopen_pruning(self, entry: dict[str, Any], reason: str) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO pruning_candidate(scene_id, state, created_at_ms, updated_at_ms, reason)
+            VALUES (?, 'review', ?, ?, ?)
+            ON CONFLICT(scene_id) DO UPDATE SET state='review',
+                updated_at_ms=excluded.updated_at_ms, reason=excluded.reason
+            """,
+            (entry["scene_id"], entry["occurred_at_ms"], entry["occurred_at_ms"], reason),
+        )
+
+    def _insert_replacement(self, replacement: DirectSessionInput) -> bool:
+        # Only a session whose playback was observed can be judged as abandoned early.
+        row = self.connection.execute(
+            f"""
+            SELECT summary_json FROM play_session
+            WHERE provenance='direct_player' AND session_id<>? AND ended_at_ms<=?
+            AND {OBSERVED_PLAYBACK_SQL}
+            ORDER BY ended_at_ms DESC LIMIT 1
+            """,
+            (replacement.session_id, replacement.started_at_ms),
+        ).fetchone()
+        if row is None:
+            return False
+        original = self._session(json.loads(row[0]))
+        positive = bool(
+            self.connection.execute(
+                """
+                SELECT 1 FROM feedback WHERE scene_id=? AND feedback_type='thumb_up'
+                AND reversed_by_id IS NULL AND occurred_at_ms BETWEEN ? AND ? LIMIT 1
+                """,
+                (original.scene_id, original.ended_at_ms, replacement.started_at_ms),
+            ).fetchone()
+        )
+        signal = quick_replacement_outcome(
+            original, replacement, intervening_positive_feedback=positive
+        )
+        if signal is None:
+            return False
+        return self._insert_signal(
+            f"{replacement.session_id}:replacement",
+            original.scene_id,
+            original.session_id,
+            signal,
+        )
+
+    def _insert_signal(
+        self, event_id: str, scene_id: str, session_id: str | None, signal: Any
+    ) -> bool:
+        cursor = self.connection.execute(
+            """
+            INSERT OR IGNORE INTO behavior_event(
+                event_id, event_type, scene_id, occurred_at_ms, outcome, confidence,
+                provenance, session_id, payload_json
+            ) VALUES (?, 'occasion_outcome', ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                scene_id,
+                signal.observed_at_ms,
+                signal.value,
+                signal.confidence,
+                signal.provenance,
+                session_id,
+                json.dumps({"primary_signal": signal.signal_type}, separators=(",", ":")),
+            ),
+        )
+        return bool(cursor.rowcount)
+
+    @staticmethod
+    def _impression_entry(entry: dict[str, Any]) -> dict[str, Any]:
+        impression_id = str(entry.get("impression_id") or "")
+        scene_id = str(entry.get("scene_id") or "")
+        occurred_at_ms = int(entry.get("occurred_at_ms", -1))
+        if not impression_id or not scene_id or occurred_at_ms < 0:
+            raise ValueError("impression_id, scene_id, and occurred_at_ms are required")
+        return {
+            "impression_id": impression_id,
+            "scene_id": scene_id,
+            "occurred_at_ms": occurred_at_ms,
+        }
+
+    @staticmethod
+    def _feedback_entry(entry: dict[str, Any]) -> dict[str, Any]:
+        feedback_type = str(entry.get("feedback_type") or "")
+        if feedback_type not in FEEDBACK_TYPES:
+            raise ValueError(f"unknown feedback type: {feedback_type}")
+        feedback_id = str(entry.get("feedback_id") or "")
+        scene_id = str(entry.get("scene_id") or "")
+        occurred_at_ms = int(entry.get("occurred_at_ms", -1))
+        if not feedback_id or not scene_id or occurred_at_ms < 0:
+            raise ValueError("feedback_id, scene_id, and occurred_at_ms are required")
+        return {
+            "feedback_id": feedback_id,
+            "scene_id": scene_id,
+            "feedback_type": feedback_type,
+            "value": str(entry["value"]) if entry.get("value") is not None else None,
+            "occurred_at_ms": occurred_at_ms,
+            "impression_id": (str(entry["impression_id"]) if entry.get("impression_id") else None),
+            "payload": entry.get("payload") if isinstance(entry.get("payload"), dict) else {},
+        }
+
+    def _tag_preference_entry(self, entry: dict[str, Any]) -> dict[str, Any] | None:
+        preference_id = str(entry.get("preference_id") or "")
+        tag_id = str(entry.get("tag_id") or "")
+        occurred_at_ms = int(entry.get("occurred_at_ms", -1))
+        value = entry.get("value")
+        blocked = bool(entry.get("blocked", False))
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError("tag sentiment must be numeric or null")
+            value = float(value)
+            if value not in TAG_SENTIMENT_VALUES:
+                raise ValueError("tag sentiment must use the fixed seven-point scale")
+        if blocked:
+            value = BLOCKED_TAG_VALUE
+        if not preference_id or not tag_id or occurred_at_ms < 0:
+            raise ValueError("preference_id, tag_id, and occurred_at_ms are required")
+        config_version = effective_tag_role_config_version(self.connection)
+        if (
+            self.connection.execute(
+                """
+            SELECT 1 FROM tag_role
+            WHERE config_version=? AND tag_id=?
+            """,
+                (config_version, tag_id),
+            ).fetchone()
+            is None
+        ):
+            return None
+        return {
+            "preference_id": preference_id,
+            "tag_id": tag_id,
+            "value": value,
+            "blocked": blocked,
+            "occurred_at_ms": occurred_at_ms,
+        }
+
+    @staticmethod
+    def _session(entry: dict[str, Any]) -> DirectSessionInput:
+        ranges = tuple(
+            PlayedRange(float(item["start_seconds"]), float(item["end_seconds"]))
+            for item in entry.get("played_ranges", [])
+        )
+        impression_id = str(entry["impression_id"]) if entry.get("impression_id") else None
+        impression_provenance = (
+            str(entry["impression_provenance"]) if entry.get("impression_provenance") else None
+        )
+        if impression_provenance is None and impression_id is not None:
+            impression_provenance = "observed"
+        return DirectSessionInput(
+            session_id=str(entry.get("session_id") or ""),
+            scene_id=str(entry.get("scene_id") or ""),
+            started_at_ms=int(entry.get("started_at_ms", -1)),
+            ended_at_ms=int(entry.get("ended_at_ms", -1)),
+            active_seconds=float(entry.get("active_seconds", 0)),
+            origin=SessionOrigin(str(entry.get("origin") or "stash")),
+            source_route=str(entry.get("source_route") or ""),
+            start_position_seconds=float(entry.get("start_position_seconds", 0)),
+            maximum_position_seconds=float(entry.get("maximum_position_seconds", 0)),
+            final_position_seconds=float(entry.get("final_position_seconds", 0)),
+            played_ranges=ranges,
+            seek_destinations_seconds=tuple(
+                float(value) for value in entry.get("seek_destinations_seconds", [])
+            ),
+            nearby_marker_ids=tuple(str(value) for value in entry.get("nearby_marker_ids", [])),
+            natural_completion=bool(entry.get("natural_completion", False)),
+            impression_id=impression_id,
+            impression_provenance=impression_provenance,
+            lane=str(entry["lane"]) if entry.get("lane") else None,
+            impression_position=(
+                int(entry["impression_position"])
+                if entry.get("impression_position") is not None
+                else None
+            ),
+            model_id=str(entry["model_id"]) if entry.get("model_id") else None,
+        )

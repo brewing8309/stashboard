@@ -1,0 +1,1241 @@
+// Model build back half — the scoring loop, kernel invocation, publication,
+// and the coordinator drain, continuing core/modelbuild.go's labels/
+// affinities port. The published model artifact tables are the oracle.
+package main
+
+import (
+	"database/sql"
+	"fmt"
+	"math"
+	"sort"
+	"strings"
+	"time"
+)
+
+// buildModelScore mirrors _Score.
+type buildModelScore struct {
+	sceneID            string
+	generalAppeal      float64
+	directAppeal       float64
+	directConfidence   float64
+	appeal             float64
+	currentFit         float64
+	confidence         float64
+	metadataConfidence float64
+	recovery           float64
+	componentsJSON     string
+	classificationJSON string
+	neighbors          []jVal
+	eligibility        jVal
+}
+
+// featureArtifactPath mirrors _feature_artifact_path.
+func featureArtifactPath(db dbx, featureVersion string) (string, error) {
+	var basename sql.NullString
+	err := db.QueryRow(`
+SELECT artifact_basename FROM feature_build
+WHERE feature_version=? AND validation_status='valid'`, featureVersion).Scan(&basename)
+	if err != nil || !basename.Valid || basename.String == "" {
+		return "", fmt.Errorf("feature artifact missing for %s", featureVersion)
+	}
+	core, err := coreDatabasePath(db)
+	if err != nil {
+		return "", err
+	}
+	return artifactPath(core, basename.String)
+}
+
+// directConfidenceOf mirrors curves.direct_confidence.
+func directConfidenceOf(effectiveEvidence float64) float64 {
+	if effectiveEvidence < 0 || math.IsInf(effectiveEvidence, 0) || math.IsNaN(effectiveEvidence) {
+		return 0
+	}
+	return 1 - math.Exp(-effectiveEvidence/0.8)
+}
+
+// blendAppealOf mirrors curves.blend_appeal.
+func blendAppealOf(general, direct, confidence float64) float64 {
+	return clampValue((1-confidence)*general+confidence*direct, -1, 1)
+}
+
+// contentNeighbors invokes the content-neighbors kernel and derives the
+// per-scene evidence (mirroring _content_neighbors).
+func contentNeighbors(db dbx, featureVersion string, affinities map[string]modelAffinity,
+	labels map[string]sceneLabel, labelMean float64, progressTotal int,
+	report func(fraction float64)) (map[string]neighborEvidence, error) {
+	artifactPath, err := featureArtifactPath(db, featureVersion)
+	if err != nil {
+		return nil, err
+	}
+	affinityPayload := jvObj()
+	for _, featureID := range sortedStringKeys(affinities) {
+		affinity := affinities[featureID]
+		entry := jvObj(
+			jvKey("affinity", jvFloat(affinity.affinity)),
+			jvKey("confidence", jvFloat(affinity.confidence)),
+		)
+		for _, key := range []string{"learned_affinity", "learned_confidence"} {
+			if v := affinity.contexts.get(key); v.kind != jNull {
+				entry.set(key, jvFloat(numberValue(v)))
+			}
+		}
+		affinityPayload.set(featureID, entry)
+	}
+	labelsPayload := jvObj()
+	for _, sceneID := range sortedStringKeys(labels) {
+		label := labels[sceneID]
+		labelsPayload.set(sceneID, jvArr(jvFloat(label.outcome), jvFloat(label.confidence)))
+	}
+	payload := jvObj(
+		jvKey("db", jvStr(artifactPath)),
+		jvKey("feature_version", jvStr(featureVersion)),
+		jvKey("labels", labelsPayload),
+		jvKey("label_mean", jvFloat(labelMean)),
+		jvKey("affinities", affinityPayload),
+		jvKey("config", jvObj(
+			jvKey("min_similarity", jvFloat(0.05)),
+			jvKey("neighbor_count", jvInt(12)),
+			jvKey("confidence_scale", jvFloat(0.35)),
+			jvKey("generic_weight", jvFloat(0.0)),
+		)),
+		jvKey("progress_total", jvInt(int64(progressTotal))),
+	)
+	if currentTrace() != nil {
+		payload.set("profile", jvBool(true))
+	}
+	response, err := runCoreKernel("content-neighbors", payload)
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]neighborEvidence{}
+	for _, pair := range response.obj {
+		neighbors := pair.val.get("neighbors")
+		var selected []neighborTuple
+		for _, raw := range neighbors.arr {
+			if len(raw.arr) < 4 {
+				continue
+			}
+			selected = append(selected, neighborTuple{
+				sceneID:    raw.arr[0].asString(),
+				similarity: numberValue(raw.arr[1]),
+				weight:     numberValue(raw.arr[2]),
+				outcome:    numberValue(raw.arr[3]),
+			})
+		}
+		if len(selected) == 0 {
+			result[pair.key] = neighborEvidence{}
+			continue
+		}
+		result[pair.key] = deriveNeighborEvidence(selected, labelMean, 0.35)
+	}
+	return result, nil
+}
+
+// performerSimilarityScores invokes the performer-similarity kernel
+// (mirroring _performer_similarity_scores).
+func modelPerformerSimilarityScores(db dbx, featureVersion string,
+	sceneFeatures map[string][]storedFeature, affinities map[string]modelAffinity) (jVal, error) {
+	artifactPath, err := featureArtifactPath(db, featureVersion)
+	if err != nil {
+		return jvNull(), err
+	}
+	identityAffinity := map[string][2]float64{}
+	for _, features := range sceneFeatures {
+		for _, feature := range features {
+			if feature.family != "performer_identity" {
+				continue
+			}
+			if affinity, ok := affinities[feature.featureID]; ok {
+				identityAffinity[strings.TrimPrefix(feature.name, "performer:")] = [2]float64{
+					affinity.affinity * affinity.confidence, affinity.confidence,
+				}
+			}
+		}
+	}
+	identityPayload := jvObj()
+	priors, err := performerPriors(db)
+	if err != nil {
+		return jvNull(), err
+	}
+	for performerID, prior := range priors {
+		values := identityAffinity[performerID]
+		identityAffinity[performerID] = [2]float64{values[0] + prior.value, math.Max(values[1], prior.confidence)}
+	}
+	for _, performerID := range sortedStringKeys(identityAffinity) {
+		values := identityAffinity[performerID]
+		identityPayload.set(performerID, jvArr(jvFloat(values[0]), jvFloat(values[1])))
+	}
+	blockWeights := jvObj()
+	for _, item := range performerBlockWeights {
+		blockWeights.set(item.block, jvFloat(item.weight))
+	}
+	numericScalesObj := jvObj()
+	for key, value := range numericScales {
+		numericScalesObj.set(key, jvFloat(value))
+	}
+	numericBlocks := jvArr()
+	for _, block := range []string{"age", "height", "measurements"} {
+		numericBlocks.arr = append(numericBlocks.arr, jvStr(block))
+	}
+	payload := jvObj(
+		jvKey("db", jvStr(artifactPath)),
+		jvKey("feature_version", jvStr(featureVersion)),
+		jvKey("identity_affinity", identityPayload),
+		jvKey("block_weights", blockWeights),
+		jvKey("cutoff", jvFloat(performerSimilarityAffinityCutoff)),
+		jvKey("numeric_blocks", numericBlocks),
+		jvKey("numeric_scales", numericScalesObj),
+	)
+	if currentTrace() != nil {
+		payload.set("profile", jvBool(true))
+	}
+	return runCoreKernel("performer-similarity", payload)
+}
+
+// performerProfileIDs reads the performer ids present in the feature artifact
+// (FeatureStore.performer_profiles membership for metadata_confidence).
+func performerProfileIDs(db dbx, featureVersion string) (map[string]bool, error) {
+	rows, err := db.Query(`
+SELECT DISTINCT entity_id FROM entity_feature
+WHERE feature_version=? AND entity_type='performer'`, featureVersion)
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]bool{}
+	for rows.Next() {
+		var entityID string
+		if err := rows.Scan(&entityID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		result[entityID] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// modelPrior mirrors _Prior.
+type modelPrior struct {
+	value      float64
+	confidence float64
+}
+
+// performerPriors mirrors _performer_priors.
+func performerPriors(db dbx) (map[string]modelPrior, error) {
+	rows, err := db.Query(`SELECT performer_id, favorite, rating100 FROM source_performer`)
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]modelPrior{}
+	for rows.Next() {
+		var performerID string
+		var favorite int64
+		var rating100 sql.NullInt64
+		if err := rows.Scan(&performerID, &favorite, &rating100); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		result[performerID] = performerPrior(favorite != 0, float64(rating100.Int64), rating100.Valid)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func performerPrior(favorite bool, rating float64, hasRating bool) modelPrior {
+	prior := modelPrior{}
+	if hasRating {
+		prior.value = clamp((rating-50)/50) * 0.10
+		prior.confidence = 0.75
+	}
+	if favorite {
+		prior.value += 0.18
+		prior.confidence = 0.90
+	}
+	return prior
+}
+
+// studioPriors mirrors _studio_priors.
+func studioPriors(db dbx) (map[string]modelPrior, error) {
+	rows, err := db.Query(`SELECT studio_id FROM source_studio WHERE favorite=1`)
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]modelPrior{}
+	for rows.Next() {
+		var studioID string
+		if err := rows.Scan(&studioID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		result[studioID] = modelPrior{0.04, 0.70}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// studioNames mirrors the studio_names map builder.py builds inline in
+// build_scores: studio_id -> display name, used to name Stretch's studio
+// candidates.
+func studioNames(db dbx) (map[string]string, error) {
+	rows, err := db.Query(`SELECT studio_id, name FROM source_studio`)
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]string{}
+	for rows.Next() {
+		var studioID string
+		var name sql.NullString
+		if err := rows.Scan(&studioID, &name); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		result[studioID] = name.String
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+// asymmetric mirrors _asymmetric.
+func asymmetric(values []float64) float64 {
+	var positives []float64
+	var negatives []float64
+	for _, value := range values {
+		if value > 0 {
+			positives = append(positives, value)
+		} else if value < 0 {
+			negatives = append(negatives, value)
+		}
+	}
+	sort.Sort(sort.Reverse(sort.Float64Slice(positives)))
+	positive := 0.0
+	if len(positives) > 0 {
+		positive = positives[0]
+		positive += 0.25 * sumFloats(positives[1:])
+	}
+	friction := 0.0
+	if len(negatives) > 0 {
+		friction = 0.25 * sumFloats(negatives) / float64(len(negatives))
+	}
+	return positive + friction
+}
+
+// recentContext mirrors _recent_context.
+type recentContext struct {
+	reference       int64
+	performers      map[string]int64
+	studios         map[string]int64
+	scenePerformers map[string][]string
+	sceneStudios    map[string]string
+	notNow          map[string]int64
+	recentByName    map[string][]struct {
+		index int
+		value float64
+	}
+	recentSceneIDs []string
+	recentPlayed   []int64
+	sceneVectors   map[string]map[string]float64
+}
+
+func buildRecentContext(db dbx, referenceAtMs int64, vectors map[string]map[string]float64) (*recentContext, error) {
+	context := &recentContext{
+		reference:       referenceAtMs,
+		performers:      map[string]int64{},
+		studios:         map[string]int64{},
+		scenePerformers: map[string][]string{},
+		sceneStudios:    map[string]string{},
+		notNow:          map[string]int64{},
+		recentByName: map[string][]struct {
+			index int
+			value float64
+		}{},
+		sceneVectors: vectors,
+	}
+	rows, err := db.Query(`SELECT scene_id, performer_id FROM scene_performer ORDER BY scene_id, performer_id`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var sceneID, performerID string
+		if err := rows.Scan(&sceneID, &performerID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		context.scenePerformers[sceneID] = append(context.scenePerformers[sceneID], performerID)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows, err = db.Query(`SELECT scene_id, studio_id FROM source_scene WHERE studio_id IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var sceneID, studioID string
+		if err := rows.Scan(&sceneID, &studioID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		context.sceneStudios[sceneID] = studioID
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows, err = db.Query(`
+SELECT scene_id, max(occurred_at_ms) AS occurred_at_ms FROM feedback
+WHERE feedback_type='not_now' AND reversed_by_id IS NULL GROUP BY scene_id`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var sceneID string
+		var occurredAtMs int64
+		if err := rows.Scan(&sceneID, &occurredAtMs); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		context.notNow[sceneID] = occurredAtMs
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	cutoff := referenceAtMs - 30*86_400_000
+	rows, err = db.Query(`
+SELECT p.scene_id, max(p.played_at_ms) AS played_at, s.studio_id
+FROM source_play p JOIN source_scene s ON s.scene_id=p.scene_id
+WHERE p.played_at_ms >= ? GROUP BY p.scene_id ORDER BY played_at DESC LIMIT 200`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	type playRow struct {
+		sceneID  string
+		playedAt int64
+		studioID string
+	}
+	var playRows []playRow
+	for rows.Next() {
+		var sceneID string
+		var playedAt int64
+		var studioID sql.NullString
+		if err := rows.Scan(&sceneID, &playedAt, &studioID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		playRows = append(playRows, playRow{sceneID, playedAt, studioID.String})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, row := range playRows {
+		if row.studioID != "" {
+			if current, ok := context.studios[row.studioID]; !ok || row.playedAt > current {
+				context.studios[row.studioID] = row.playedAt
+			}
+		}
+		for _, performerID := range context.scenePerformers[row.sceneID] {
+			if current, ok := context.performers[performerID]; !ok || row.playedAt > current {
+				context.performers[performerID] = row.playedAt
+			}
+		}
+		if vector, ok := vectors[row.sceneID]; ok {
+			index := len(context.recentSceneIDs)
+			context.recentSceneIDs = append(context.recentSceneIDs, row.sceneID)
+			context.recentPlayed = append(context.recentPlayed, row.playedAt)
+			for name, value := range vector {
+				context.recentByName[name] = append(context.recentByName[name], struct {
+					index int
+					value float64
+				}{index, value})
+			}
+		}
+	}
+	return context, nil
+}
+
+// satiation mirrors _satiation.
+func satiation(sceneID string, appeal float64, context *recentContext) float64 {
+	if appeal <= 0 {
+		return 0.0
+	}
+	reference := context.reference
+	var performerPenalty float64
+	for _, performerID := range context.scenePerformers[sceneID] {
+		if timestamp, ok := context.performers[performerID]; ok {
+			days := math.Max(0, float64(reference-timestamp)/86_400_000)
+			if penalty := 0.06 * math.Exp(-days/7); penalty > performerPenalty {
+				performerPenalty = penalty
+			}
+		}
+	}
+	var studioPenalty float64
+	if studioID := context.sceneStudios[sceneID]; studioID != "" {
+		if timestamp, ok := context.studios[studioID]; ok {
+			days := math.Max(0, float64(reference-timestamp)/86_400_000)
+			studioPenalty = 0.03 * math.Exp(-days/7)
+		}
+	}
+	var contentPenalty float64
+	candidate := context.sceneVectors[sceneID]
+	if len(candidate) > 0 {
+		dots := map[int]float64{}
+		for name, value := range candidate {
+			for _, entry := range context.recentByName[name] {
+				dots[entry.index] += value * entry.value
+			}
+		}
+		for index, cosine := range dots {
+			if context.recentSceneIDs[index] == sceneID {
+				continue
+			}
+			days := math.Max(0, float64(reference-context.recentPlayed[index])/86_400_000)
+			if penalty := 0.04 * cosine * math.Exp(-days/7); penalty > contentPenalty {
+				contentPenalty = penalty
+			}
+		}
+	}
+	return math.Min(0.12, appeal*(performerPenalty+studioPenalty+contentPenalty))
+}
+
+// notNowPenalty mirrors _not_now_penalty.
+func notNowPenalty(sceneID string, referenceAtMs int64, context *recentContext) float64 {
+	occurredAtMs, ok := context.notNow[sceneID]
+	if !ok {
+		return 0.0
+	}
+	ageDays := math.Max(0, float64(referenceAtMs-occurredAtMs)/86_400_000)
+	if ageDays >= notNowDays {
+		return 0.0
+	}
+	return 0.50 * (1 - ageDays/notNowDays)
+}
+
+// sceneEligibilityBuild mirrors scene_eligibility with include_temporary=False
+// (the build never treats not_now as an exclusion).
+func sceneEligibilityBuild(db dbx, referenceAtMs int64) (map[string]jVal, error) {
+	allScenes := map[string]bool{}
+	rows, err := db.Query(`SELECT scene_id FROM source_scene`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var sceneID string
+		if err := rows.Scan(&sceneID); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		allScenes[sceneID] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	result, err := sceneEligibility(db, referenceAtMs, allScenes)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]jVal{}
+	for sceneID, entry := range result {
+		reasons := jvArr()
+		for _, reason := range entry.reasons {
+			if reason == "not_now" {
+				continue
+			}
+			reasons.arr = append(reasons.arr, jvStr(reason))
+		}
+		out[sceneID] = jvObj(
+			jvKey("eligible", jvBool(len(reasons.arr) == 0)),
+			jvKey("reasons", reasons),
+		)
+	}
+	return out, nil
+}
+
+// confirmedTagCandidates mirrors _confirmed_tag_candidates: content-family
+// contributions restricted to StashDB-confirmed tags. Description terms and
+// unconfirmed tags cannot be named as a Stretch taste dimension — see
+// docs/workpackage-lane-redesign.md ("Facets, not tags").
+func confirmedTagCandidates(contributions jVal) jVal {
+	candidates := jvArr()
+	for _, item := range contributions.arr {
+		metadata := item.get("metadata")
+		if metadata.kind != jObj || !metadata.has("tag_id") {
+			continue
+		}
+		if !strings.HasPrefix(metadata.get("role_reason").asString(), "stashdb_") {
+			continue
+		}
+		name := metadata.get("tag_name").asString()
+		if name == "" {
+			name = item.get("name").asString()
+		}
+		candidates.arr = append(candidates.arr, jvObj(
+			jvKey("feature_id", item.get("feature_id")),
+			jvKey("name", jvStr(name)),
+			jvKey("facet_type", jvStr("tag")),
+			jvKey("value", item.get("value")),
+			jvKey("affinity", item.get("affinity")),
+			jvKey("confidence", item.get("confidence")),
+			jvKey("effective_support", item.get("effective_support")),
+		))
+	}
+	return candidates
+}
+
+var stretchContributorFields = []string{
+	"feature_id", "name", "facet_type", "value", "affinity", "confidence", "effective_support",
+}
+
+// stretchContributorPayload mirrors _stretch_contributor_payload: the bounded
+// positive/negative contributor list for the Stretch lane, combining the
+// confirmed-tag and studio candidates computed alongside the content/studio
+// components.
+func stretchContributorPayload(components jVal, count int) jVal {
+	var pool []jVal
+	for _, family := range []string{"content", "studio"} {
+		component := components.get(family)
+		if component.kind == jObj {
+			pool = append(pool, component.get("stretch_candidates").arr...)
+		}
+	}
+	var positive, negative []jVal
+	for _, item := range pool {
+		if numberValue(item.get("value")) > 0 {
+			positive = append(positive, item)
+		} else if numberValue(item.get("value")) < 0 {
+			negative = append(negative, item)
+		}
+	}
+	sort.SliceStable(positive, func(i, j int) bool {
+		vi, vj := numberValue(positive[i].get("value")), numberValue(positive[j].get("value"))
+		if vi != vj {
+			return vi > vj
+		}
+		return positive[i].get("name").asString() < positive[j].get("name").asString()
+	})
+	sort.SliceStable(negative, func(i, j int) bool {
+		vi, vj := numberValue(negative[i].get("value")), numberValue(negative[j].get("value"))
+		if vi != vj {
+			return vi < vj
+		}
+		return negative[i].get("name").asString() < negative[j].get("name").asString()
+	})
+	if len(positive) > count {
+		positive = positive[:count]
+	}
+	if len(negative) > count {
+		negative = negative[:count]
+	}
+	project := func(items []jVal) jVal {
+		out := jvArr()
+		for _, item := range items {
+			pairs := make([]jPair, 0, len(stretchContributorFields))
+			for _, key := range stretchContributorFields {
+				pairs = append(pairs, jvKey(key, item.get(key)))
+			}
+			out.arr = append(out.arr, jvObj(pairs...))
+		}
+		return out
+	}
+	return jvObj(
+		jvKey("positive", project(positive)),
+		jvKey("negative", project(negative)),
+	)
+}
+
+// classificationPayload mirrors _classification_payload.
+func classificationPayload(components jVal) jVal {
+	payload := jvObj()
+	for _, family := range []string{
+		"content", "content_neighbor", "performer_identity",
+		"performer_similarity", "studio", "structure",
+	} {
+		component := components.get(family)
+		value := 0.0
+		if component.kind == jObj {
+			value = numberValue(component.get("value"))
+		}
+		payload.set(family, jvObj(jvKey("value", jvFloat(value))))
+	}
+	direct := components.get("direct")
+	signals := jvArr()
+	if direct.kind == jObj {
+		for _, item := range direct.get("signals").arr {
+			signals.arr = append(signals.arr, jvStr(item.asString()))
+		}
+	}
+	payload.set("direct", jvObj(jvKey("signals", signals)))
+	// stretch_contributor_count default (RankingConfig); the Go port hardcodes
+	// config defaults rather than threading a runtime config object, matching
+	// every other ranking constant in this file.
+	payload.set("stretch_contributors", stretchContributorPayload(components, 3))
+	return payload
+}
+
+// storedComponents mirrors _stored_components: components_json without the
+// build-only stretch_candidates lists, which classificationPayload has already
+// condensed into stretch_contributors. They were over half of every stored
+// row and every slate item.
+func storedComponents(components jVal) jVal {
+	stored := jVal{kind: jObj, obj: make([]jPair, 0, len(components.obj))}
+	for _, pair := range components.obj {
+		if pair.val.kind == jObj && pair.val.has("stretch_candidates") {
+			family := jVal{kind: jObj, obj: make([]jPair, 0, len(pair.val.obj)-1)}
+			for _, field := range pair.val.obj {
+				if field.key != "stretch_candidates" {
+					family.obj = append(family.obj, field)
+				}
+			}
+			pair.val = family
+		}
+		stored.obj = append(stored.obj, pair)
+	}
+	return stored
+}
+
+// edgeMatches mirrors _edge_matches.
+func edgeMatches(entry jVal) ([]jVal, error) {
+	matches := entry.get("matches")
+	if matches.kind != jArr {
+		return nil, fmt.Errorf("performer similarity result is missing matches")
+	}
+	return matches.arr, nil
+}
+
+// scoringContext carries the row-independent precomputed inputs for the
+// per-scene scoring loop (affinities, kernels' outputs, priors, recency).
+type scoringContext struct {
+	sceneFeatures       map[string][]storedFeature
+	affinities          map[string]modelAffinity
+	performerPriors     map[string]modelPrior
+	studioPriors        map[string]modelPrior
+	studioNames         map[string]string
+	performerSimilarity jVal
+	neighbors           map[string]neighborEvidence
+	labels              map[string]sceneLabel
+	lastPlayed          map[string]int64
+	recentContext       *recentContext
+	eligibility         map[string]jVal
+	profiles            map[string]bool
+	vectors             map[string]map[string]float64
+	baseline            float64
+	labelMean           float64
+	baselineSupport     float64
+	discriminative      int
+	referenceAtMs       int64
+}
+
+type activeEvidence struct {
+	value      float64
+	confidence float64
+}
+
+// scoreScene computes the components, appeal, fit, and confidence for one
+// scene (the _scores per-scene body). Every input is a precomputed read-only
+// map, so the loop is row-independent: fixed-chunk parallel processing
+// yields identical scores.
+func (c *scoringContext) scoreScene(sceneID string) buildModelScore {
+	features := c.sceneFeatures[sceneID]
+	components := jvObj(jvKey("baseline", jvObj(
+		jvKey("raw", jvFloat(c.baseline)),
+		jvKey("value", jvFloat(c.baseline)),
+		jvKey("training_outcome_mean", jvFloat(c.labelMean)),
+		jvKey("effective_support", jvFloat(c.baselineSupport)),
+	)))
+	familyConfidences := map[string]float64{}
+	for _, family := range []struct {
+		name  string
+		bound float64
+	}{{"content", 0.35}, {"structure", 0.05}} {
+		var contributions jVal = jvArr()
+		for _, feature := range features {
+			if feature.family != family.name {
+				continue
+			}
+			affinity, ok := c.affinities[feature.featureID]
+			if !ok {
+				continue
+			}
+			value := feature.value * affinity.affinity * affinity.confidence
+			contributions.arr = append(contributions.arr, jvObj(
+				jvKey("feature_id", jvStr(feature.featureID)),
+				jvKey("name", jvStr(feature.name)),
+				jvKey("value", jvFloat(value)),
+				jvKey("affinity", jvFloat(affinity.affinity)),
+				jvKey("confidence", jvFloat(affinity.confidence)),
+				jvKey("effective_support", jvFloat(affinity.support)),
+				jvKey("metadata", feature.metadata),
+				jvKey("affinity_metadata", affinity.contexts),
+			))
+		}
+		contributionValues := make([]float64, 0, len(contributions.arr))
+		absValues := make([]float64, 0, len(contributions.arr))
+		for _, item := range contributions.arr {
+			value := numberValue(item.get("value"))
+			contributionValues = append(contributionValues, value)
+			absValues = append(absValues, math.Abs(value))
+		}
+		raw := sumFloats(contributionValues)
+		contributionMass := sumFloats(absValues)
+		var evidenceConfidence float64
+		if contributionMass != 0 {
+			weightedValues := make([]float64, 0, len(contributions.arr))
+			for _, item := range contributions.arr {
+				value := numberValue(item.get("value"))
+				weightedValues = append(weightedValues, math.Abs(value)*numberValue(item.get("confidence")))
+			}
+			evidenceConfidence = sumFloats(weightedValues) / contributionMass
+		}
+		familyConfidences[family.name] = evidenceConfidence
+		sorted := append([]jVal(nil), contributions.arr...)
+		sort.SliceStable(sorted, func(i, j int) bool {
+			a, b := sorted[i], sorted[j]
+			absA, absB := math.Abs(numberValue(a.get("value"))), math.Abs(numberValue(b.get("value")))
+			if absA != absB {
+				return absA > absB
+			}
+			return a.get("name").asString() < b.get("name").asString()
+		})
+		if len(sorted) > 5 {
+			sorted = sorted[:5]
+		}
+		top := jvArr(sorted...)
+		pairs := []jPair{jvKey("raw", jvInt(0)), jvKey("value", jvInt(0))}
+		if len(contributionValues) != 0 {
+			pairs = []jPair{
+				jvKey("raw", jvFloat(raw)),
+				jvKey("value", jvFloat(softBound(raw, family.bound))),
+			}
+		}
+		pairs = append(pairs,
+			jvKey("evidence_confidence", jvFloat(evidenceConfidence)),
+			jvKey("top", top),
+		)
+		if family.name == "content" {
+			pairs = append(pairs, jvKey("stretch_candidates", confirmedTagCandidates(contributions)))
+		}
+		components.set(family.name, jvObj(pairs...))
+	}
+	var performerItems []storedFeature
+	for _, feature := range features {
+		if feature.family == "performer_identity" {
+			performerItems = append(performerItems, feature)
+		}
+	}
+	identityValues := jvArr()
+	similarityValues := jvArr()
+	var identityRaw, similarityRaw, identityConfidence, similarityConfidence float64
+	var identityValueList, similarityValueList []float64
+	for _, feature := range performerItems {
+		performerID := strings.TrimPrefix(feature.name, "performer:")
+		affinity, hasAffinity := c.affinities[feature.featureID]
+		learned := 0.0
+		affinityConfidence := 0.0
+		if hasAffinity {
+			learned = affinity.affinity * affinity.confidence
+			affinityConfidence = affinity.confidence
+		}
+		prior := c.performerPriors[performerID]
+		identityValues.arr = append(identityValues.arr, jvObj(
+			jvKey("performer_id", jvStr(performerID)),
+			jvKey("value", jvFloat(learned+prior.value)),
+			jvKey("learned", jvFloat(learned)),
+			jvKey("prior", jvFloat(prior.value)),
+			jvKey("confidence", jvFloat(math.Max(affinityConfidence, prior.confidence))),
+		))
+		identityConfidence = math.Max(identityConfidence, math.Max(affinityConfidence, prior.confidence))
+		identityValueList = append(identityValueList, learned+prior.value)
+		similarity := c.performerSimilarity.get(performerID)
+		var simValue, simConfidence float64
+		if similarity.kind == jObj {
+			simValue = numberValue(similarity.get("value"))
+			simConfidence = numberValue(similarity.get("confidence"))
+		}
+		noveltyWeight := math.Max(0.05, 1-math.Max(affinityConfidence, prior.confidence))
+		similarityItem := jvObj()
+		for _, pair := range similarity.obj {
+			similarityItem.set(pair.key, pair.val)
+		}
+		similarityItem.set("performer_id", jvStr(performerID))
+		similarityItem.set("raw_value", jvFloat(simValue))
+		similarityItem.set("value", jvFloat(simValue*simConfidence*noveltyWeight))
+		similarityItem.set("confidence", jvFloat(simConfidence*noveltyWeight))
+		similarityItem.set("identity_confidence", jvFloat(math.Max(affinityConfidence, prior.confidence)))
+		similarityItem.set("novelty_weight", jvFloat(noveltyWeight))
+		similarityValues.arr = append(similarityValues.arr, similarityItem)
+		similarityValueList = append(similarityValueList, simValue*simConfidence*noveltyWeight)
+		similarityConfidence = math.Max(similarityConfidence, simConfidence*noveltyWeight)
+	}
+	identityRaw = asymmetric(identityValueList)
+	similarityRaw = asymmetric(similarityValueList)
+	familyConfidences["performer_identity"] = identityConfidence
+	familyConfidences["performer_similarity"] = similarityConfidence
+	components.set("performer_identity", jvObj(
+		jvKey("raw", jvFloat(identityRaw)),
+		jvKey("value", jvFloat(softBound(identityRaw, 0.30))),
+		jvKey("performers", identityValues),
+		jvKey("evidence_confidence", jvFloat(identityConfidence)),
+	))
+	components.set("performer_similarity", jvObj(
+		jvKey("raw", jvFloat(similarityRaw)),
+		jvKey("value", jvFloat(softBound(similarityRaw, 0.16))),
+		jvKey("performers", similarityValues),
+		jvKey("evidence_confidence", jvFloat(similarityConfidence)),
+	))
+	var studioItems jVal = jvArr()
+	var studioConfidence float64
+	stretchStudioCandidates := jvArr()
+	for _, feature := range features {
+		if feature.family != "studio" {
+			continue
+		}
+		studioID := strings.TrimPrefix(feature.name, "studio:")
+		affinity, hasAffinity := c.affinities[feature.featureID]
+		learned := 0.0
+		affinityConfidence := 0.0
+		if hasAffinity {
+			learned = affinity.affinity * affinity.confidence
+			affinityConfidence = affinity.confidence
+		}
+		prior := c.studioPriors[studioID]
+		value := learned + prior.value
+		confidence := math.Max(affinityConfidence, prior.confidence)
+		studioItems.arr = append(studioItems.arr, jvObj(
+			jvKey("studio_id", jvStr(studioID)),
+			jvKey("value", jvFloat(value)),
+			jvKey("learned", jvFloat(learned)),
+			jvKey("prior", jvFloat(prior.value)),
+			jvKey("confidence", jvFloat(confidence)),
+		))
+		studioConfidence = math.Max(studioConfidence, confidence)
+		// A studio only qualifies as a Stretch dimension when the model has an
+		// actual feature_affinity row for it — mirrors builder.py's
+		// stretch_studio_candidates gate. See docs/workpackage-lane-redesign.md
+		// defect 8.
+		if hasAffinity {
+			name := c.studioNames[studioID]
+			if name == "" {
+				name = feature.name
+			}
+			stretchStudioCandidates.arr = append(stretchStudioCandidates.arr, jvObj(
+				jvKey("feature_id", jvStr(feature.featureID)),
+				jvKey("name", jvStr(name)),
+				jvKey("facet_type", jvStr("studio")),
+				jvKey("value", jvFloat(learned)),
+				jvKey("affinity", jvFloat(affinity.affinity)),
+				jvKey("confidence", jvFloat(affinity.confidence)),
+				jvKey("effective_support", jvFloat(affinity.support)),
+			))
+		}
+	}
+	studioValues := make([]float64, 0, len(studioItems.arr))
+	for _, item := range studioItems.arr {
+		studioValues = append(studioValues, numberValue(item.get("value")))
+	}
+	studioRaw := sumFloats(studioValues)
+	familyConfidences["studio"] = studioConfidence
+	if len(studioItems.arr) == 0 {
+		components.set("studio", jvObj(
+			jvKey("raw", jvInt(0)),
+			jvKey("value", jvInt(0)),
+			jvKey("studios", studioItems),
+			jvKey("evidence_confidence", jvFloat(studioConfidence)),
+			jvKey("stretch_candidates", stretchStudioCandidates),
+		))
+	} else {
+		components.set("studio", jvObj(
+			jvKey("raw", jvFloat(studioRaw)),
+			jvKey("value", jvFloat(softBound(studioRaw, 0.12))),
+			jvKey("studios", studioItems),
+			jvKey("evidence_confidence", jvFloat(studioConfidence)),
+			jvKey("stretch_candidates", stretchStudioCandidates),
+		))
+	}
+	neighborData, hasNeighbors := c.neighbors[sceneID]
+	if !hasNeighbors {
+		neighborData = neighborEvidence{}
+	}
+	neighborValue := neighborData.value
+	neighborOutcomeMean := neighborData.outcomeMean
+	neighborLift := neighborData.lift
+	neighborConfidence := neighborData.confidence
+	neighborTotalWeight := neighborData.totalWeight
+	if !hasNeighbors {
+		neighborValue, neighborOutcomeMean, neighborLift, neighborConfidence, neighborTotalWeight = 0.0, c.labelMean, 0.0, 0.0, 0.0
+	}
+	familyConfidences["content_neighbor"] = neighborConfidence
+	components.set("content_neighbor", jvObj(
+		jvKey("raw", jvFloat(neighborValue)),
+		jvKey("value", jvFloat(softBound(neighborValue, 0.20))),
+		jvKey("outcome_mean", jvFloat(neighborOutcomeMean)),
+		jvKey("training_outcome_mean", jvFloat(c.labelMean)),
+		jvKey("lift", jvFloat(neighborLift)),
+		jvKey("evidence_confidence", jvFloat(neighborConfidence)),
+		jvKey("total_weight", jvFloat(neighborTotalWeight)),
+		jvKey("vector_mode", jvStr("preference_discriminative")),
+		jvKey("discriminative_tag_count", jvInt(int64(c.discriminative))),
+	))
+	var componentValues []float64
+	for _, pair := range components.obj {
+		if pair.val.kind == jObj {
+			if value := pair.val.get("value"); value.kind == jNum {
+				componentValues = append(componentValues, numberValue(value))
+			}
+		}
+	}
+	componentTotal := sumFloats(componentValues)
+	general := softBound(componentTotal, 1.0)
+	direct := c.labels[sceneID]
+	exactConfidence := directConfidenceOf(direct.absoluteEvidence)
+	appeal := blendAppealOf(general, direct.absoluteOutcome, exactConfidence)
+	last, played := c.lastPlayed[sceneID]
+	var recovery float64
+	if !played {
+		recovery = 1.0
+	} else {
+		days := math.Max(0, float64(c.referenceAtMs-last)/86_400_000)
+		recovery = sceneRecovery(days)
+	}
+	cooldown := math.Max(0, appeal) * (1 - recovery)
+	satiationValue := satiation(sceneID, appeal, c.recentContext)
+	notNow := notNowPenalty(sceneID, c.referenceAtMs, c.recentContext)
+	currentFit := clamp(appeal - cooldown - satiationValue - notNow)
+	contentCount := len(c.vectors[sceneID])
+	var performerProfileCount float64
+	for _, item := range identityValues.arr {
+		if c.profiles[item.get("performer_id").asString()] {
+			performerProfileCount++
+		}
+	}
+	metadataConfidence := 1 - math.Exp(-(float64(contentCount)+performerProfileCount+float64(len(studioItems.arr)))/5)
+	var active []activeEvidence
+	for _, family := range []string{"content", "structure", "performer_identity",
+		"performer_similarity", "studio", "content_neighbor"} {
+		familyConfidence := familyConfidences[family]
+		component := components.get(family)
+		if component.kind != jObj || familyConfidence <= 0 {
+			continue
+		}
+		componentValue := math.Abs(numberValue(component.get("value")))
+		if componentValue >= 0.005 {
+			active = append(active, activeEvidence{componentValue, familyConfidence})
+		}
+	}
+	activeValues := make([]float64, 0, len(active))
+	activeWeighted := make([]float64, 0, len(active))
+	for _, item := range active {
+		activeValues = append(activeValues, item.value)
+		activeWeighted = append(activeWeighted, item.value*item.confidence)
+	}
+	evidenceMass := sumFloats(activeValues)
+	var evidenceConfidence float64
+	if evidenceMass != 0 {
+		evidenceConfidence = sumFloats(activeWeighted) / evidenceMass
+	}
+	breadth := 1 - math.Exp(-float64(len(active))/2)
+	predictionConfidence := evidenceConfidence * (0.65 + 0.35*breadth)
+	confidence := clampValue(exactConfidence+(1-exactConfidence)*predictionConfidence, 0, 1)
+	directSignals := jvArr()
+	for _, signal := range direct.signalTypes {
+		directSignals.arr = append(directSignals.arr, jvStr(signal))
+	}
+	components.set("direct", jvObj(
+		jvKey("value", jvFloat(direct.absoluteOutcome)),
+		jvKey("confidence", jvFloat(exactConfidence)),
+		jvKey("effective_evidence", jvFloat(direct.absoluteEvidence)),
+		jvKey("signals", directSignals),
+		jvKey("residual", jvFloat(clampValue(direct.absoluteOutcome-general, -2, 2))),
+		jvKey("learning_outcome", jvFloat(direct.outcome)),
+		jvKey("learning_evidence", jvFloat(direct.effectiveEvidence)),
+	))
+	components.set("fit", jvObj(
+		jvKey("cooldown", jvFloat(-cooldown)),
+		jvKey("satiation", jvFloat(-satiationValue)),
+		jvKey("not_now", jvFloat(-notNow)),
+		jvKey("recovery", jvFloat(recovery)),
+	))
+	eligibilityValue, ok := c.eligibility[sceneID]
+	if !ok {
+		eligibilityValue = jvObj(
+			jvKey("eligible", jvBool(false)),
+			jvKey("reasons", jvArr(jvStr("missing"))),
+		)
+	}
+	var neighborItems []jVal
+	if hasNeighbors {
+		neighborItems = neighborData.neighbors
+	}
+	return buildModelScore{
+		sceneID:            sceneID,
+		generalAppeal:      general,
+		directAppeal:       direct.absoluteOutcome,
+		directConfidence:   exactConfidence,
+		appeal:             appeal,
+		currentFit:         currentFit,
+		confidence:         confidence,
+		metadataConfidence: metadataConfidence,
+		recovery:           recovery,
+		// Publication only needs JSON; release each scene's object tree now.
+		componentsJSON:     storedComponents(components).marshalSortedKeys(),
+		classificationJSON: classificationPayload(components).marshalSortedKeys(),
+		neighbors:          neighborItems,
+		eligibility:        eligibilityValue,
+	}
+}
+
+// modelScores runs the scoring stage (mirroring _scores). The returned
+// timings carry "similarity" = the elapsed of the two kernel subprocess
+// calls (content neighbors + performer similarity), which the caller
+// combines with the stage total into the scoring key.
+func buildModelScores(db dbx, featureVersion string, sceneFeatures map[string][]storedFeature,
+	affinities map[string]modelAffinity, labels map[string]sceneLabel,
+	trainingLabels map[string]sceneLabel, labelMean float64, referenceAtMs int64,
+	report func(fraction float64)) ([]buildModelScore, jVal, map[string]int64, error) {
+	timings := map[string]int64{}
+	vectors, err := sceneContentVectorsAll(db, featureVersion)
+	if err != nil {
+		return nil, jvNull(), nil, err
+	}
+	allSceneRows, err := db.Query(`SELECT scene_id FROM source_scene ORDER BY scene_id`)
+	if err != nil {
+		return nil, jvNull(), nil, err
+	}
+	var allSceneIDs []string
+	for allSceneRows.Next() {
+		var sceneID string
+		if err := allSceneRows.Scan(&sceneID); err != nil {
+			allSceneRows.Close()
+			return nil, jvNull(), nil, err
+		}
+		allSceneIDs = append(allSceneIDs, sceneID)
+	}
+	allSceneRows.Close()
+	if err := allSceneRows.Err(); err != nil {
+		return nil, jvNull(), nil, err
+	}
+	discriminative := preferenceContentDimensions(sceneFeatures, affinities)
+	progressTotal := len(vectors) + len(allSceneIDs)
+	similarityStarted := time.Now()
+	neighbors, err := contentNeighbors(db, featureVersion, affinities, trainingLabels,
+		labelMean, progressTotal, report)
+	if err != nil {
+		return nil, jvNull(), nil, err
+	}
+	performerSimilarity, err := modelPerformerSimilarityScores(db, featureVersion, sceneFeatures, affinities)
+	if err != nil {
+		return nil, jvNull(), nil, err
+	}
+	timings["similarity"] = elapsedMs(similarityStarted)
+	baselineConfidences := make([]float64, 0, len(trainingLabels))
+	for _, sceneID := range sortedStringKeys(trainingLabels) {
+		baselineConfidences = append(baselineConfidences, trainingLabels[sceneID].confidence)
+	}
+	baselineSupport := sumFloats(baselineConfidences)
+	baseline := labelMean * baselineSupport / (1.0 + baselineSupport)
+	baseline = softBound(baseline, 0.10)
+	lastPlayed := map[string]int64{}
+	rows, err := db.Query(`SELECT scene_id, max(played_at_ms) AS last_played FROM source_play GROUP BY scene_id`)
+	if err != nil {
+		return nil, jvNull(), nil, err
+	}
+	for rows.Next() {
+		var sceneID string
+		var lastPlayedMs int64
+		if err := rows.Scan(&sceneID, &lastPlayedMs); err != nil {
+			rows.Close()
+			return nil, jvNull(), nil, err
+		}
+		lastPlayed[sceneID] = lastPlayedMs
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, jvNull(), nil, err
+	}
+	recentContext, err := buildRecentContext(db, referenceAtMs, vectors)
+	if err != nil {
+		return nil, jvNull(), nil, err
+	}
+	eligibility, err := sceneEligibilityBuild(db, referenceAtMs)
+	if err != nil {
+		return nil, jvNull(), nil, err
+	}
+	performerPriors, err := performerPriors(db)
+	if err != nil {
+		return nil, jvNull(), nil, err
+	}
+	studioPriors, err := studioPriors(db)
+	if err != nil {
+		return nil, jvNull(), nil, err
+	}
+	studioNames, err := studioNames(db)
+	if err != nil {
+		return nil, jvNull(), nil, err
+	}
+	profiles, err := performerProfileIDs(db, featureVersion)
+	if err != nil {
+		return nil, jvNull(), nil, err
+	}
+	var scores []buildModelScore
+	totalScenes := len(allSceneIDs)
+	if totalScenes > 0 {
+		context := &scoringContext{
+			sceneFeatures:       sceneFeatures,
+			affinities:          affinities,
+			performerPriors:     performerPriors,
+			studioPriors:        studioPriors,
+			studioNames:         studioNames,
+			performerSimilarity: performerSimilarity,
+			neighbors:           neighbors,
+			labels:              labels,
+			lastPlayed:          lastPlayed,
+			recentContext:       recentContext,
+			eligibility:         eligibility,
+			profiles:            profiles,
+			vectors:             vectors,
+			baseline:            baseline,
+			labelMean:           labelMean,
+			baselineSupport:     baselineSupport,
+			discriminative:      discriminative,
+			referenceAtMs:       referenceAtMs,
+		}
+		// Each scene's score depends only on its own features and the
+		// precomputed affinities/kernel outputs, so the loop is
+		// row-independent: run it in fixed chunks (the kernel pattern) with
+		// progress ticks emitted in scene order.
+		progressReporter := newOrderedProgress()
+		reporterDone := make(chan struct{})
+		go func() {
+			defer close(reporterDone)
+			progressReporter.wait(reportPoints(totalScenes), func(completed int) {
+				if report != nil {
+					progressIndex := len(vectors) + completed
+					report(0.35 + 0.40*float64(progressIndex)/float64(maxInt(1, progressTotal)))
+				}
+			})
+		}()
+		scores = parallelChunks(totalScenes, nthreads(0), func(start, end int) []buildModelScore {
+			out := make([]buildModelScore, 0, end-start)
+			for _, sceneID := range allSceneIDs[start:end] {
+				out = append(out, context.scoreScene(sceneID))
+				progressReporter.done()
+			}
+			return out
+		})
+		<-reporterDone
+	}
+	return scores, performerSimilarity, timings, nil
+}

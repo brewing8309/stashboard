@@ -1,0 +1,147 @@
+# Agent development loop
+
+This is repository guidance for agents implementing Stash Curator changes.
+
+## Before changing code
+
+1. Read `docs/handover.md`, then the relevant public guide in `docs/`.
+2. Run `git status --short` and preserve all existing user changes.
+3. Trace the complete path with `rg` before editing shared code. Fix the common root
+   rather than each caller.
+4. Keep private Stash URLs, entity IDs, reports, databases, credentials, and
+   evaluation notes out of tracked files and command output where practical.
+
+Use `apply_patch` for edits. Prefer the existing implementation and standard library;
+do not introduce a dependency or abstraction without a measured need. SQLite schema
+changes always get a new ordered migration. Never edit an applied migration or reset
+the sidecar to work around one.
+
+The compiled core (`core/`, Go) is the single runtime implementation of the
+similarity and pagerank kernels; a missing or incompatible binary fails build
+stages with a clear error (`curator/core.py`). Go is a build-time dependency:
+changes under `core/` need the Go toolchain, `scripts/build_core.sh`, and the
+differential gate (`scripts/verify core` — the binary must reproduce the numpy
+oracle's stage outputs on seeded synthetic corpora; `tests/core/`,
+`tests/model/test_core.py`, `tests/oracle.py`). Packaging
+(`scripts/build_plugin.py`) cross-compiles the shipped per-arch binaries and
+requires Go. The kernels and the numpy test oracle must agree. The approved
+missing-field decision in `docs/decisions/002-runtime-swap-planning.md` section 8
+supersedes the old masked-NaN performer behavior: unavailable blocks are skipped,
+and performers do not need every attribute populated. `scripts/verify full` builds
+the core and runs the unit suite with the binary active.
+
+Custom scene and performer cards must preserve Stash's native SFW Switch class
+contract: `scene-card`/`performer-card`, the matching `*-card-image`, `card-section`,
+and `card-section-title`. Keep usable controls outside `card-section`; the SFW Switch
+blurs that section and the media while active.
+
+## Patching Stash components
+
+Inspect Stash's hook caller before changing a patch. Before-hooks may change the
+argument count; never assume a fixed context argument. Preserve trailing arguments,
+the renderer's `this`, and content added by other plugins. For array-returning
+components, use an `instead` continuation when inspecting the result: Stash's
+`after` caller flattens arrays through `args.concat(result)`.
+
+Hook changes need composition coverage with one and multiple input arguments and
+element, null, empty-array and multi-element results where supported. Exercise the
+actual calling contract, not callbacks invoked with a fixed dummy context. Keep
+browser smoke coverage for every patched Stash page and card/control surface,
+including a synthetic second plugin; assert native content survives and collect
+JavaScript errors.
+
+## Implementation loop
+
+1. Make the smallest complete change.
+2. Add one focused regression test for non-trivial behavior.
+3. Run `scripts/verify changed path/to/test_file.py` while iterating. Omit the test
+   path for trivial or documentation-only changes. This formats and lints changed
+   Python, checks changed plugin JavaScript, runs requested tests, and checks the diff.
+4. Run `scripts/verify full` once near completion.
+5. Inspect `git diff` and `git status --short` before handoff.
+
+After a fresh checkout, or when `pyproject.toml` or `uv.lock` changes, synchronize the
+environment once:
+
+```bash
+uv sync --locked
+```
+
+The verifier creates unique pytest temporary space in system temporary storage.
+Override its location with `TMPDIR` when needed; durable workspace storage can make
+SQLite-heavy tests much slower.
+
+Enable the repository's native pre-push verification hook once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+## Verification: CI and manual, not the push hook
+
+Verification does not run in the push path. The pre-push hook only checks
+the diff for whitespace errors; CI runs the full matrix (`scripts/verify
+full` — build with the pinned binary, lint, unit suite, packaging tests, and
+the perf budget) on every pushed ref. Run the same gate manually when
+iterating:
+
+```bash
+scripts/verify full
+```
+
+The build produces `dist/stash-curator.zip` and `dist/index.yml`; the archive test
+checks that every runtime file and migration is included. `dist/` is generated and
+ignored; do not add it.
+
+For documentation-only changes, `scripts/verify changed` plus checking local links
+and commands is sufficient. Do not run the full suite merely for Markdown edits.
+
+## Installed verification
+
+After the user updates the plugin:
+
+1. Let migrations and any first-use backfill finish.
+2. Reproduce the exact operation once for cold-start behavior and again for steady
+   state.
+3. Use returned `timings_ms` or stage logs rather than judging only by the spinner.
+4. Check Stash logs, task progress, browser console, desktop layout, and mobile layout
+   when the change touches those paths.
+5. For model or ranking changes, inspect both recommendation quality and truthful
+   explanations. Turn general defects into synthetic tests.
+
+Live Stash and StashDB access is read-only unless the user explicitly asks to test
+the reversible Prune-tag mutation. Curator must never delete media.
+
+## Commit, push, and publish
+
+Do not commit or push merely because implementation is complete.
+
+1. Summarize changed files and verification results to the user.
+2. Commit only when requested or clearly authorized for the current work package.
+3. Push only after the user explicitly asks to push. Never infer push authorization
+   from an earlier turn.
+4. Before committing, verify the staged diff with `git diff --cached --check` and
+   `git diff --cached`.
+5. Use a short Conventional Commits subject (`feat:`, `fix:`, `docs:`, `perf:`, ...)
+   describing the outcome; the `.githooks/commit-msg` hook enforces it because
+   release-please derives the changelog and version bumps from those subjects.
+6. Run `git push` without force. Never rewrite shared history.
+
+A push to `main` triggers both CI and GitHub Pages. Pages rebuilds the plugin archive
+and source index from `main`; once deployment finishes, the user updates Curator from
+Stash's plugin manager. Do not claim an installed fix is verified until the user has
+updated and the live behavior has been retested.
+
+## Handoff format
+
+Report briefly:
+
+- outcome and root cause;
+- files changed;
+- checks run and exact result;
+- commit hash only if committed;
+- whether anything was pushed;
+- the one next live verification step, if needed.
+
+Leave the worktree clean only with respect to your own tracked changes. Never discard
+unrelated edits or generated private data.
