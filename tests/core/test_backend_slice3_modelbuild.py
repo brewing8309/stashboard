@@ -1,0 +1,864 @@
+"""Slice-3 backend differential harness: the full model build.
+
+The Go model-build kernel stage runs against the same builder-seeded sidecar
+as Python's PreferenceModelBuilder.build(); the produced model artifact (the
+oracle) must be content-identical across all artifact tables, the model_id
+must match, and the sidecar model_version / current_model_id writes must
+match modulo run timestamps.
+
+Synthetic sidecars only — never a live sidecar.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from curator.core import core_binary
+from curator.model.builder import PreferenceModelBuilder
+from curator.storage import connect_database
+from tests.core.compare import artifact_tolerant_diff
+from tests.core.test_backend_slice3_featurebuild import (
+    _set_sidecar_ignored_tags,
+    make_feature_sidecar,
+)
+from tests.model.test_builder import REFERENCE_MS
+
+
+@pytest.fixture(scope="module")
+def binary() -> Path:
+    path = core_binary()
+    if path is None:
+        pytest.skip("curator-core binary not built; run scripts/verify core")
+    return path
+
+
+def _artifact_schema_diff(go_path: Path, py_path: Path) -> str:
+    """Compare the per-table column lists of two artifacts. The row-content
+    sha comparison is blind to schema differences on empty tables, so a
+    missing column (e.g. model_scene_reason.confidence) only surfaced in
+    integration; check the schemas explicitly."""
+    import sqlite3
+
+    def columns(path: Path) -> dict[str, list[str]]:
+        connection = sqlite3.connect(path)
+        try:
+            tables = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                )
+            ]
+            return {
+                table: [row[1] for row in connection.execute(f"PRAGMA table_info({table})")]
+                for table in tables
+            }
+        finally:
+            connection.close()
+
+    go_cols, py_cols = columns(go_path), columns(py_path)
+    for table in sorted(set(go_cols) | set(py_cols)):
+        if go_cols.get(table) != py_cols.get(table):
+            return (
+                f"schema differs for {table}:\n"
+                f"  go: {go_cols.get(table)}\n  py: {py_cols.get(table)}"
+            )
+    return ""
+
+
+def _first_artifact_diff(go_path: Path, py_path: Path) -> str:
+    """Return the first differing table+row (with the row index) between two
+    artifacts, for CI diagnostics when the byte-identity assertion fails."""
+
+    def rows(path: Path) -> dict[str, list[object]]:
+        connection = sqlite3.connect(path)
+        try:
+            tables = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                )
+            ]
+            return {table: list(connection.execute(f"SELECT * FROM {table}")) for table in tables}
+        finally:
+            connection.close()
+
+    go_rows, py_rows = rows(go_path), rows(py_path)
+    for table in sorted(set(go_rows) | set(py_rows)):
+        a, b = go_rows.get(table, []), py_rows.get(table, [])
+        # model_lane_order_state.created_at_ms is wall-clock in both
+        # implementations; ignore it like _artifact_tables_sha does.
+        norm = (lambda row: (row[0], 0)) if table == "model_lane_order_state" else (lambda row: row)
+        a, b = [norm(row) for row in a], [norm(row) for row in b]
+        if a == b:
+            continue
+        for index, (go_row, py_row) in enumerate(zip(a, b, strict=False)):
+            if go_row != py_row:
+                return f"{table}[{index}]:\n  go:  {go_row}\n  py:  {py_row}"
+        return f"{table}: row count differs (go {len(a)} vs py {len(b)})"
+    return "no row differences (unexpected)"
+
+
+def _run_python_build(sidecar: Path) -> tuple[str, Path]:
+    connection = connect_database(sidecar, attach_artifacts=False)
+    try:
+        result = PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+        model_id = result.model_id
+        basename = connection.execute(
+            "SELECT artifact_basename FROM model_version WHERE model_id=?", (model_id,)
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    return model_id, sidecar.parent / f"{sidecar.stem}-derived" / basename
+
+
+def _run_go_build(binary: Path, sidecar: Path) -> tuple[str, Path]:
+    payload = json.dumps(
+        {"db": str(sidecar), "now_ms": REFERENCE_MS}, separators=(",", ":")
+    ).encode()
+    result = subprocess.run(
+        [str(binary), "model-build"], input=payload, capture_output=True, timeout=600
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    model_id = None
+    for line in result.stdout.decode().splitlines():
+        parsed = json.loads(line)
+        if "result" in parsed:
+            model_id = parsed["result"]["model_id"]
+    assert model_id is not None
+    connection = sqlite3.connect(sidecar)
+    try:
+        basename = connection.execute(
+            "SELECT artifact_basename FROM model_version WHERE model_id=?", (model_id,)
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    return model_id, sidecar.parent / f"{sidecar.stem}-derived" / basename
+
+
+def test_model_build_recovers_from_building_row(binary: Path, tmp_path: Path) -> None:
+    """A leftover 'building' registry row (interrupted build) with the same
+    feature_version the next build is about to produce must not crash the
+    reuse check: validation_status is NULL on building rows, and both
+    backends fall through to a fresh build instead."""
+    results = []
+    for name in ("py", "go"):
+        db = tmp_path / name / "curator.sqlite3"
+        db.parent.mkdir()
+        make_feature_sidecar(db)
+        if name == "py":
+            model, _ = _run_python_build(db)
+        else:
+            model, _ = _run_go_build(binary, db)
+        connection = connect_database(db, attach_artifacts=False)
+        try:
+            feature_version = connection.execute(
+                "SELECT feature_version FROM model_version WHERE model_id=?", (model,)
+            ).fetchone()[0]
+            # Simulate an interrupted build of this exact version: keep the
+            # row, flip it back to 'building' with a NULL validation_status.
+            connection.execute(
+                "UPDATE feature_build SET status='building', validation_status=NULL, "
+                "artifact_basename=NULL, error='interrupted' WHERE feature_version=?",
+                (feature_version,),
+            )
+        finally:
+            connection.close()
+        if name == "py":
+            rebuilt_model, rebuilt_artifact = _run_python_build(db)
+        else:
+            rebuilt_model, rebuilt_artifact = _run_go_build(binary, db)
+        connection = sqlite3.connect(db)
+        try:
+            row = connection.execute(
+                "SELECT status, validation_status FROM feature_build WHERE feature_version=?",
+                (feature_version,),
+            ).fetchone()
+        finally:
+            connection.close()
+        assert rebuilt_model == model, (name, rebuilt_model, model)
+        assert row == ("published", "valid"), (name, row)
+        results.append((rebuilt_model, rebuilt_artifact))
+    assert artifact_tolerant_diff(results[0][1], results[1][1]) == ""
+    assert _artifact_schema_diff(results[0][1], results[1][1]) == ""
+
+
+def _seed_tag_hierarchy(sidecar: Path) -> None:
+    """Give the corpus a tag taxonomy so hierarchical affinity smoothing runs.
+
+    Without parents every tag borrows nothing and the smoothing is a no-op, so
+    a divergence between the two implementations would go unnoticed here.
+    """
+    connection = sqlite3.connect(sidecar)
+    try:
+        connection.execute(
+            "INSERT INTO source_tag(tag_id, name, source_hash) VALUES (?, ?, ?)",
+            ("scenario", "Scenario", "tsc"),
+        )
+        connection.executemany(
+            "INSERT INTO tag_parent(tag_id, parent_tag_id) VALUES (?, ?)",
+            (("good", "scenario"), ("bad", "scenario"), ("unusual", "scenario")),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_model_build_artifact_parity_with_tag_hierarchy(binary: Path, tmp_path: Path) -> None:
+    """Parity holds once tags have parents, which is what makes the sibling
+    prior do anything. The default corpus is deliberately flat, so this is the
+    only place the smoothing path is compared across implementations."""
+
+    py_dir = tmp_path / "py"
+    py_dir.mkdir()
+    py_db = py_dir / "curator.sqlite3"
+    make_feature_sidecar(py_db)
+    _seed_tag_hierarchy(py_db)
+    py_model, py_artifact = _run_python_build(py_db)
+
+    go_dir = tmp_path / "go"
+    go_dir.mkdir()
+    go_db = go_dir / "curator.sqlite3"
+    make_feature_sidecar(go_db)
+    _seed_tag_hierarchy(go_db)
+    go_model, go_artifact = _run_go_build(binary, go_db)
+
+    assert go_model == py_model
+    assert artifact_tolerant_diff(go_artifact, py_artifact) == "", (
+        f"artifact content differs: {artifact_tolerant_diff(go_artifact, py_artifact)}"
+    )
+
+
+def _seed_tag_answers(sidecar: Path) -> None:
+    """Answer the parent tag and one child so the others inherit."""
+    connection = sqlite3.connect(sidecar)
+    try:
+        for tag_id, value in (("scenario", 0.5), ("bad", -1.0)):
+            connection.execute(
+                "INSERT INTO direct_tag_preference_history(preference_id, tag_id, value,"
+                " occurred_at_ms) VALUES (?, ?, ?, 1)",
+                (f"pref-{tag_id}", tag_id, value),
+            )
+            connection.execute(
+                "INSERT INTO direct_tag_preference(tag_id, preference_id, value, occurred_at_ms)"
+                " VALUES (?, ?, ?, 1)",
+                (tag_id, f"pref-{tag_id}", value),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_model_build_artifact_parity_with_inherited_answers(binary: Path, tmp_path: Path) -> None:
+    """Unanswered children inherit the parent's answer identically in both."""
+    built = []
+    for name, run in (("py", _run_python_build), ("go", lambda db: _run_go_build(binary, db))):
+        directory = tmp_path / name
+        directory.mkdir()
+        db = directory / "curator.sqlite3"
+        make_feature_sidecar(db)
+        _seed_tag_hierarchy(db)
+        _seed_tag_answers(db)
+        built.append(run(db))
+    (py_model, py_artifact), (go_model, go_artifact) = built
+    assert go_model == py_model
+    assert artifact_tolerant_diff(go_artifact, py_artifact) == ""
+    connection = sqlite3.connect(go_artifact)
+    try:
+        metadata = [
+            json.loads(row[0])
+            for row in connection.execute("SELECT metadata_json FROM feature_affinity")
+        ]
+    finally:
+        connection.close()
+    # "good" and "unusual" inherit from "scenario"; "bad" keeps its own answer.
+    inherited = [item for item in metadata if "inherited_preference" in item]
+    assert len(inherited) == 2
+    assert all(item["inherited_preference"] == 0.5 for item in inherited)
+    assert all(item["inherited_from"] == ["scenario"] for item in inherited)
+    assert not any("declared_preference" in item for item in inherited)
+
+
+def _seed_scene_reasons(sidecar: Path) -> None:
+    """One Why these? answer each way: a performer, tag, studio, and missing
+    tag that make a scene work, and a performer, tag, and the scene itself
+    that put the user off another; plus a bare flip on a played scene."""
+    connection = sqlite3.connect(sidecar)
+    try:
+        connection.executemany(
+            "INSERT INTO scene_reason_answer(answer_id, scene_id, polarity, flipped,"
+            " occurred_at_ms) VALUES (?, ?, ?, ?, ?)",
+            [
+                ("a-hit", "unseen-good", 1, 0, 10),
+                ("a-miss", "disliked", -1, 1, 20),
+                ("a-flip", "old-good", -1, 1, 30),
+                ("a-mild", "unusual", -1, 1, 35),
+            ],
+        )
+        connection.execute(
+            "INSERT INTO scene_reason_answer(answer_id, scene_id, polarity, flipped, flip_strength,"
+            " occurred_at_ms) VALUES ('a-strong', 'unlabeled', 1, 1, 'strong', 40)"
+        )
+        connection.executemany(
+            "INSERT INTO scene_reason(answer_id, subject_type, subject_id) VALUES (?, ?, ?)",
+            [
+                ("a-hit", "performer", "p3"),
+                ("a-hit", "tag", "unusual"),
+                ("a-hit", "studio", "studio-2"),
+                ("a-hit", "missing_tag", "good"),
+                ("a-miss", "performer", "p2"),
+                ("a-miss", "tag", "bad"),
+                ("a-miss", "scene", ""),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _affinities_by_name(sidecar: Path) -> dict[str, float]:
+    """Published affinities by feature name, read through the attached artifacts."""
+    connection = connect_database(sidecar)
+    try:
+        return {
+            str(row[0]): float(row[1])
+            for row in connection.execute(
+                "SELECT f.name, a.affinity FROM feature_affinity a"
+                " JOIN feature_definition f ON f.feature_id=a.feature_id"
+            )
+        }
+    finally:
+        connection.close()
+
+
+def test_model_build_artifact_parity_with_scene_reasons(binary: Path, tmp_path: Path) -> None:
+    """Why these? reasons enter both builds identically, and they move the
+    named features in the answer's direction."""
+    built = []
+    for name, seed in (("plain", False), ("py", True), ("go", True)):
+        directory = tmp_path / name
+        directory.mkdir()
+        db = directory / "curator.sqlite3"
+        make_feature_sidecar(db)
+        if seed:
+            _seed_scene_reasons(db)
+        built.append(_run_go_build(binary, db) if name == "go" else _run_python_build(db))
+    _, (py_model, py_artifact), (go_model, go_artifact) = built
+    assert go_model == py_model
+    assert artifact_tolerant_diff(go_artifact, py_artifact) == ""
+    before = _affinities_by_name(tmp_path / "plain" / "curator.sqlite3")
+    after = _affinities_by_name(tmp_path / "go" / "curator.sqlite3")
+    for feature in ("performer:p3", "studio:studio-2"):
+        assert after[feature] > before.get(feature, 0.0), feature
+    assert after["performer:p2"] < before.get("performer:p2", 0.0)
+    changed = {name for name in after if after[name] != before.get(name)}
+    assert len(changed) >= 5
+
+
+def test_model_build_artifact_parity_with_calibrated_ratings(binary: Path, tmp_path: Path) -> None:
+    """Stash ratings are calibrated against viewing behavior identically in
+    both builds; a low rating sharing a bucket with an O'd scene is lifted."""
+    built = []
+    for name in ("py", "go"):
+        directory = tmp_path / name
+        directory.mkdir()
+        db = directory / "curator.sqlite3"
+        make_feature_sidecar(db)
+        connection = sqlite3.connect(db)
+        try:
+            connection.executemany(
+                "UPDATE source_scene SET rating100=? WHERE scene_id=?",
+                [
+                    (20, "old-good"),
+                    (24, "unseen-good"),
+                    (90, "recent-good"),
+                    (10, "disliked"),
+                    (57, "unlabeled"),
+                ],
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        built.append(_run_go_build(binary, db) if name == "go" else _run_python_build(db))
+    (py_model, py_artifact), (go_model, go_artifact) = built
+    assert go_model == py_model
+    assert artifact_tolerant_diff(go_artifact, py_artifact) == ""
+    connection = connect_database(tmp_path / "py" / "curator.sqlite3", attach_artifacts=False)
+    try:
+        labels = PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS)._scene_labels()
+    finally:
+        connection.close()
+    assert labels["unseen-good"].outcome > -0.52
+
+
+def test_a_new_scene_reason_changes_the_model_id(binary: Path, tmp_path: Path) -> None:
+    """A reason is model evidence: with everything else unchanged, the next
+    build must not reuse the previous artifact."""
+    for name, run in (("py", _run_python_build), ("go", lambda db: _run_go_build(binary, db))):
+        directory = tmp_path / name
+        directory.mkdir()
+        db = directory / "curator.sqlite3"
+        make_feature_sidecar(db)
+        before, _ = run(db)
+        _seed_scene_reasons(db)
+        after, _ = run(db)
+        assert after != before, name
+
+
+def _seed_external_reasons(sidecar: Path) -> None:
+    """A "What put you off?" answer on a dismissed StashDB scene: a local
+    performer, studio, and tag."""
+    connection = sqlite3.connect(sidecar)
+    try:
+        connection.execute(
+            "INSERT INTO external_scene_reason_answer VALUES"
+            " ('x-miss', 'https://stashdb.org/graphql', 'ext-scene', -1, 50)"
+        )
+        connection.executemany(
+            "INSERT INTO external_scene_reason(answer_id, subject_type, subject_id)"
+            " VALUES (?, ?, ?)",
+            [
+                ("x-miss", "performer", "p3"),
+                ("x-miss", "studio", "studio-2"),
+                ("x-miss", "tag", "good"),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_external_reasons_build_identically_and_move_features(binary: Path, tmp_path: Path) -> None:
+    """External answers enter both builds like Why these? reasons, push the
+    named features down, and change the model_id."""
+    built = []
+    for name, seed in (("plain", False), ("py", True), ("go", True)):
+        directory = tmp_path / name
+        directory.mkdir()
+        db = directory / "curator.sqlite3"
+        make_feature_sidecar(db)
+        if seed:
+            _seed_external_reasons(db)
+        built.append(_run_go_build(binary, db) if name == "go" else _run_python_build(db))
+    (plain_model, _), (py_model, py_artifact), (go_model, go_artifact) = built
+    assert go_model == py_model != plain_model
+    assert artifact_tolerant_diff(go_artifact, py_artifact) == ""
+    before = _affinities_by_name(tmp_path / "plain" / "curator.sqlite3")
+    after = _affinities_by_name(tmp_path / "go" / "curator.sqlite3")
+    for feature in ("performer:p3", "studio:studio-2"):
+        assert after[feature] < before.get(feature, 0.0), feature
+
+
+def _seed_performer_dislike(sidecar: Path, *, linked: bool) -> None:
+    """A disliked StashDB performer, optionally linked to local p3 through
+    the cached external links."""
+    connection = sqlite3.connect(sidecar)
+    try:
+        connection.execute(
+            "INSERT INTO external_performer_dislike VALUES"
+            " ('https://stashdb.org/graphql', 'ext-p3', 'Performer Three', 60)"
+        )
+        if linked:
+            connection.execute(
+                "INSERT INTO application_meta(key, value) VALUES ('external_links', ?)",
+                ('{"state":"s","links":{"performers":{"p3":"ext-p3"},"scenes":{},"studios":{}}}',),
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_linked_performer_dislike_becomes_model_evidence(binary: Path, tmp_path: Path) -> None:
+    """Once a disliked StashDB performer links to a local performer, both
+    builds count the dislike against her; unlinked, it changes nothing."""
+    built = []
+    for name, linked in (("plain", None), ("unlinked", False), ("py", True), ("go", True)):
+        directory = tmp_path / name
+        directory.mkdir()
+        db = directory / "curator.sqlite3"
+        make_feature_sidecar(db)
+        if linked is not None:
+            _seed_performer_dislike(db, linked=linked)
+        built.append(_run_go_build(binary, db) if name == "go" else _run_python_build(db))
+    (plain_model, _), (unlinked_model, _), (py_model, py_artifact), (go_model, go_artifact) = built
+    assert unlinked_model == plain_model
+    assert go_model == py_model != plain_model
+    assert artifact_tolerant_diff(go_artifact, py_artifact) == ""
+    before = _affinities_by_name(tmp_path / "plain" / "curator.sqlite3")
+    after = _affinities_by_name(tmp_path / "go" / "curator.sqlite3")
+    assert after["performer:p3"] < before.get("performer:p3", 0.0)
+
+
+def test_scene_level_reasons_label_the_scene(tmp_path: Path) -> None:
+    """A flip labels the scene like a thumb and trains features; "Just this
+    scene" labels the scene's own appeal only and never reaches training."""
+    db = tmp_path / "curator.sqlite3"
+    make_feature_sidecar(db)
+    _seed_scene_reasons(db)
+    connection = connect_database(db, attach_artifacts=False)
+    try:
+        builder = PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS)
+        labels = builder._scene_labels()
+        training = builder._training_labels(labels)
+    finally:
+        connection.close()
+    assert labels["old-good"].signal_types[-1] == "scene_reason_flip"
+    # On scenes with no other signal the label is the flip alone: a mild flip
+    # is a slight dislike at half a thumb's confidence, a strong one a thumb.
+    assert (labels["unusual"].outcome, labels["unusual"].effective_evidence) == (-0.5, 0.5)
+    assert (labels["unlabeled"].outcome, labels["unlabeled"].effective_evidence) == (0.9, 1.0)
+    assert "scene_reason_flip" in training["old-good"].signal_types
+    assert labels["disliked"].signal_types[-1] == "scene_reason_scene"
+    assert labels["disliked"].outcome < 0
+    assert "scene_reason_scene" not in training["disliked"].signal_types
+    assert training["disliked"].signal_types == labels["disliked"].signal_types[:-1]
+    # A hit without a flip or "Just this scene" is not a scene label.
+    assert "unseen-good" not in labels
+
+
+def test_tag_hierarchy_changes_the_model(binary: Path, tmp_path: Path) -> None:
+    """The smoothing must actually bite: the same corpus with and without a
+    taxonomy has to produce different affinities, or the parity test above
+    would be comparing two no-ops."""
+
+    flat_dir = tmp_path / "flat"
+    flat_dir.mkdir()
+    flat_db = flat_dir / "curator.sqlite3"
+    make_feature_sidecar(flat_db)
+    flat_model, _ = _run_python_build(flat_db)
+
+    nested_dir = tmp_path / "nested"
+    nested_dir.mkdir()
+    nested_db = nested_dir / "curator.sqlite3"
+    make_feature_sidecar(nested_db)
+    _seed_tag_hierarchy(nested_db)
+    nested_model, _ = _run_python_build(nested_db)
+
+    assert nested_model != flat_model
+
+
+def _run_python_build_with_ignored(sidecar: Path, ignored: tuple[str, ...]) -> tuple[str, Path]:
+    from curator.config import CuratorConfig, FeatureConfig
+    from curator.storage import connect_database
+
+    connection = connect_database(sidecar, attach_artifacts=False)
+    try:
+        result = PreferenceModelBuilder(
+            connection,
+            CuratorConfig(feature=FeatureConfig(ignored_tags=ignored)),
+            clock_ms=lambda: REFERENCE_MS,
+        ).build()
+        model_id = result.model_id
+        basename = connection.execute(
+            "SELECT artifact_basename FROM model_version WHERE model_id=?", (model_id,)
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    return model_id, sidecar.parent / f"{sidecar.stem}-derived" / basename
+
+
+def test_model_build_ignored_tags_parity(binary: Path, tmp_path: Path) -> None:
+    """Issue #190: with ignored_tags set, both implementations produce the
+    same model_id and an identical artifact, and the ignored tag produces no
+    content feature in the feature artifact that fed the build."""
+    py_dir = tmp_path / "py"
+    py_dir.mkdir()
+    py_db = py_dir / "curator.sqlite3"
+    make_feature_sidecar(py_db)
+    _set_sidecar_ignored_tags(py_db, "Familiar Scenario,Challenging Scenario")
+    py_model, py_artifact = _run_python_build_with_ignored(
+        py_db, ("Familiar Scenario", "Challenging Scenario")
+    )
+
+    go_dir = tmp_path / "go"
+    go_dir.mkdir()
+    go_db = go_dir / "curator.sqlite3"
+    make_feature_sidecar(go_db)
+    _set_sidecar_ignored_tags(go_db, "Familiar Scenario,Challenging Scenario")
+    go_model, go_artifact = _run_go_build(binary, go_db)
+
+    assert go_model == py_model
+    assert artifact_tolerant_diff(go_artifact, py_artifact) == "", (
+        f"artifact content differs: {artifact_tolerant_diff(go_artifact, py_artifact)}"
+    )
+    assert _artifact_schema_diff(go_artifact, py_artifact) == ""
+
+    # The ignored tags must not appear as content affinities in either model
+    # artifact. feature_id embeds the feature name hash; match via the feature
+    # definition rows in the feature artifact that the build consumed.
+    for name, sidecar in (("python", py_db), ("go", go_db)):
+        connection = sqlite3.connect(sidecar)
+        try:
+            feature_version = connection.execute(
+                "SELECT feature_version FROM model_version WHERE model_id=?", (py_model,)
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        derived = sidecar.parent / f"{sidecar.stem}-derived"
+        feature_artifact = next(derived.glob(f"feature-{feature_version}.sqlite3"))
+        connection = sqlite3.connect(feature_artifact)
+        try:
+            rows = connection.execute(
+                """
+                SELECT f.name FROM entity_feature ef
+                JOIN feature_definition f USING(feature_id)
+                WHERE ef.feature_version=? AND f.name IN ('tag:good', 'tag:bad')
+                """,
+                (feature_version,),
+            ).fetchall()
+            assert rows == [], name
+        finally:
+            connection.close()
+
+
+def _seed_implicit_skip_impression(sidecar: Path) -> None:
+    """Add an impression with an observed playback at position 2, so the model
+    build emits implicit-skip virtual pairs (winner + earlier-position losers)."""
+    connection = sqlite3.connect(sidecar)
+    try:
+        connection.execute(
+            """
+            INSERT INTO impression(impression_id, requested_at_ms, lane, config_version)
+            VALUES ('imp-146', 1, 'for_you', 'builtin')
+            """
+        )
+        connection.executemany(
+            """
+            INSERT INTO impression_item(impression_id, scene_id, position, policy_score,
+                reason_snapshot_json) VALUES (?, ?, ?, ?, '[]')
+            """,
+            (
+                ("imp-146", "old-good", 0, 0.9),
+                ("imp-146", "recent-good", 1, 0.8),
+                ("imp-146", "unseen-good", 2, 0.3),
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO play_session(session_id, scene_id, started_at_ms, ended_at_ms,
+                active_seconds, provenance, confidence, impression_id, summary_json)
+            VALUES ('ps-146', 'unseen-good', 100, 200, 10.0, 'direct_player', 1,
+                    'imp-146', '{}')
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def test_model_build_implicit_skip_parity(binary: Path, tmp_path: Path) -> None:
+    """Issue #146 Channel A: with an observed playback at position 2 in an
+    impression, both implementations emit the same implicit-skip virtual pairs
+    and produce the same model_id and an identical artifact."""
+    py_dir = tmp_path / "py"
+    py_dir.mkdir()
+    py_db = py_dir / "curator.sqlite3"
+    make_feature_sidecar(py_db)
+    _seed_implicit_skip_impression(py_db)
+    py_model, py_artifact = _run_python_build(py_db)
+
+    go_dir = tmp_path / "go"
+    go_dir.mkdir()
+    go_db = go_dir / "curator.sqlite3"
+    make_feature_sidecar(go_db)
+    _seed_implicit_skip_impression(go_db)
+    go_model, go_artifact = _run_go_build(binary, go_db)
+
+    assert go_model == py_model
+    assert artifact_tolerant_diff(go_artifact, py_artifact) == "", (
+        f"artifact content differs: {artifact_tolerant_diff(go_artifact, py_artifact)}"
+    )
+    assert _artifact_schema_diff(go_artifact, py_artifact) == ""
+
+
+def test_model_build_artifact_parity(binary: Path, tmp_path: Path) -> None:
+    """Both implementations produce the same model_id and content-identical
+    model artifacts; the sidecar model_version / current_model_id writes
+    match modulo the published timestamp."""
+
+    py_dir = tmp_path / "py"
+    py_dir.mkdir()
+    py_db = py_dir / "curator.sqlite3"
+    make_feature_sidecar(py_db)
+    py_model, py_artifact = _run_python_build(py_db)
+
+    go_dir = tmp_path / "go"
+    go_dir.mkdir()
+    go_db = go_dir / "curator.sqlite3"
+    make_feature_sidecar(go_db)
+    go_model, go_artifact = _run_go_build(binary, go_db)
+
+    assert go_model == py_model
+    assert go_artifact.name == py_artifact.name
+    assert artifact_tolerant_diff(go_artifact, py_artifact) == "", (
+        f"artifact content differs: {artifact_tolerant_diff(go_artifact, py_artifact)}"
+    )
+    assert _artifact_schema_diff(go_artifact, py_artifact) == "", (
+        f"artifact schema differs: {_artifact_schema_diff(go_artifact, py_artifact)}"
+    )
+
+    py_conn = sqlite3.connect(py_db)
+    py_conn.row_factory = sqlite3.Row
+    go_conn = sqlite3.connect(go_db)
+    go_conn.row_factory = sqlite3.Row
+    try:
+        for column in (
+            "model_id",
+            "status",
+            "feature_version",
+            "config_json",
+            "scene_count",
+            "lane_count",
+            "reason_scene_count",
+            "reason_count",
+            "validation_status",
+            "validation_summary_json",
+            "artifact_schema_version",
+            "artifact_bytes",
+            "artifact_basename",
+        ):
+            py_val = py_conn.execute(
+                f"SELECT {column} FROM model_version WHERE model_id=?", (py_model,)
+            ).fetchone()[0]
+            go_val = go_conn.execute(
+                f"SELECT {column} FROM model_version WHERE model_id=?", (go_model,)
+            ).fetchone()[0]
+            assert go_val == py_val, column
+        py_current = py_conn.execute(
+            "SELECT value FROM application_meta WHERE key='current_model_id'"
+        ).fetchone()[0]
+        go_current = go_conn.execute(
+            "SELECT value FROM application_meta WHERE key='current_model_id'"
+        ).fetchone()[0]
+        assert go_current == py_current == py_model
+        py_published = py_conn.execute(
+            "SELECT count(*) FROM model_version WHERE status='published'"
+        ).fetchone()[0]
+        go_published = go_conn.execute(
+            "SELECT count(*) FROM model_version WHERE status='published'"
+        ).fetchone()[0]
+        assert go_published == py_published == 1
+    finally:
+        py_conn.close()
+        go_conn.close()
+
+
+def test_model_build_reuse_parity(binary: Path, tmp_path: Path) -> None:
+    """A second build on the same sidecar reuses the published model on both
+    implementations (reuse_count bumps, no new artifact)."""
+    sidecar = tmp_path / "curator.sqlite3"
+    make_feature_sidecar(sidecar)
+    _run_go_build(binary, sidecar)
+    connection = sqlite3.connect(sidecar)
+    try:
+        before = connection.execute(
+            "SELECT reuse_count FROM model_version ORDER BY created_at_ms DESC LIMIT 1"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    model_id, _ = _run_go_build(binary, sidecar)
+    connection = sqlite3.connect(sidecar)
+    try:
+        after = connection.execute(
+            "SELECT reuse_count FROM model_version WHERE model_id=?", (model_id,)
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert after == before + 1
+
+
+def _seed_new_arrivals(sidecar: Path, include_unorganized: bool) -> None:
+    """Give scenes Stash added dates and organized flags, and set the New
+    Arrivals organized setting where the Go build reads it."""
+    day_ms = 86_400_000
+    connection = sqlite3.connect(sidecar)
+    try:
+        connection.executemany(
+            "UPDATE source_scene SET created_at_ms=?, organized=? WHERE scene_id=?",
+            (
+                (REFERENCE_MS - 2 * day_ms, 1, "unseen-good"),
+                (REFERENCE_MS - 3 * day_ms, 0, "unlabeled"),
+                (REFERENCE_MS - 40 * day_ms, 1, "unusual"),
+                (REFERENCE_MS - 1 * day_ms, 1, "old-good"),
+            ),
+        )
+        connection.execute(
+            "UPDATE curator_config SET config_json=?, updated_at_ms=1 WHERE singleton=1",
+            (json.dumps({"new_arrivals_include_unorganized": include_unorganized}),),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+@pytest.mark.parametrize("include_unorganized", [False, True])
+def test_model_build_new_arrivals_parity(
+    binary: Path, tmp_path: Path, include_unorganized: bool
+) -> None:
+    """Scenes with Stash added dates classify into New Arrivals identically in
+    both implementations; unorganized scenes join only when the setting
+    includes them, and played scenes never do."""
+    from dataclasses import replace
+
+    from curator.config import CuratorConfig, RankingConfig
+
+    artifacts: dict[str, tuple[str, Path]] = {}
+    for name in ("py", "go"):
+        directory = tmp_path / name
+        directory.mkdir()
+        sidecar = directory / "curator.sqlite3"
+        make_feature_sidecar(sidecar)
+        _seed_new_arrivals(sidecar, include_unorganized)
+        if name == "go":
+            artifacts[name] = _run_go_build(binary, sidecar)
+            continue
+        connection = connect_database(sidecar, attach_artifacts=False)
+        try:
+            config = CuratorConfig(
+                ranking=replace(
+                    RankingConfig(), new_arrivals_include_unorganized=include_unorganized
+                )
+            )
+            model_id = (
+                PreferenceModelBuilder(connection, config, clock_ms=lambda: REFERENCE_MS)
+                .build()
+                .model_id
+            )
+            basename = connection.execute(
+                "SELECT artifact_basename FROM model_version WHERE model_id=?", (model_id,)
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        artifacts[name] = (model_id, sidecar.parent / f"{sidecar.stem}-derived" / basename)
+
+    (py_model, py_artifact), (go_model, go_artifact) = artifacts["py"], artifacts["go"]
+    assert go_model == py_model
+    assert artifact_tolerant_diff(go_artifact, py_artifact) == ""
+    assert _artifact_schema_diff(go_artifact, py_artifact) == ""
+
+    connection = sqlite3.connect(go_artifact)
+    try:
+        rows = dict(
+            connection.execute(
+                """
+                SELECT scene_id, qualification_json FROM model_scene_lane
+                WHERE lane='new_arrivals'
+                """
+            ).fetchall()
+        )
+        ordered = connection.execute(
+            "SELECT count(*) FROM model_lane_order WHERE lane='new_arrivals'"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    expected = {"unseen-good", "unusual"} | ({"unlabeled"} if include_unorganized else set())
+    assert set(rows) == expected
+    assert json.loads(rows["unseen-good"]) == {
+        "added_at_ms": REFERENCE_MS - 2 * 86_400_000,
+        "days_since_added": 2,
+    }
+    assert ordered > 0

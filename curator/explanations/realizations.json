@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "evidence": {
+    "direct.positive": {
+      "lead": ["you have enjoyed this scene before", "this scene has a positive history with you", "you have returned to this scene before"],
+      "support": ["your own history supports it", "you already know this scene can be worthwhile", "you have seen this scene successfully before"]
+    },
+    "dormant.entity": {
+      "lead": ["you used to watch a lot of {dormant}, but not for {since}", "{dormant} was a strong pattern for you, until {since} ago", "your history with {dormant} was positive, but has gone quiet for {since}"],
+      "support": ["{dormant} was also a reliable pattern for you", "you have a positive history with {dormant} as well", "{dormant} adds another parked-taste signal"]
+    },
+    "appeal.performer_identity": {
+      "lead": ["you tend to enjoy {performer}", "your history with {performer} is positive", "{performer} has been a reliable choice for you"],
+      "support": ["{performer} is another performer you enjoy", "you have a positive history with {performer}", "{performer}'s history adds support"]
+    },
+    "appeal.content_neighbor": {
+      "lead": ["{tags} also recur in scenes you have enjoyed", "your history is positive around {tags}", "the {tags} here match a pattern you have enjoyed"],
+      "support": ["{tags} are also present in scenes you have enjoyed", "{tags} add a familiar content pattern", "your past choices also favour {tags}"]
+    },
+    "appeal.tag_positive": {
+      "lead": ["scenes with {tags} have tended to suit you", "your history is positive around {tags}", "{tags} are a recurring positive pattern for you"],
+      "support": ["{tags} provide additional support", "your past choices also favour {tags}", "{tags} are another positive signal"]
+    },
+    "appeal.tag_declared_positive": {
+      "lead": ["you said you like {tags}", "your declared preference for {tags} is positive", "you explicitly marked {tags} as appealing"],
+      "support": ["you said you like {tags}", "your declared preference also supports {tags}", "{tags} match a preference you set"]
+    },
+    "appeal.studio": {
+      "lead": ["your history with {studio} is positive", "scenes from {studio} have often suited you", "{studio} has been a reliable source in your library"],
+      "support": ["{studio} adds a positive studio signal", "your history with {studio} provides additional support", "{studio} is another familiar source"]
+    },
+    "appeal.performer_similar": {
+      "lead": ["{target} resembles {known} in {profile}", "{target} is similar to {known}, particularly in {profile}", "{known} is a useful reference for {target} because of {profile}"],
+      "support": ["{target} also resembles {known} in {profile}", "the similarity between {target} and {known} is strongest in {profile}", "{profile} is the main connection between {target} and {known}"]
+    },
+    "appeal.tag_negative": {
+      "boundary": ["your history with {tags} is mixed", "the pattern around {tags} has been less consistent for you", "there is some friction around {tags}"]
+    },
+    "appeal.tag_declared_negative": {
+      "boundary": ["you said you dislike {tags}", "your declared preference for {tags} is negative", "you explicitly marked {tags} as unappealing"]
+    },
+    "fit.cooldown": {
+      "boundary": ["you watched this relatively recently", "it may need a little more time to feel fresh", "recency is holding this back for now"]
+    },
+    "fit.not_now": {
+      "boundary": ["your recent Not now feedback still applies", "you asked to leave this for later", "the temporary Not now signal is still active"]
+    },
+    "explore.challenge": {
+      "boundary": ["the deliberate stretch is {challenge}", "{challenge} is the part being tested here", "this asks you to reconsider {challenge}"]
+    },
+    "explore.coverage": {
+      "boundary": ["{facet} is a dark spot in your history", "this comes from {facet}, which you have barely explored", "{facet} has almost no play history to go on"]
+    },
+    "explore.unknown": {
+      "boundary": ["the evidence here is limited", "this is a less-tested direction", "your history does not give a clear answer yet"]
+    },
+    "fallback": {
+      "lead": ["the evidence is limited", "this is a less-tested direction", "the model has only a weak signal here"],
+      "support": ["there is some supporting evidence", "the available evidence is modest", "the model has limited corroboration"],
+      "boundary": ["the evidence is still uncertain", "confidence is limited", "the model has only a weak signal here"]
+    }
+  }
+}

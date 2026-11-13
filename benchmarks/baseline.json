@@ -1,0 +1,40 @@
+{
+  "corpus": {
+    "seed": 124,
+    "n_scenes": 6000,
+    "n_tags": 2000,
+    "n_performers": 2500,
+    "known_performers": 50
+  },
+  "machine": {
+    "hostname": "johan-Standard-PC-i440FX-PIIX-1996",
+    "cpu_model": "QEMU Virtual CPU version 2.5+"
+  },
+  "measured_at": "2026-08-21 19:44:59 UTC",
+  "multiplier": 2.5,
+  "stages": {
+    "feature_lookup": 1663,
+    "feature_build": 6073,
+    "feature_database_writing": 13697,
+    "feature_indexing": 1469,
+    "feature_validation": 203,
+    "feature_publication": 18,
+    "feature_total": 23826,
+    "labels": 23,
+    "affinities": 8066,
+    "similarity": 12305,
+    "scoring": 4829,
+    "database_writing": 8295,
+    "lane_classification": 13962,
+    "score_first_ordering": 0,
+    "varied_ordering": 2715,
+    "reason_generation": 0,
+    "sqlite_index_creation": 49,
+    "indexing": 16727,
+    "validation": 2,
+    "publication": 42,
+    "cleanup": 1,
+    "total": 74167
+  },
+  "total_ms": 74564
+}

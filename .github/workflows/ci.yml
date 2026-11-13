@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # The plugin runtime is the compiled Go core; Python exists only as the
+  # test harness and differential oracle, so a single interpreter leg is
+  # sufficient (the differential gates compare behavior, not Python versions).
+  quality:
+    name: Quality (Python 3.12)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.21"
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install Go (compiled core is a dev dependency)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: core/go.sum
+      - name: Install zig (C cross-compiler for the sqlite driver)
+        run: |
+          curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+          tar -C "$HOME" -xf /tmp/zig.tar.xz
+          echo "$HOME/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+      - name: Cache Go and zig build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/.cache/zig
+          key: build-${{ runner.os }}-${{ hashFiles('core/go.mod', 'core/go.sum') }}-${{ hashFiles('core/*.go') }}
+          restore-keys: |
+            build-${{ runner.os }}-
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - name: Verify
+        run: scripts/verify full
+      - uses: actions/upload-artifact@v7
+        with:
+          name: stash-curator-plugin
+          path: |
+            dist/stash-curator.zip
+            dist/index.yml
+
+  core:
+    name: Compiled core (Go)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: core/go.sum
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.21"
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --locked
+      - name: Differential gate (binary vs numpy)
+        run: scripts/verify core
+
+  integration:
+    name: Integration (Playwright, ${{ matrix.shard.name }})
+    runs-on: ubuntu-latest
+    # The suite takes about 3 minutes per shard; the margin absorbs a slow
+    # runner without hiding a hung test for long.
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two shards, each with its own Stash: the roulette tests wait on real
+        # animations and take about half the suite on their own.
+        shard:
+          - name: roulette
+            tests: tests/integration/test_roulette.py
+          - name: rest
+            tests: tests/integration/ --ignore=tests/integration/test_roulette.py
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.21"
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install Go (plugin packaging builds the compiled core)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: core/go.sum
+      - name: Install zig (C cross-compiler for the sqlite driver)
+        run: |
+          curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+          tar -C "$HOME" -xf /tmp/zig.tar.xz
+          echo "$HOME/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+      - name: Cache Go and zig build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/.cache/zig
+          key: build-${{ runner.os }}-${{ hashFiles('core/go.mod', 'core/go.sum') }}-${{ hashFiles('core/*.go') }}
+          restore-keys: |
+            build-${{ runner.os }}-
+      - name: Install dependencies
+        run: uv sync --locked --group integration
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          # Playwright is pinned in uv.lock (1.62.0); an exact-hash key means the
+          # browser download is skipped on cache hit and busted only when the lock
+          # actually changes. No loose restore-key: a mismatched browser version
+          # would force a re-download anyway.
+          key: playwright-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+      # Only the headless shell, without --with-deps: the runner image already
+      # has its libraries, and the apt step (fonts, xvfb) was the one that
+      # stalled for minutes on a slow mirror.
+      - name: Install Playwright browsers
+        run: uv run playwright install --only-shell chromium
+      - name: Run integration tests
+        run: scripts/verify integration ${{ matrix.shard.tests }}
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: integration-artifacts-${{ matrix.shard.name }}
+          path: /tmp/stash-curator-integration-test-output/

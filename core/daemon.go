@@ -1,0 +1,1118 @@
+// Background task worker (docs/decisions/004): a detached, Curator-owned
+// process that claims and executes queued curator_job rows, so long-running
+// tasks stop occupying Stash's single-slot job queue. The daemon is this
+// binary in a new mode — `curator-core <pluginDir> daemon` — spawned by the
+// enqueuer (ensureWorker) with a new session and log-file stdio so it
+// survives the invoking Stash job. Interactive ops keep the one-process-
+// per-request raw-plugin protocol unchanged; only the task path changes.
+//
+// Liveness is ownership-based: running rows carry owner_pid + heartbeat_at_ms
+// written by the executing process, replacing the old 120s/6h heuristics that
+// inferred liveness from Stash's job list (which no longer shows the work).
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"runtime"
+	"runtime/debug"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+)
+
+// Worker process tuning. The two hot-loop values are vars so Go tests can
+// shorten them; the staleness windows stay constants (tests pin time via
+// timeNowUnixMilli).
+const (
+	heartbeatStaleMs = 5 * 60_000    // running rows older than this are orphans
+	legacyStaleMs    = 6 * 3_600_000 // pre-heartbeat rows keep the old window
+	idleExitMs       = 5 * 60_000    // exit after this long with no queued work
+	claimPollMs      = 1_000
+)
+
+var (
+	heartbeatIntervalMs = 20_000 // liveness write while a job runs
+	progressDebounceMs  = 500    // cap progress writes during a build
+	workerCheckMs       = 5_000  // detect replacement of the installed binary
+	workerStopWaitMs    = 2_000  // grace period before forcing stale workers down
+	// schedulerFailureLimit is the number of consecutive auto-scheduler
+	// failures (a sidecar that will not open or a build loop that cannot make
+	// progress) before the daemon retires. A runaway loop keeps re-enqueuing
+	// a task that fails at sidecar open (e.g. the installed binary is older
+	// than the sidecar's schema); retiring hands the queue back to a fresh
+	// daemon spawned by the next Curator invocation with the current binary,
+	// instead of spinning forever.
+	schedulerFailureLimit = 3
+)
+
+// workerState is written by the enqueuer (which has the Stash payload) and
+// re-read by the daemon (which has none): where the sidecar lives and how to
+// reach Stash for the per-job settings fetch. BinaryFingerprint identifies
+// the exact installed executable generation so an old resident daemon cannot
+// survive a plugin update.
+type workerState struct {
+	DatabasePath      string            `json:"database_path"`
+	StashBase         string            `json:"stash_base"`
+	StashHeaders      map[string]string `json:"stash_headers"`
+	ServerConnection  string            `json:"server_connection,omitempty"`
+	BinaryFingerprint string            `json:"binary_fingerprint,omitempty"`
+}
+
+func workerStatePath(pluginDir string) string {
+	return filepath.Join(pluginDir, "data", "curator-worker.json")
+}
+
+func workerPidPath(pluginDir string) string {
+	return filepath.Join(pluginDir, "data", "curator-daemon.pid")
+}
+
+func workerLogPath(pluginDir string) string {
+	return filepath.Join(pluginDir, "data", "curator-daemon.log")
+}
+
+func workerStateDataDir(pluginDir string) string {
+	return filepath.Join(pluginDir, "data")
+}
+
+func curatorPageActive(pluginDir string, now int64) bool {
+	info, err := os.Stat(filepath.Join(workerStateDataDir(pluginDir), "curator-page-active"))
+	return err == nil && now-info.ModTime().UnixMilli() < 90_000
+}
+
+// checkWorkerStateWritable fails before a task mutates the sidecar when the
+// caller cannot coordinate with the daemon. This is especially important for
+// direct invocations under a different UID from the Stash container.
+func checkWorkerStateWritable(pluginDir string) error {
+	directory := workerStateDataDir(pluginDir)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return fmt.Errorf("could not create worker state directory: %w", err)
+	}
+	temporary, err := os.CreateTemp(directory, ".curator-worker-probe-*")
+	if err != nil {
+		return fmt.Errorf("worker state directory is not writable: %w", err)
+	}
+	name := temporary.Name()
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(name)
+		return fmt.Errorf("could not close worker state probe: %w", err)
+	}
+	if err := os.Remove(name); err != nil {
+		return fmt.Errorf("could not remove worker state probe: %w", err)
+	}
+	return nil
+}
+
+var checkWorkerStateWritableFn = checkWorkerStateWritable
+
+func writeWorkerState(pluginDir string, state workerState) error {
+	directory := workerStateDataDir(pluginDir)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp(directory, ".curator-worker-*.tmp")
+	if err != nil {
+		return err
+	}
+	temporaryName := temporary.Name()
+	cleanup := func() {
+		_ = temporary.Close()
+		_ = os.Remove(temporaryName)
+	}
+	if err := temporary.Chmod(0o644); err != nil {
+		cleanup()
+		return err
+	}
+	if _, err := temporary.Write(raw); err != nil {
+		cleanup()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		_ = os.Remove(temporaryName)
+		return err
+	}
+	if err := os.Rename(temporaryName, workerStatePath(pluginDir)); err != nil {
+		_ = os.Remove(temporaryName)
+		return err
+	}
+	return nil
+}
+
+func readWorkerState(pluginDir string) (workerState, error) {
+	var state workerState
+	raw, err := os.ReadFile(workerStatePath(pluginDir))
+	if err != nil {
+		return state, err
+	}
+	err = json.Unmarshal(raw, &state)
+	return state, err
+}
+
+func readWorkerPid(pluginDir string) (int, bool) {
+	raw, err := os.ReadFile(workerPidPath(pluginDir))
+	if err != nil {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
+}
+
+// workerBinaryPath returns the installed platform binary. Development builds
+// use the running executable when the packaged per-arch name is absent.
+func workerBinaryPath(pluginDir string) string {
+	name := fmt.Sprintf("curator-core-%s-%s", runtime.GOOS, runtime.GOARCH)
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	candidate := filepath.Join(pluginDir, name)
+	if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+		return candidate
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return exe
+}
+
+// workerBinaryFingerprint changes when a plugin update replaces the running
+// executable. File identity catches atomic replacement; size and mtime catch
+// in-place replacement on platforms without a portable file identity.
+func workerBinaryFingerprint(pluginDir string) (string, error) {
+	path := workerBinaryPath(pluginDir)
+	if path == "" {
+		return "", fmt.Errorf("could not resolve curator-core executable")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s|%s|%d|%d|%o", filepath.Clean(path), workerFileIdentity(info),
+		info.Size(), info.ModTime().UnixNano(), info.Mode().Perm()), nil
+}
+
+// binaryIdentity is the device/inode + size + mtime of a file. This, not the
+// path, is what distinguishes one executable generation from another: a worker
+// that survives a plugin update keeps executing the replaced inode (NFS
+// silly-rename leaves it on a `.nfs…` file), so its path may not be the
+// installed path even though the code it runs is not current. Comparing
+// identities — not the installed-path fingerprint — is what catches that.
+func binaryIdentity(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s|%d|%d", workerFileIdentity(info), info.Size(), info.ModTime().UnixNano()), nil
+}
+
+// workerBinaryIdentity is the identity of the installed executable the worker
+// should be running.
+func workerBinaryIdentity(pluginDir string) (string, error) {
+	path := workerBinaryPath(pluginDir)
+	if path == "" {
+		return "", fmt.Errorf("could not resolve curator-core executable")
+	}
+	return binaryIdentity(path)
+}
+
+// workerProcessFingerprint is the execution identity of a live process: what
+// it is actually running. On Windows `/proc` does not exist, so this errors
+// and the caller degrades to the pid-file path.
+func workerProcessFingerprint(pid int) (string, error) {
+	return binaryIdentity(fmt.Sprintf("/proc/%d/exe", pid))
+}
+
+// selfExeIdentity is the running executable's identity for this process, read
+// through `/proc/self/exe` so it reflects the inode actually executing (the
+// path `os.Executable()` returns would resolve to whatever the path now holds,
+// not the inode this process was started with).
+func selfExeIdentity() (string, error) {
+	return binaryIdentity("/proc/self/exe")
+}
+
+// listWorkerDaemons enumerates live worker daemons by argv, so reconciliation
+// can find every co-resident daemon even when the pid file points at a dead or
+// unrelated pid. Returns nil on Windows (no `/proc`).
+func listWorkerDaemons(pluginDir string) []int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 0 {
+			continue
+		}
+		if workerPidIsWorker(pid, pluginDir) && pidAlive(pid) {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// workerPidAliveFn, workerPidIsWorkerFn, stopWorkerFn, and the discovery
+// functions are injectable so worker-lifecycle tests never touch real
+// processes or `/proc`.
+var workerPidAliveFn = pidAlive
+
+var workerPidIsWorkerFn = workerPidIsWorker
+
+// stopWorkerFn is injectable so rotation tests never signal a real process.
+var stopWorkerFn = stopWorker
+
+// listWorkerDaemonsFn and workerProcessFingerprintFn are injectable so
+// reconciliation can be tested against a synthetic worker set.
+var listWorkerDaemonsFn = listWorkerDaemons
+
+var workerProcessFingerprintFn = workerProcessFingerprint
+
+var selfExeIdentityFn = selfExeIdentity
+
+// daemonRunningStale reports whether this process is executing a binary other
+// than the installed one, read through the running inode (`/proc/self/exe`) so
+// a worker that kept a replaced inode open (NFS silly-rename) is detected even
+// though the installed path still reads clean. A daemon running anything but
+// the installed executable must not do work.
+func daemonRunningStale(pluginDir string) bool {
+	own, err := selfExeIdentityFn()
+	if err != nil {
+		return false
+	}
+	installed, err := workerBinaryIdentity(pluginDir)
+	if err != nil {
+		return false
+	}
+	return own != installed
+}
+
+// isSchemaSkewError reports whether a sidecar error means the installed
+// binary's migration set is older than the sidecar schema. The daemon cannot
+// make progress against such a sidecar (the open and every query fail), and
+// retrying only re-enqueues a task that can never run, so the daemon retires
+// and the next Curator invocation spawns a fresh worker with the current
+// binary.
+func isSchemaSkewError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "unknown migration versions") ||
+		strings.Contains(msg, "does not match the packaged checksum")
+}
+
+func removeWorkerPidIfOwned(pluginDir string) {
+	if pid, ok := readWorkerPid(pluginDir); ok && pid == os.Getpid() {
+		_ = os.Remove(workerPidPath(pluginDir))
+	}
+}
+
+// handoverWorker hands the resident worker to the newly installed binary:
+// refresh the worker-state fingerprint, drop the pid file, and spawn the
+// successor (os.Executable() resolves the replaced file, so the spawn is the
+// new generation). Best-effort — on any failure the next Curator invocation
+// spawns the new generation as before, so the daemon is never left in a
+// worse state than without the handover.
+func handoverWorker(pluginDir string) {
+	fresh, err := readWorkerState(pluginDir)
+	if err != nil {
+		return
+	}
+	fingerprint, err := workerBinaryFingerprint(pluginDir)
+	if err != nil {
+		return
+	}
+	fresh.BinaryFingerprint = fingerprint
+	if err := writeWorkerState(pluginDir, fresh); err != nil {
+		return
+	}
+	// Drop the pid before spawning: the successor refuses to start while a
+	// live worker pid is recorded. The deferred removeWorkerPidIfOwned on
+	// exit is ownership-guarded, so it cannot remove the successor's pid.
+	removeWorkerPidIfOwned(pluginDir)
+	infoLog("daemon handing over to the updated binary")
+	_ = spawnWorkerFn(pluginDir)
+}
+
+func stopWorker(pid int) error {
+	if !pidAlive(pid) {
+		return nil
+	}
+	if err := terminateWorker(pid); err != nil && pidAlive(pid) {
+		return err
+	}
+	deadline := time.Now().Add(time.Duration(workerStopWaitMs) * time.Millisecond)
+	for pidAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !pidAlive(pid) {
+		return nil
+	}
+	return forceKillWorker(pid)
+}
+
+// rotateStaleWorker stops live daemons whose generation predates the installed
+// executable. It reconciles by executable identity (so a daemon still running
+// a replaced inode — an NFS `.nfs…` orphan the pid file does not record — is
+// reclaimed) and then falls back to the pid file so a non-worker pid marker is
+// cleared on platforms without `/proc`.
+//
+// The pid-file branch kills only on a CONFIRMED generation mismatch. The
+// state file is coordination metadata on the plugin volume (often NFS, where
+// every invocation renames it and concurrent readers hit stale file
+// handles): a read error — or a missing file — is not evidence of a stale
+// generation, and treating it as one SIGTERMs a live worker mid-job,
+// cancelling whatever task it is running. The executable-identity
+// reconciliation above is the authoritative generation check.
+func rotateStaleWorker(pluginDir, fingerprint string) error {
+	if err := rotateStaleWorkersByExecutable(pluginDir); err != nil {
+		return err
+	}
+	pid, ok := readWorkerPid(pluginDir)
+	if !ok || !workerPidAliveFn(pid) {
+		return nil
+	}
+	if !workerPidIsWorkerFn(pid, pluginDir) {
+		_ = os.Remove(workerPidPath(pluginDir))
+		return nil
+	}
+	state, err := readWorkerState(pluginDir)
+	if err != nil {
+		return nil
+	}
+	if state.BinaryFingerprint == fingerprint {
+		return nil
+	}
+	if err := stopWorkerFn(pid); err != nil {
+		return fmt.Errorf("could not stop stale Curator daemon %d: %w", pid, err)
+	}
+	return nil
+}
+
+// rotateStaleWorkersByExecutable stops every live worker daemon that is not
+// running the installed binary. Unlike the pid-file path it discovers all
+// co-resident daemons by argv, so a worker that survived a plugin update on a
+// replaced inode (an NFS `.nfs…` orphan) is reclaimed even though it was never
+// the pid-file owner. Best-effort: a daemon that cannot be fingerprinted is
+// skipped rather than signalled.
+func rotateStaleWorkersByExecutable(pluginDir string) error {
+	installed, err := workerBinaryIdentity(pluginDir)
+	if err != nil {
+		return err
+	}
+	for _, pid := range listWorkerDaemonsFn(pluginDir) {
+		running, err := workerProcessFingerprintFn(pid)
+		if err != nil || running == installed {
+			continue
+		}
+		if err := stopWorkerFn(pid); err != nil {
+			return fmt.Errorf("could not stop stale Curator daemon %d: %w", pid, err)
+		}
+	}
+	return nil
+}
+
+// currentWorkerDaemon returns the live daemon running the installed
+// executable, discovered by argv, or 0 when none. It is used to adopt an
+// existing current-generation worker that the pid file does not record (a
+// stale pid marker, or a worker that pre-dated it) instead of spawning a
+// duplicate.
+func currentWorkerDaemon(pluginDir string) int {
+	installed, err := workerBinaryIdentity(pluginDir)
+	if err != nil {
+		return 0
+	}
+	for _, pid := range listWorkerDaemonsFn(pluginDir) {
+		running, err := workerProcessFingerprintFn(pid)
+		if err == nil && running == installed {
+			return pid
+		}
+	}
+	return 0
+}
+
+func workerUpdateWatcher(pluginDir, initialFingerprint string, changed chan<- struct{}, done <-chan struct{}) {
+	ticker := time.NewTicker(time.Duration(workerCheckMs) * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			current, err := workerBinaryFingerprint(pluginDir)
+			if err != nil || current == initialFingerprint {
+				continue
+			}
+			infoLog("installed curator-core changed; daemon retiring")
+			select {
+			case changed <- struct{}{}:
+			case <-done:
+			}
+			return
+		}
+	}
+}
+
+// spawnWorkerFn is injectable so Go tests can force the inline fallback
+// instead of exec'ing the test binary as a daemon.
+var spawnWorkerFn = spawnWorker
+
+// spawnWorker starts the daemon detached from Stash's process tree: a new
+// session (setsid), stdin from /dev/null, stdout/stderr appended to the
+// worker log. The parent exits right after, so the child is reparented to
+// init instead of being killed with the Stash job. Deliberately no Wait:
+// the enqueuer exits immediately and init reaps the child.
+func spawnWorker(pluginDir string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(workerLogPath(pluginDir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		logFile.Close()
+		return err
+	}
+	cmd := exec.Command(exe, pluginDir, "daemon")
+	cmd.Env = workerEnvironment()
+	cmd.SysProcAttr = daemonSysProcAttr()
+	cmd.Stdin = devnull
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		devnull.Close()
+		logFile.Close()
+		return err
+	}
+	devnull.Close()
+	logFile.Close()
+	return nil
+}
+
+// The worker starts its own captures; inheriting an enqueue capture would
+// profile the daemon forever and prevent per-job CPU profiling.
+func workerEnvironment() []string {
+	var env []string
+	for _, item := range os.Environ() {
+		if !strings.HasPrefix(item, "CURATOR_CORE_CPU_PROFILE_DIR=") && !strings.HasPrefix(item, "CURATOR_CORE_MEM_PROFILE_DIR=") {
+			env = append(env, item)
+		}
+	}
+	return env
+}
+
+// ensureAutoWorker spawns the daemon when schedules or auto tasks are
+// enabled and none is running. Unlike ensureWorker (task-driven, only spawns
+// when a job is queued), this must spawn even with an empty queue — the
+// scheduler inside the daemon seeds and runs the schedules itself. Called
+// from every API-sidecar open, so any Curator activity (including the
+// Settings panel's own reload after a toggle) spawns or keeps the worker.
+func ensureAutoWorker(pluginDir string, payload jVal, settings jVal, db dbx) {
+	cfg, err := sidecarConfig(db)
+	if err != nil {
+		return
+	}
+	config := cfg.get("config")
+	if !config.get("auto_tasks_enabled").truthy() && !anyScheduleEnabled(config) {
+		return
+	}
+	fingerprint, err := workerBinaryFingerprint(pluginDir)
+	if err != nil || rotateStaleWorker(pluginDir, fingerprint) != nil {
+		return
+	}
+	base, headers := stashConnection(payload)
+	serverConn, _ := marshalJVal(payload.get("server_connection"))
+	state := workerState{
+		DatabasePath:      databasePath(pluginDir, payload, settings),
+		StashBase:         base,
+		StashHeaders:      headers,
+		ServerConnection:  serverConn,
+		BinaryFingerprint: fingerprint,
+	}
+	// Reuse a live pid-file owner directly; on platforms without `/proc`
+	// (Windows) this is the only ownership signal.
+	if pid, ok := readWorkerPid(pluginDir); ok && workerPidAliveFn(pid) && workerPidIsWorkerFn(pid, pluginDir) {
+		if err := writeWorkerState(pluginDir, state); err != nil {
+			return
+		}
+		return
+	}
+	// The pid file may be stale (it points at a dead or unrelated pid) while a
+	// current-generation worker is still alive. Adopt it instead of spawning a
+	// duplicate daemon, and record its pid so later cleanup sees it.
+	if pid := currentWorkerDaemon(pluginDir); pid > 0 {
+		_ = os.WriteFile(workerPidPath(pluginDir), []byte(strconv.Itoa(pid)), 0o644)
+		if err := writeWorkerState(pluginDir, state); err != nil {
+			return
+		}
+		return
+	}
+	recoverOrphanJobs(db, nowMs())
+	if err := writeWorkerState(pluginDir, state); err != nil {
+		return
+	}
+	_ = spawnWorkerFn(pluginDir)
+}
+
+// recoverOrphanJobs fails running rows whose executing process is gone:
+// heartbeat stale (a daemon or inline runner died) or, for pre-heartbeat
+// rows, older than the legacy 6h stale window. It also records the same
+// interrupted state on the model-update tracker a build leaves behind.
+// Idempotent, safe on every call path (enqueue, health, daemon startup).
+func recoverOrphanJobs(db dbx, now int64) {
+	execImmediate(db, `UPDATE curator_job SET state='failed', finished_at_ms=?, error='interrupted'
+WHERE state='running' AND heartbeat_at_ms IS NOT NULL AND heartbeat_at_ms<=?`,
+		now, now-heartbeatStaleMs)
+	execImmediate(db, `UPDATE curator_job SET state='failed', finished_at_ms=?, error='interrupted'
+WHERE state='running' AND heartbeat_at_ms IS NULL AND started_at_ms<=?`,
+		now, now-legacyStaleMs)
+	execImmediate(db, `UPDATE model_update_state SET last_error='interrupted before task completion'
+WHERE last_started_at_ms IS NOT NULL
+AND last_started_at_ms>COALESCE(last_finished_at_ms, -1)
+AND last_error IS NULL
+AND NOT EXISTS (SELECT 1 FROM curator_job WHERE state='running'
+AND job_type IN ('build','force-build','update-model','sync-build','full-sync-build'))`)
+}
+
+// ensureWorker guarantees a daemon exists whenever there is queued work. The
+// enqueuer calls it after inserting a queued row; health calls it so a
+// crashed daemon's orphans are recovered and its queue restarts. A live pid
+// is reused only when its recorded binary fingerprint matches the installed
+// executable; otherwise it is terminated before the new worker is spawned.
+// The sidecar is opened (and migrated) before the state file is written, so a
+// freshly spawned daemon never sees an un-migrated database path.
+func ensureWorker(pluginDir string, payload jVal, settings jVal) error {
+	base, headers := stashConnection(payload)
+	serverConn, _ := marshalJVal(payload.get("server_connection"))
+	fingerprint, err := workerBinaryFingerprint(pluginDir)
+	if err != nil {
+		return fmt.Errorf("could not identify curator-core executable: %w", err)
+	}
+	if err := rotateStaleWorker(pluginDir, fingerprint); err != nil {
+		return err
+	}
+	state := workerState{
+		DatabasePath:      databasePath(pluginDir, payload, settings),
+		StashBase:         base,
+		StashHeaders:      headers,
+		ServerConnection:  serverConn,
+		BinaryFingerprint: fingerprint,
+	}
+	// Reuse a live pid-file owner directly; on platforms without `/proc`
+	// (Windows) this is the only ownership signal.
+	if pid, ok := readWorkerPid(pluginDir); ok && workerPidAliveFn(pid) && workerPidIsWorkerFn(pid, pluginDir) {
+		if err := writeWorkerState(pluginDir, state); err != nil {
+			return fmt.Errorf("could not write worker state: %w", err)
+		}
+		return nil
+	}
+	// The pid file may be stale (it points at a dead or unrelated pid) while a
+	// current-generation worker is still alive. Adopt it instead of spawning a
+	// duplicate daemon, and record its pid so later cleanup sees it.
+	if pid := currentWorkerDaemon(pluginDir); pid > 0 {
+		_ = os.WriteFile(workerPidPath(pluginDir), []byte(strconv.Itoa(pid)), 0o644)
+		if err := writeWorkerState(pluginDir, state); err != nil {
+			return fmt.Errorf("could not write worker state: %w", err)
+		}
+		return nil
+	}
+	// The worker coordination here only migrates the sidecar and checks the
+	// queue; the published-model artifact is attached per-job (when a task
+	// actually needs it) inside the worker, not while deciding to spawn one.
+	db, err := openSidecar(pluginDir, payload, settings, false)
+	if err != nil {
+		return fmt.Errorf("could not open sidecar to recover worker: %w", err)
+	}
+	recoverOrphanJobs(db, nowMs())
+	var queued int
+	scanErr := db.QueryRow(`SELECT 1 FROM curator_job WHERE state='queued' LIMIT 1`).Scan(&queued)
+	db.Close()
+	if scanErr != nil && scanErr != sql.ErrNoRows {
+		return scanErr
+	}
+	if scanErr == sql.ErrNoRows {
+		return nil // nothing to run; the caller handles its own row inline
+	}
+	if err := writeWorkerState(pluginDir, state); err != nil {
+		return fmt.Errorf("could not write worker state: %w", err)
+	}
+	return spawnWorkerFn(pluginDir)
+}
+
+// restartWorker force-restarts the resident Curator worker. Unlike the
+// stale-generation rotation (rotateStaleWorker), it stops a live worker
+// unconditionally, so a wedged current-generation worker — a stuck 'running'
+// curator_job row with a live heartbeat, e.g. a backup that never advances —
+// can be cleared on demand instead of requiring a plugin/container reload.
+// Because the stop's SIGTERM handler marks the in-flight job cancelled, a
+// live running job refuses the restart unless args.force is set: stale
+// rows are recovered first (a dead worker's orphans never block), and only
+// a fresh-heartbeat row — a job a live daemon actually owns — asks for the
+// explicit override. The caller supplies force after user confirmation.
+// Best-effort: on any failure the next Curator invocation spawns the worker
+// as before.
+func restartWorker(pluginDir string, payload, settings jVal, db dbx) (jVal, error) {
+	force := payload.get("args").get("force").truthy()
+	recoverOrphanJobs(db, nowMs())
+	var runningJobType string
+	err := db.QueryRow(`SELECT job_type FROM curator_job WHERE state='running'
+ORDER BY started_at_ms DESC LIMIT 1`).Scan(&runningJobType)
+	if err != nil && err != sql.ErrNoRows {
+		return jvNull(), err
+	}
+	// Advisory single-flight check (no lock): a job claimed between this
+	// probe and the stop below is still cancelled — the frontend confirm is
+	// the primary guard, force is the escape hatch.
+	if err == nil && !force {
+		return jvObj(
+			jvKey("refused", jvBool(true)),
+			jvKey("running_job_type", jvStr(runningJobType)),
+			jvKey("reason", jvStr(fmt.Sprintf("a Curator task is running (%s); restarting the worker cancels it", runningJobType))),
+		), nil
+	}
+	pid, hasPid := readWorkerPid(pluginDir)
+	restarted := false
+	if hasPid && workerPidAliveFn(pid) && workerPidIsWorkerFn(pid, pluginDir) {
+		if err := stopWorkerFn(pid); err != nil {
+			return jvNull(), fmt.Errorf("could not stop Curator worker %d: %w", pid, err)
+		}
+		restarted = true
+	}
+	if hasPid {
+		// Always clear the pid marker (a live worker we stopped, or a stale
+		// pid pointing at a dead/unrelated process) so a fresh worker can
+		// spawn without the successor's stale-owner guard refusing it.
+		_ = os.Remove(workerPidPath(pluginDir))
+	}
+	// Spawn a fresh worker when schedules/auto tasks need one. ensureAutoWorker
+	// reuses a live pid only when its generation matches; after the stop above
+	// the pid is gone, so it spawns the current binary.
+	ensureAutoWorker(pluginDir, payload, settings, db)
+	newPid, _ := readWorkerPid(pluginDir)
+	result := jvObj(
+		jvKey("restarted", jvBool(restarted)),
+		jvKey("stopped_pid", jvNull()),
+		jvKey("worker_pid", jvNull()),
+	)
+	if hasPid {
+		result.set("stopped_pid", jvInt(int64(pid)))
+	}
+	if newPid > 0 {
+		result.set("worker_pid", jvInt(int64(newPid)))
+	}
+	return result, nil
+}
+
+// runDaemon is the worker main loop, served by `curator-core <pluginDir>
+// daemon`. It claims queued jobs one at a time, executes them with the same
+// mode bodies the inline path uses, heartbeats and reports progress through
+// the sidecar, recovers orphans at startup, and exits after an idle period
+// so an idle plugin runs no resident process.
+func runDaemon(pluginDir string) {
+	// Before anything else, and only on this path: the daemon is background
+	// work competing with a Stash the user is actively using. Foreground
+	// plugin invocations deliberately do not call this.
+	lowerWorkerPriority()
+	if os.Getenv("GOMEMLIMIT") == "" {
+		if budget := workerMemoryBudget("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"); budget > 0 {
+			debug.SetMemoryLimit(budget)
+			os.Setenv("GOMEMLIMIT", strconv.FormatInt(budget, 10))
+			infoLog(fmt.Sprintf("worker Go memory budget: %d MiB", budget>>20))
+		}
+	}
+	// Builds are SQLite-bound, so trading GC work for headroom is cheap: on a
+	// 24k-scene synthetic corpus GOGC=50 cut build peak RSS by ~20%.
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(workerGCPercent)
+		os.Setenv("GOGC", strconv.Itoa(workerGCPercent))
+	}
+
+	state, err := readWorkerState(pluginDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "curator-core daemon: no worker state (%v); the daemon is only spawned from a Curator invocation\n", err)
+		os.Exit(1)
+	}
+	daemonFingerprint, err := workerBinaryFingerprint(pluginDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "curator-core daemon: could not identify executable: %v\n", err)
+		os.Exit(1)
+	}
+	if state.BinaryFingerprint != "" && state.BinaryFingerprint != daemonFingerprint {
+		infoLog("daemon generation is stale; exiting")
+		return
+	}
+	// The installed-path fingerprint above cannot see a daemon that survived a
+	// plugin update by keeping the replaced inode open (NFS silly-rename): it
+	// still reads the current path, not the inode that is actually executing.
+	// A daemon running anything but the installed binary is untrustworthy.
+	if daemonRunningStale(pluginDir) {
+		infoLog("daemon running a replaced executable; exiting")
+		return
+	}
+	if pid, ok := readWorkerPid(pluginDir); ok && pid != os.Getpid() && workerPidAliveFn(pid) && workerPidIsWorkerFn(pid, pluginDir) {
+		// A concurrent spawn won the race; it owns the worker.
+		os.Exit(0)
+	}
+	if err := os.WriteFile(workerPidPath(pluginDir), []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "curator-core daemon: could not write pid file: %v\n", err)
+		os.Exit(1)
+	}
+	defer removeWorkerPidIfOwned(pluginDir)
+
+	daemonExitOnCancel = true
+	loop, loopPath := openDaemonLoop(pluginDir, state)
+	if loop == nil {
+		os.Exit(1)
+	}
+	defer loop.Close()
+
+	// Graceful shutdown: mark the in-flight job cancelled and exit.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sigCh)
+	go func() {
+		<-sigCh
+		markRunningCancelled(loop)
+		removeWorkerPidIfOwned(pluginDir)
+		os.Exit(0)
+	}()
+
+	updateDone := make(chan struct{})
+	updateDetected := make(chan struct{}, 1)
+	go workerUpdateWatcher(pluginDir, daemonFingerprint, updateDetected, updateDone)
+	defer close(updateDone)
+
+	recoverOrphanJobs(loop, nowMs())
+	autoPayload := autoPayloadFromState(state)
+	lastTick := nowMs()
+	idleSince := nowMs()
+	schedulerFailures := 0
+	for {
+		select {
+		case <-updateDetected:
+			// Let an active job finish, but do not claim more work under the
+			// old executable. Hand over to the new generation immediately so
+			// scheduled work keeps firing even when no Curator invocation
+			// follows the plugin update (an idle system would otherwise miss
+			// the next schedule window until the next op).
+			handoverWorker(pluginDir)
+			infoLog("daemon stopped after plugin update")
+			return
+		default:
+		}
+		// Re-read the worker state each pass so a databasePath change (or a
+		// per-sidecar test harness) takes effect without a daemon restart.
+		if fresh, err := readWorkerState(pluginDir); err == nil {
+			path := fresh.DatabasePath
+			if path == "" {
+				path = filepath.Join(pluginDir, "data", "curator.sqlite3")
+			}
+			if path != loopPath {
+				if next, _ := openDaemonLoop(pluginDir, fresh); next != nil {
+					loop.Close()
+					loop = next
+					loopPath = path
+				}
+			}
+			autoPayload = autoPayloadFromState(fresh)
+		}
+		now := nowMs()
+		pageActive := curatorPageActive(pluginDir, now)
+		if pageActive {
+			idleSince = now // stay available to resume deferred work when the page closes
+		}
+		if !pageActive && now-lastTick >= autoTickMs {
+			lastTick = now
+			if enqueued, err := schedulerTick(loop, autoPayload, now); err != nil {
+				errorLog("auto-scheduler failed: " + err.Error())
+				schedulerFailures++
+				if isSchemaSkewError(err) {
+					// The installed binary is older than the sidecar schema;
+					// retrying cannot help. Retire so a fresh daemon with the
+					// current binary takes over on the next invocation.
+					infoLog("daemon retiring: schema is newer than the installed binary")
+					return
+				}
+				if schedulerFailures >= schedulerFailureLimit {
+					infoLog(fmt.Sprintf("daemon retiring after %d consecutive auto-scheduler failures", schedulerFailures))
+					return
+				}
+			} else {
+				for _, mode := range enqueued {
+					infoLog("auto-enqueued task " + mode)
+				}
+				schedulerFailures = 0
+			}
+		}
+		jobID, startedAtMs, payload, mode, err := claimQueuedJob(loop, pageActive)
+		if err != nil {
+			errorLog("daemon claim failed: " + err.Error())
+			time.Sleep(claimPollMs * time.Millisecond)
+			continue
+		}
+		if jobID != "" {
+			idleSince = nowMs()
+			if runWorkerJob(pluginDir, loop, jobID, startedAtMs, payload, mode) {
+				infoLog("daemon retiring: schema is newer than the installed binary")
+				return
+			}
+			// The job's peak is garbage now, and the daemon may stay resident
+			// for a while yet (see the stay-alive check below), so give the
+			// pages back rather than idling at the build's high-water mark.
+			releaseMemoryToOS()
+			continue
+		}
+		// Idle-exit only when nothing is queued AND the auto-scheduler has no
+		// pending work (a dirty model or unsynced plays keep the daemon alive
+		// so the gated update fires without a browser tab).
+		stayAlive, stayErr := schedulerStayAlive(loop, nowMs())
+		if stayErr != nil {
+			errorLog("stay-alive check failed: " + stayErr.Error())
+			schedulerFailures++
+			if isSchemaSkewError(stayErr) {
+				infoLog("daemon retiring: schema is newer than the installed binary")
+				return
+			}
+			if schedulerFailures >= schedulerFailureLimit {
+				infoLog(fmt.Sprintf("daemon retiring after %d consecutive auto-scheduler failures", schedulerFailures))
+				return
+			}
+		} else if schedulerFailures > 0 {
+			// A healthy pass means the sidecar is reachable again; reset.
+			schedulerFailures = 0
+		}
+		if !stayAlive && nowMs()-idleSince > idleExitMs {
+			infoLog("daemon idle; exiting")
+			return
+		}
+		time.Sleep(claimPollMs * time.Millisecond)
+	}
+}
+
+// openDaemonLoop opens the loop connection (no artifact attaches — the
+// per-job execution opens its own) and migrates defensively, so the daemon
+// never reads a schema the enqueuer has not finished migrating.
+func openDaemonLoop(pluginDir string, state workerState) (dbx, string) {
+	path := state.DatabasePath
+	if path == "" {
+		path = filepath.Join(pluginDir, "data", "curator.sqlite3")
+	}
+	loop, err := openDatabase(realpath(path), false, nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "curator-core daemon: could not open sidecar: %v\n", err)
+		return nil, ""
+	}
+	if err := migrate(loop, nowMs()); err != nil {
+		loop.Close()
+		fmt.Fprintf(os.Stderr, "curator-core daemon: could not migrate sidecar: %v\n", err)
+		return nil, ""
+	}
+	return loop, path
+}
+
+// daemonExitOnCancel makes the cancel path terminate the daemon process:
+// the mode body runs synchronously in the main goroutine and cannot be
+// interrupted, so a cancelled running job ends the process; its row is
+// already marked 'cancelled' and the queue restarts on the next invocation.
+var daemonExitOnCancel = false
+
+// markRunningCancelled marks every running job owned by this process as
+// cancelled (shutdown path).
+func markRunningCancelled(db dbx) {
+	execImmediate(db, `UPDATE curator_job SET state='cancelled', finished_at_ms=?, error='cancelled'
+WHERE state='running' AND (owner_pid=? OR owner_pid IS NULL)`, nowMs(), os.Getpid())
+}
+
+// claimQueuedJob atomically claims the oldest queued row: state queued →
+// running with owner_pid + heartbeat, returning the payload snapshot. An
+// empty jobID means the queue is empty.
+func claimQueuedJob(db dbx, deferAutomatic bool) (string, int64, jVal, string, error) {
+	var jobID, jobType, payloadJSON string
+	var startedAtMs int64
+	err := withTxn(db, func(conn *sql.Conn) error {
+		ctx := context.Background()
+		row := conn.QueryRowContext(ctx, `
+SELECT job_id, job_type, started_at_ms, payload_json FROM curator_job
+WHERE state='queued' AND (?=0 OR COALESCE(json_extract(payload_json, '$.args.automatic'), 0)=0)
+ORDER BY queued_at_ms, started_at_ms LIMIT 1`, deferAutomatic)
+		if err := row.Scan(&jobID, &jobType, &startedAtMs, &payloadJSON); err != nil {
+			if err == sql.ErrNoRows {
+				jobID = ""
+				return nil
+			}
+			return err
+		}
+		result, err := conn.ExecContext(ctx, `
+UPDATE curator_job SET state='running', owner_pid=?, heartbeat_at_ms=?, cancel_requested=0
+WHERE job_id=? AND state='queued'`, os.Getpid(), nowMs(), jobID)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			jobID = "" // another worker claimed it; try the next row
+		}
+		return nil
+	})
+	if err != nil {
+		return "", 0, jvNull(), "", err
+	}
+	if jobID == "" {
+		return "", 0, jvNull(), "", nil
+	}
+	payload, err := parseJSON([]byte(payloadJSON))
+	if err != nil {
+		return "", 0, jvNull(), "", fmt.Errorf("queued job %s has a corrupt payload: %w", jobID, err)
+	}
+	return jobID, startedAtMs, payload, jobType, nil
+}
+
+// runWorkerJob executes one claimed job with the same lifecycle as the
+// inline path: fresh artifact-attached connection, settings from the payload
+// snapshot, executeClaimedJob transitions, failures recorded on the row. It
+// returns true when the daemon should retire: the job's sidecar could not be
+// opened because the installed binary is older than the sidecar schema, so no
+// job can ever run and a fresh worker with the current binary must take over.
+func runWorkerJob(pluginDir string, loop dbx, jobID string, startedAtMs int64, payload jVal, mode string) bool {
+	retire := false
+	_, _ = profiledKind(pluginDir, payload, "worker-"+mode, "task", func(settings jVal) (jVal, error) {
+		db, err := openTaskSidecarFn(pluginDir, payload, settings, mode)
+		if err != nil {
+			execImmediate(loop, `UPDATE curator_job SET state='failed', finished_at_ms=?, error=?
+WHERE job_id=? AND state='running'`, nowMs(), truncateString(err.Error(), 2000), jobID)
+			retire = isSchemaSkewError(err)
+			return jvNull(), err
+		}
+		defer db.Close()
+		return executeClaimedJob(db, pluginDir, payload, mode, settings, jobID, startedAtMs)
+	})
+	return retire
+}
+
+// heartbeatLoop writes liveness and watches the cooperative-cancel flag for
+// one running job. On cancel the row is marked 'cancelled'; in daemon mode
+// the process then exits (the synchronous mode body cannot be interrupted).
+func heartbeatLoop(db dbx, jobID string, done chan struct{}) {
+	ticker := time.NewTicker(time.Duration(heartbeatIntervalMs) * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			now := nowMs()
+			execImmediate(db, `UPDATE curator_job SET heartbeat_at_ms=? WHERE job_id=? AND state='running'`, now, jobID)
+			var requested int
+			err := db.QueryRow(`SELECT cancel_requested FROM curator_job WHERE job_id=? AND state='running'`, jobID).Scan(&requested)
+			if err == nil && requested == 1 {
+				execImmediate(db, `UPDATE curator_job SET state='cancelled', finished_at_ms=?, error='cancelled'
+WHERE job_id=? AND state='running'`, now, jobID)
+				if daemonExitOnCancel {
+					os.Exit(0)
+				}
+				return
+			}
+		}
+	}
+}
+
+// ── progress sink ───────────────────────────────────────────────────────────
+
+// progressSink persists progressLog markers into the running job's row,
+// debounced so a build's per-batch markers do not turn into write
+// amplification on the sidecar the build is already using. The sink uses its
+// OWN connection (not the mode body's): the execution pool is pinned to one
+// connection, so writing through it would block behind the mode's statements
+// — and deadlock if a progress marker fires inside one of the mode's
+// transactions. A second WAL writer just waits on busy_timeout.
+type progressSink struct {
+	db           dbx
+	jobID        string
+	mu           sync.Mutex
+	lastWriteMs  int64
+	pendingValue float64
+	pending      bool
+}
+
+func newProgressSink(path, jobID string) (*progressSink, error) {
+	db, err := openDatabase(realpath(path), false, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &progressSink{db: db, jobID: jobID}, nil
+}
+
+func (s *progressSink) close() {
+	s.flush()
+	s.db.Close()
+}
+
+// flush writes the pending value unconditionally (no debounce); call before
+// the terminal state transition so the last progress is not lost.
+func (s *progressSink) flush() {
+	s.mu.Lock()
+	s.flushLocked(nowMs())
+	s.mu.Unlock()
+}
+
+func (s *progressSink) report(value float64) {
+	s.mu.Lock()
+	if s.pending && value == s.pendingValue {
+		s.mu.Unlock()
+		return
+	}
+	s.pending = true
+	s.pendingValue = value
+	now := nowMs()
+	if now-s.lastWriteMs >= int64(progressDebounceMs) {
+		s.flushLocked(now)
+	}
+	s.mu.Unlock()
+}
+
+func (s *progressSink) flushLocked(now int64) {
+	if !s.pending {
+		return
+	}
+	execImmediate(s.db, `UPDATE curator_job SET progress=? WHERE job_id=? AND state='running'`, s.pendingValue, s.jobID)
+	s.lastWriteMs = now
+	s.pending = false
+}
+
+var (
+	progressSinkMu     sync.Mutex
+	activeProgressSink *progressSink
+)
+
+func setProgressSink(s *progressSink) *progressSink {
+	progressSinkMu.Lock()
+	defer progressSinkMu.Unlock()
+	prev := activeProgressSink
+	activeProgressSink = s
+	return prev
+}

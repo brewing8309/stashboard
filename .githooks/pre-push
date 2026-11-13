@@ -1,0 +1,20 @@
+#!/bin/sh
+# Pre-push hygiene, not a test gate.
+#
+# Verification intentionally does NOT run here. The full gate in the push
+# path caused more friction than it caught — multi-minute pushes, SSH
+# connection timeouts, and host-contention perf-gate noise — while CI runs
+# the identical matrix on every pushed ref. This hook only checks the diff
+# for whitespace errors; the full gate runs in CI and locally via
+# `scripts/verify full`.
+set -eu
+
+root="$(git rev-parse --show-toplevel)"
+
+base="$(git merge-base origin/main HEAD 2>/dev/null || true)"
+if [ -z "$base" ]; then
+  exit 0
+fi
+
+git diff --check "$base"...HEAD
+echo "[pre-push] diff check clean; full verification runs in CI and via scripts/verify full"

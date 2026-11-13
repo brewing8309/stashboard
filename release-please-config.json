@@ -1,0 +1,32 @@
+{
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "component": "stash-curator",
+      "include-component-in-tag": false,
+      "exclude-paths": [
+        "docs/auto-seek.html",
+        "docs/auto-seek-guide.md",
+        "docs/assets/auto-seek.css",
+        "docs/assets/auto-seek.svg",
+        "docs/assets/auto-seek-demo.gif",
+        "docs/assets/auto-seek-demo-poster.jpg",
+        "docs/assets/auto-seek-demo-intro.mp4",
+        "docs/assets/auto-seek-demo-intro.webm",
+        "docs/assets/auto-seek-demo-action.mp4",
+        "docs/assets/auto-seek-demo-action.webm"
+      ],
+      "extra-files": [
+        {
+          "type": "generic",
+          "path": "curator/__init__.py"
+        },
+        {
+          "type": "toml",
+          "path": "uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='stash-curator')].version"
+        }
+      ]
+    }
+  }
+}

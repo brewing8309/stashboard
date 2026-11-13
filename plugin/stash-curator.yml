@@ -1,0 +1,288 @@
+name: Stash Curator
+description: Local recommendations and Stash-box discovery — curated to your taste.
+# version is injected from pyproject.toml by scripts/build_plugin.py at build time.
+version: 0.1.0
+url: https://github.com/mrx-31415/stash-curator
+
+exec:
+  - python
+  - -S
+  - "{pluginDir}/launcher.py"
+  - "{pluginDir}"
+interface: raw
+errLog: info
+
+ui:
+  javascript:
+    - stash-curator.js
+  css:
+    - stash-curator.css
+
+settings:
+  detailPageControls:
+    displayName: Detail page controls
+    description: Large (default), small, or off. Choose the layout under Curator → Manage → Settings → Page settings, or enter large, small, or off here. Refresh after changing this in Stash's plugin settings.
+    type: STRING
+  hideCardRatings:
+    displayName: Hide card ratings and confidence
+    description: Hide Curator's badges on Stash scene and performer cards. Off by default. Refresh the browser after changing this in Stash's plugin settings.
+    type: BOOLEAN
+  hidePageComments:
+    displayName: Hide Curator's comments
+    description: Hide Curator's chat bubbles on its own pages (welcome-backs, lane comments, card notes, Insights) and on Stash's scene and performer pages. Off by default.
+    type: BOOLEAN
+  hideRankingComments:
+    displayName: Hide comments in ranking plugins
+    description: Hide Curator's chat beside matches and results in ranking plugins such as Ascension and Cherry Pick brackets. Off by default; takes effect the next time the ranking plugin opens.
+    type: BOOLEAN
+  homeForYou:
+    displayName: Home page For You row
+    description: Show Curator's For You lane on the Stash home page; move it with Customize there. On by default.
+    type: BOOLEAN
+  homeBestBets:
+    displayName: Home page Best Bets row
+    description: Show Curator's Best Bets lane on the Stash home page; move it with Customize there.
+    type: BOOLEAN
+  homeNewArrivals:
+    displayName: Home page New Arrivals row
+    description: Show Curator's New Arrivals lane on the Stash home page; move it with Customize there.
+    type: BOOLEAN
+  homeRevisit:
+    displayName: Home page Revisit row
+    description: Show Curator's Revisit lane on the Stash home page; move it with Customize there.
+    type: BOOLEAN
+  homeStretch:
+    displayName: Home page Stretch row
+    description: Show Curator's Stretch lane on the Stash home page; move it with Customize there.
+    type: BOOLEAN
+  homeBlindSpots:
+    displayName: Home page Blind Spots row
+    description: Show Curator's Blind Spots lane on the Stash home page; move it with Customize there.
+    type: BOOLEAN
+  homeDormant:
+    displayName: Home page Dormant row
+    description: Show Curator's Dormant lane on the Stash home page; move it with Customize there.
+    type: BOOLEAN
+  profilingEnabled:
+    displayName: Enable profiling
+    description: Record recent Curator operation timings for the Profiling page.
+    type: BOOLEAN
+  pprofEnabled:
+    displayName: Capture CPU profiles
+    description: Write a Go CPU and heap profile per operation into the sidecar's profiles directory, browsable and downloadable from the Profiling page. Analyze with go tool pprof. Off by default; keep off unless investigating performance.
+    type: BOOLEAN
+  databasePath:
+    displayName: Sidecar database path
+    description: Absolute database filename on writable, persistent local storage. Leave empty to use the plugin's data directory. Changing this path does not move existing data.
+    type: STRING
+  backupPath:
+    displayName: Backup directory
+    description: Leave empty to store Curator backups beside the sidecar database.
+    type: STRING
+  pageSize:
+    displayName: Results per page
+    description: Results per page, or per fetch when endless scrolling is enabled. Applies to recommendations, Similar, and Expand. Default 20.
+    type: NUMBER
+  recommendationEndlessScroll:
+    displayName: Virtual endless scrolling
+    description: Load more results while scrolling in Recommendations and Find, in Cards, Thumbnails, and Wall. Cards retain expanded panels while the browser skips offscreen rendering. Off by default.
+    type: BOOLEAN
+  diversityDisabled:
+    displayName: Disable recommendation variety
+    description: Use score-first ordering instead of avoiding repeated performers, studios, and similar content.
+    type: BOOLEAN
+  rotationCooldownDays:
+    displayName: Rotation cooldown (days)
+    description: Days until a viewed but unpicked recommendation regains its full draw chance. Default 7; range 1-30.
+    type: NUMBER
+  syncPageSize:
+    displayName: Sync page size
+    description: Number of Stash records fetched per synchronization request. Default 250.
+    type: NUMBER
+  pauseLearning:
+    displayName: Pause learning from viewing
+    description: While on, Curator ignores what you play, such as when testing, with guests or on a shared screen. Plays from this time are also left out when Curator reads Stash's play history. Thumbs, tag answers and dismissals still count.
+    type: BOOLEAN
+  modelUpdateEventThreshold:
+    displayName: Actions before model update
+    description: Rebuild after this many new playback or feedback actions. Default 5.
+    type: NUMBER
+  modelUpdateMaxWaitMinutes:
+    displayName: Maximum model update delay (minutes)
+    description: Rebuild pending preference changes after this delay. Default 30.
+    type: NUMBER
+  modelUpdateMinIntervalMinutes:
+    displayName: Minimum model update interval (minutes)
+    description: Minimum time between automatic preference-model rebuilds. Default 60.
+    type: NUMBER
+  autoTasksEnabled:
+    displayName: Automatic background tasks
+    description: Let the background worker apply pending model updates and sync recent plays on its own, without needing a browser tab open. Uses the model-update timing settings above.
+    type: BOOLEAN
+  scheduleExpandRefreshEnabled:
+    displayName: Scheduled Expand refresh
+    description: Refresh the Stash-box candidate cache on a schedule so Expand and Performer Hunt stay current. Off by default.
+    type: BOOLEAN
+  stashBoxEndpoint:
+    displayName: Stash-box endpoint
+    description: GraphQL endpoint compatible with StashDB, configured in Stash with its API key. Leave empty to use StashDB.
+    type: STRING
+  scheduleExpandRefreshIntervalHours:
+    displayName: Expand refresh interval (hours)
+    description: How often the scheduled Expand refresh runs. Default 24 (daily). With an hour of day set, runs start at that hour and repeat every interval (6 at 04:00 = 04, 10, 16, 22).
+    type: NUMBER
+  scheduleExpandRefreshAtHour:
+    displayName: Expand refresh hour of day
+    description: Run at this hour (0-23, local time) instead of relative to when the schedule was enabled. Leave empty for interval-relative. Default 4 (04:00).
+    type: NUMBER
+  scheduleSyncBuildEnabled:
+    displayName: Scheduled sync and build
+    description: Run a full sync and recommendation build on a schedule. Disabled by default.
+    type: BOOLEAN
+  scheduleSyncBuildIntervalHours:
+    displayName: Sync and build interval (hours)
+    description: How often the scheduled sync and build runs. Default 24 (daily). With an hour of day set, runs start at that hour and repeat every interval (6 at 04:00 = 04, 10, 16, 22).
+    type: NUMBER
+  scheduleSyncBuildAtHour:
+    displayName: Sync and build hour of day
+    description: Run at this hour (0-23, local time) instead of relative to when the schedule was enabled. Leave empty for interval-relative. Default 4 (04:00).
+    type: NUMBER
+  scheduleBackupEnabled:
+    displayName: Scheduled backup
+    description: Create a sidecar backup on a schedule, just before a scheduled sync and build when both are due. Disabled by default.
+    type: BOOLEAN
+  scheduleBackupIntervalHours:
+    displayName: Backup interval (hours)
+    description: How often the scheduled backup runs. Default 24 (daily). With an hour of day set, runs start at that hour and repeat every interval (6 at 04:00 = 04, 10, 16, 22).
+    type: NUMBER
+  scheduleBackupAtHour:
+    displayName: Backup hour of day
+    description: Run at this hour (0-23, local time) instead of relative to when the schedule was enabled. Leave empty for interval-relative. Default 3 (03:00), just before a default 04:00 sync.
+    type: NUMBER
+  pruneTagName:
+    displayName: Prune tag
+    description: Tag applied by the Prune page. Default [Prune].
+    type: STRING
+  ignoredTags:
+    displayName: Ignored tags
+    description: "Comma-separated names of tags excluded from tag analysis. Auto-generated or metadata tags like [Timestamp: Synced] do not describe the scene; exact-name match only. Empty by default."
+    type: STRING
+  newArrivalsIncludeUnorganized:
+    displayName: Include unorganized scenes in New Arrivals
+    description: Let New Arrivals recommend recently added scenes that are not marked Organized yet. Off by default, so the lane waits until a scene has been scraped and organized. Takes effect at the next model update.
+    type: BOOLEAN
+  expandHorizonDays:
+    displayName: Expand recent-release horizon (days)
+    description: Recent-release window used by Expand. Default 90.
+    type: NUMBER
+  expandGender:
+    displayName: External performer gender
+    description: Default Stash-box gender filter for Expand and Similar. Default FEMALE; leave empty for all.
+    type: STRING
+  expandWildcard:
+    displayName: Expand popularity wildcard
+    description: Include a small trending/popular sample outside preference-derived seeds.
+    type: BOOLEAN
+  expandCandidateLimit:
+    displayName: Expand candidate limit
+    description: Maximum number of Stash-box scenes fetched per Expand refresh, split across seed sources. Default 1000; raise to reduce fetch truncation at the cost of a slower refresh.
+    type: NUMBER
+  expandSimilarSeedTopK:
+    displayName: Expand similar-performer seed top-K
+    description: Chase look-alikes for the K strongest favourite performers into the Expand seed set. 0 disables. Default 20.
+    type: NUMBER
+  expandSimilarSeedPerFavorite:
+    displayName: Expand similar-performer seeds per favourite
+    description: How many closest look-alikes per favourite are added as Expand seeds. 0 disables. Default 5.
+    type: NUMBER
+  whisparrUrl:
+    displayName: Whisparr v3 URL
+    description: Optional Whisparr base URL used by Expand scene actions.
+    type: STRING
+  whisparrApiKey:
+    displayName: Whisparr API key
+    description: Optional Whisparr API key. It is used only by the plugin backend.
+    type: STRING
+  whisparrRootFolder:
+    displayName: Whisparr root folder override
+    description: Optional. Leave empty to use Whisparr's first configured root folder.
+    type: STRING
+  whisparrQualityProfileId:
+    displayName: Whisparr quality profile ID override
+    description: Optional. Leave empty to use Whisparr's fallback (or first) quality profile.
+    type: NUMBER
+  whisparrSearchImmediately:
+    displayName: Search Whisparr immediately
+    description: Start a release search after adding a scene. Enabled by default.
+    type: BOOLEAN
+tasks:
+  - name: Prepare local scene matches
+    description: Check your library for scenes already owned before browsing Expand.
+    execArgs:
+      - local-matches
+  - name: Sync and build recommendations
+    description: Use after Stash library changes. Sync changed metadata and history, then refresh recommendations.
+    execArgs:
+      - sync-build
+  - name: Full sync and build recommendations
+    description: Reconcile the complete library and publish a fresh model.
+    execArgs:
+      - full-sync-build
+  - name: Rebuild recommendation model
+    description: Rebuild from synced data without a library sync. Queued entity changes may still be fetched from Stash.
+    execArgs:
+      - build
+  - name: Force rebuild recommendation model
+    description: Recompute and republish the model even when Curator would otherwise reuse the current artifact.
+    execArgs:
+      - force-build
+  - name: Apply recent Curator feedback
+    description: Publish pending feedback and playback signals without blocking the Curator page.
+    execArgs:
+      - update-model
+  - name: Sync recent plays
+    description: Import plays Stash recorded since the last sync so cooldown and recovery reflect your latest viewing. Runs automatically after Curator playback.
+    execArgs:
+      - sync-plays
+  - name: Prepare recommendation pages
+    description: Warm the fast page cache for the current model without rebuilding it.
+    execArgs:
+      - prepare
+  - name: Backup Curator data
+    description: Create a timestamped sidecar backup in the configured Backup directory, or beside the sidecar database when unset.
+    execArgs:
+      - backup
+  - name: Compact legacy Curator data
+    description: Delete rebuildable legacy rows after validating published generation artifacts.
+    execArgs:
+      - compact
+  - name: Vacuum compacted Curator data
+    description: Explicitly reclaim file space after legacy compaction completes.
+    execArgs:
+      - vacuum
+  - name: Refresh Expand cache
+    description: Refresh promising Stash-box scenes and performers without affecting library sync.
+    execArgs:
+      - expand-refresh
+  - name: Force rebuild Expand cache
+    description: Full non-incremental Expand rebuild that re-fetches the whole recent window, capturing scenes a watermark refresh may have missed. Developer use; slower than a normal refresh.
+    execArgs:
+      - expand-rebuild
+hooks:
+  - name: Sync changed entity
+    description: Import or remove a single entity after a Stash create, update, or delete, so the sidecar stays current without a full sync.
+    triggeredBy:
+      - Scene.Create.Post
+      - Scene.Update.Post
+      - Scene.Destroy.Post
+      - Performer.Create.Post
+      - Performer.Update.Post
+      - Performer.Destroy.Post
+      - Studio.Create.Post
+      - Studio.Update.Post
+      - Studio.Destroy.Post
+      - Tag.Create.Post
+      - Tag.Update.Post
+      - Tag.Destroy.Post
+    execArgs:
+      - entity-sync

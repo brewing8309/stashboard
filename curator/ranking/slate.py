@@ -1,0 +1,1806 @@
+"""Greedy deterministic slate selection with hard and soft variety rules."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import sqlite3
+import time
+from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field, replace
+from heapq import heappop, heappush
+from typing import Any
+
+from curator.config import DEFAULT_CONFIG, CuratorConfig
+from curator.events.contracts import OBSERVED_PLAYBACK_SQL
+from curator.features import FeatureStore
+from curator.model import RecommendationModelStore
+from curator.model.boundaries import scene_eligibility
+from curator.model.curves import scene_recovery
+from curator.profiling import record_duration
+from curator.ranking.policy import LANES, LaneClassification, LanePolicy
+from curator.storage import transaction
+from curator.taxonomy import equivalent_tag_names
+
+FAMILIAR_PATTERN = (
+    "best_bets",
+    "best_bets",
+    "revisit",
+    "best_bets",
+    "stretch",
+    "best_bets",
+    "best_bets",
+    "revisit",
+    "best_bets",
+    "best_bets",
+)
+ADVENTUROUS_PATTERN = (
+    "best_bets",
+    "best_bets",
+    "revisit",
+    "stretch",
+    "best_bets",
+    "stretch",
+    "blind_spots",
+    "best_bets",
+    "stretch",
+    "blind_spots",
+)
+QUERIED_SCORE_FIRST_LANES = frozenset({"best_bets", "revisit", "stretch"})
+LANE_NAMES = frozenset({"for_you", *LANES})
+SCORE_FIRST_RANKING_JSON = json.dumps(
+    {
+        "penalties": {
+            "performer": 0.0,
+            "studio": 0.0,
+            "content": 0.0,
+            "history": 0.0,
+            "live_cooldown": 0.0,
+        },
+        "bonuses": {"uncovered_content": 0.0},
+    },
+    separators=(",", ":"),
+)
+
+
+def _stretch_dimension(classification: LaneClassification) -> str | None:
+    """The challenged feature id, for the per-dimension Stretch rotation."""
+    challenged = classification.qualification.get("challenged_feature")
+    if not isinstance(challenged, dict):
+        return None
+    feature_id = challenged.get("feature_id")
+    return str(feature_id) if feature_id else None
+
+
+def _blind_spot_facet(classification: LaneClassification) -> str | None:
+    """The strongest dark facet's id, for the per-facet Blind Spots rotation.
+
+    policy.py sorts dark_facets by darkness descending, so the first entry is
+    the facet driving lane_value (lane_value uses max(darkness)); the same
+    facet doubles as the rotation key.
+    """
+    facets = classification.qualification.get("dark_facets")
+    if not isinstance(facets, list) or not facets:
+        return None
+    top = facets[0]
+    if not isinstance(top, dict):
+        return None
+    facet_id = top.get("id")
+    return str(facet_id) if facet_id else None
+
+
+def _dormant_entity(classification: LaneClassification) -> str | None:
+    """The dormant entity's id, for the per-entity Dormant rotation."""
+    entity = classification.qualification.get("dormant_entity")
+    if not isinstance(entity, dict):
+        return None
+    entity_id = entity.get("id")
+    return str(entity_id) if entity_id else None
+
+
+def _lane_value_maxes(connection: sqlite3.Connection, model_id: str) -> dict[str, float]:
+    """Per-lane max lane_value from the artifact, used to make the displayed
+    "Rank in <lane>" relative to the lane's best (issue #212)."""
+    return {
+        str(row["lane"]): float(row["max_lane_value"])
+        for row in connection.execute(
+            """
+            SELECT lane, MAX(lane_value) AS max_lane_value
+            FROM model_scene_lane WHERE model_id=? GROUP BY lane
+            """,
+            (model_id,),
+        )
+    }
+
+
+def _rank_value(lane_value: float, lane_max: float | None) -> float:
+    """Normalize a lane value against the lane's best so the top of the lane
+    reads 1.00. Lanes without a positive max (including the score_review
+    pseudo-lane) keep their raw value."""
+    if lane_max is None or lane_max <= 0:
+        return lane_value
+    return lane_value / lane_max
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    classification: LaneClassification
+    performers: tuple[str, ...]
+    studio_group: str | None
+    content: dict[str, float]
+
+
+@dataclass(frozen=True)
+class RecommendationItem:
+    scene_id: str
+    lane: str
+    source_lane: str
+    subtype: str | None
+    position: int
+    appeal: float
+    current_fit: float
+    confidence: float
+    lane_value: float
+    final_utility: float
+    penalties: dict[str, float]
+    bonuses: dict[str, float]
+    components: dict[str, object]
+    neighbors: tuple[dict[str, object], ...]
+    eligibility: dict[str, object]
+    qualification: dict[str, object]
+    reason_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class LaneEntry:
+    """One scene in a lane's full order, with what the draw and impressions need."""
+
+    scene_id: str
+    source_lane: str
+    utility: float
+
+
+@dataclass(frozen=True)
+class Slate:
+    model_id: str
+    lane: str
+    items: tuple[RecommendationItem, ...]
+    diagnostics: tuple[str, ...]
+    timings_ms: dict[str, int] = field(default_factory=dict)
+
+
+class SlateBuilder:
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        config: CuratorConfig = DEFAULT_CONFIG,
+        *,
+        diversity_enabled: bool = True,
+    ) -> None:
+        self.connection = connection
+        self.config = config
+        self.diversity_enabled = diversity_enabled
+        self._cached_model_id: str | None = None
+        self._cached_source_lanes: frozenset[str] = frozenset()
+        self._cached_candidates: tuple[_Candidate, ...] = ()
+        self._cached_vectors: dict[str, dict[str, float]] = {}
+        self._pair_similarities: dict[tuple[str, str], float] = {}
+        self._history_similarities: dict[str, float] = {}
+        self._live_fit: dict[str, float] = {}
+        self._live_cooldown: dict[str, float] = {}
+        self.materialize_timings_ms: dict[str, int] = {}
+
+    def prepare(self, model_id: str, *, slate_size: int = 60) -> dict[str, int]:
+        policy = LanePolicy(self.connection, self.config)
+        prepared: list[_Candidate] = []
+        counts: dict[str, int] = {}
+        for lane in LANES:
+            classifications = policy.load(model_id, lanes={lane})
+            candidates = self._candidates(model_id, classifications)
+            prepared.extend(candidates)
+            counts[lane] = len(candidates)
+        with transaction(self.connection):
+            self.connection.execute(
+                "DELETE FROM model_lane_candidate_cache WHERE model_id=?", (model_id,)
+            )
+            self.connection.execute("DELETE FROM application_meta WHERE key LIKE 'slate:%'")
+        self._save_prepared_candidates(model_id, set(LANES), tuple(prepared))
+        for lane in (*LANES, "for_you"):
+            self.recommend(lane, slate_size)
+        return counts
+
+    def materialize(
+        self,
+        model_id: str,
+        *,
+        force: bool = False,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> dict[str, int]:
+        if (
+            not force
+            and self.connection.execute(
+                "SELECT 1 FROM model_lane_order_state WHERE model_id=?", (model_id,)
+            ).fetchone()
+        ):
+            result = {
+                str(row["lane"]): int(row["candidate_count"])
+                for row in self.connection.execute(
+                    """
+                    SELECT lane, count(*) AS candidate_count FROM model_scene_lane
+                    WHERE model_id=? GROUP BY lane
+                    """,
+                    (model_id,),
+                )
+            }
+            if progress:
+                progress(1, 1)
+            return result
+        classifications = LanePolicy(self.connection, self.config).load(model_id)
+        candidates = self._candidates(model_id, classifications)
+        counts = {
+            lane: sum(candidate.classification.lane == lane for candidate in candidates)
+            for lane in LANES
+        }
+        with transaction(self.connection):
+            self.connection.execute(
+                "DELETE FROM model_lane_order_state WHERE model_id=?", (model_id,)
+            )
+            self.connection.execute("DELETE FROM model_lane_order WHERE model_id=?", (model_id,))
+        completed = 0
+        # One progress tick per (lane, ordering) pair below: queried
+        # score-first lanes materialize only "varied"; every other lane
+        # (including for_you) also materializes "score_first".
+        total = sum(1 if lane in QUERIED_SCORE_FIRST_LANES else 2 for lane in (*LANES, "for_you"))
+        timings = {"score_first_ordering": 0, "varied_ordering": 0}
+        for lane in (*LANES, "for_you"):
+            lane_candidates = tuple(
+                candidate
+                for candidate in candidates
+                if lane == "for_you" or candidate.classification.lane == lane
+            )
+            orderings = [("varied", True)]
+            if lane not in QUERIED_SCORE_FIRST_LANES:
+                orderings.insert(0, ("score_first", False))
+            for ordering, varied in orderings:
+                ordering_started = time.perf_counter()
+                ordered = self._build_order(lane, lane_candidates, varied=varied)
+                with transaction(self.connection):
+                    self.connection.executemany(
+                        """
+                        INSERT INTO model_lane_order(
+                            model_id, lane, ordering, position, scene_id,
+                            source_lane, utility, ranking_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            (
+                                model_id,
+                                lane,
+                                ordering,
+                                position,
+                                candidate.classification.scene_id,
+                                candidate.classification.lane,
+                                utility,
+                                json.dumps(
+                                    {"penalties": penalties, "bonuses": bonuses},
+                                    separators=(",", ":"),
+                                ),
+                            )
+                            for position, (candidate, utility, penalties, bonuses) in enumerate(
+                                ordered
+                            )
+                        ),
+                    )
+                timings[f"{ordering}_ordering"] += round(
+                    (time.perf_counter() - ordering_started) * 1000
+                )
+                completed += 1
+                if progress:
+                    progress(completed, total)
+        with transaction(self.connection):
+            self.connection.execute(
+                """
+                INSERT INTO model_lane_order_state(model_id, created_at_ms) VALUES (?, ?)
+                """,
+                (model_id, time.time_ns() // 1_000_000),
+            )
+        self.materialize_timings_ms = timings
+        for name, duration in timings.items():
+            record_duration("python", f"ranking.{name}", duration)
+        return counts
+
+    def _build_order(
+        self, lane: str, candidates: tuple[_Candidate, ...], *, varied: bool
+    ) -> list[tuple[_Candidate, float, dict[str, float], dict[str, float]]]:
+        by_key = {
+            (candidate.classification.scene_id, candidate.classification.lane): candidate
+            for candidate in candidates
+        }
+        utilities = {
+            key: candidate.classification.lane_value
+            + (self.config.ranking.uncovered_content_bonus if varied and candidate.content else 0.0)
+            for key, candidate in by_key.items()
+        }
+        versions = dict.fromkeys(by_key, 0)
+        heaps: dict[tuple[str, str], list[tuple[float, str, str, int]]] = defaultdict(list)
+
+        def selectors(candidate: _Candidate) -> tuple[tuple[str, str], ...]:
+            result = [("all", "")]
+            if lane == "for_you":
+                result.append(("lane", candidate.classification.lane))
+            elif lane == "stretch":
+                dimension = _stretch_dimension(candidate.classification)
+                if dimension:
+                    result.append(("dimension", dimension))
+            elif lane == "blind_spots":
+                facet = _blind_spot_facet(candidate.classification)
+                if facet:
+                    result.append(("facet", facet))
+            elif lane == "dormant":
+                entity = _dormant_entity(candidate.classification)
+                if entity:
+                    result.append(("entity", entity))
+            return tuple(result)
+
+        # At most stretch_per_dimension (default 1) card per challenged dimension
+        # per page: round-robin the target selector through every distinct
+        # dimension present. See docs/workpackage-lane-redesign.md.
+        # Gated on varied: stretch is a QUERIED_SCORE_FIRST_LANES member, so its
+        # score_first ordering is never materialized through this path (only
+        # answered live by a plain lane_value-sorted query) — this rotation
+        # must stay out of the varied=False branch so the two stay equivalent.
+        stretch_dimensions = (
+            sorted({dim for c in candidates if (dim := _stretch_dimension(c.classification))})
+            if lane == "stretch" and varied
+            else ()
+        )
+        # At most blind_spot_per_facet card per dark facet per page — the same
+        # rotation mechanism, unconditional on varied since blind_spots is not
+        # a QUERIED_SCORE_FIRST_LANES member (both orderings materialize
+        # through this path, matching how the adventure subtype rotation it
+        # replaces always applied here too).
+        blind_spot_facets = (
+            sorted({f for c in candidates if (f := _blind_spot_facet(c.classification))})
+            if lane == "blind_spots"
+            else ()
+        )
+        # At most dormant_per_entity card per dormant entity per page — same
+        # mechanism, also unconditional (dormant is not a
+        # QUERIED_SCORE_FIRST_LANES member either).
+        dormant_entities = (
+            sorted({e for c in candidates if (e := _dormant_entity(c.classification))})
+            if lane == "dormant"
+            else ()
+        )
+
+        def push(key: tuple[str, str]) -> None:
+            candidate = by_key[key]
+            entry = (
+                -utilities[key],
+                candidate.classification.scene_id,
+                candidate.classification.lane,
+                versions[key],
+            )
+            for selector in selectors(candidate):
+                heappush(heaps[selector], entry)
+
+        for key in by_key:
+            push(key)
+
+        selected_scene_ids: set[str] = set()
+        seen_performers: set[str] = set()
+        seen_studios: set[str] = set()
+        covered_features: set[str] = set()
+        performer_penalized: set[tuple[str, str]] = set()
+        studio_penalized: set[tuple[str, str]] = set()
+        covered_share = dict.fromkeys(by_key, 0.0)
+        content_totals = {
+            key: sum(abs(value) for value in candidate.content.values())
+            for key, candidate in by_key.items()
+        }
+        performer_index: dict[str, set[tuple[str, str]]] = defaultdict(set)
+        studio_index: dict[str, set[tuple[str, str]]] = defaultdict(set)
+        feature_index: dict[str, list[tuple[tuple[str, str], float]]] = defaultdict(list)
+        if varied:
+            for key, candidate in by_key.items():
+                for performer in candidate.performers:
+                    performer_index[performer].add(key)
+                if candidate.studio_group:
+                    studio_index[candidate.studio_group].add(key)
+                total = content_totals[key]
+                if total:
+                    for feature, value in candidate.content.items():
+                        feature_index[feature].append((key, abs(value) / total))
+
+        def pop(
+            selector: tuple[str, str],
+            previous: _Candidate | None,
+            *,
+            allow_adjacent: bool = False,
+        ) -> _Candidate | None:
+            deferred: list[tuple[float, str, str, int]] = []
+            heap = heaps[selector]
+            chosen = None
+            while heap:
+                entry = heappop(heap)
+                key = (entry[1], entry[2])
+                if (
+                    key not in by_key
+                    or entry[3] != versions[key]
+                    or by_key[key].classification.scene_id in selected_scene_ids
+                ):
+                    continue
+                candidate = by_key[key]
+                if (
+                    varied
+                    and previous
+                    and not allow_adjacent
+                    and not self.config.ranking.adjacent_shared_performers
+                    and set(candidate.performers) & set(previous.performers)
+                ):
+                    deferred.append(entry)
+                    continue
+                chosen = candidate
+                break
+            for entry in deferred:
+                heappush(heap, entry)
+            return chosen
+
+        ordered: list[tuple[_Candidate, float, dict[str, float], dict[str, float]]] = []
+        previous: _Candidate | None = None
+        scene_count = len({candidate.classification.scene_id for candidate in candidates})
+        while len(selected_scene_ids) < scene_count:
+            target_lane = self._target(lane, len(ordered), 0)
+            wanted = (
+                (
+                    "dimension",
+                    stretch_dimensions[
+                        (len(ordered) // max(1, self.config.ranking.stretch_per_dimension))
+                        % len(stretch_dimensions)
+                    ],
+                )
+                if lane == "stretch" and stretch_dimensions
+                else (
+                    "facet",
+                    blind_spot_facets[
+                        (len(ordered) // max(1, self.config.ranking.blind_spot_per_facet))
+                        % len(blind_spot_facets)
+                    ],
+                )
+                if lane == "blind_spots" and blind_spot_facets
+                else (
+                    "entity",
+                    dormant_entities[
+                        (len(ordered) // max(1, self.config.ranking.dormant_per_entity))
+                        % len(dormant_entities)
+                    ],
+                )
+                if lane == "dormant" and dormant_entities
+                else ("lane", target_lane)
+                if lane == "for_you"
+                else ("all", "")
+            )
+            chosen = pop(wanted, previous) or pop(("all", ""), previous)
+            if chosen is None:
+                chosen = pop(("all", ""), previous, allow_adjacent=True)
+            if chosen is None:
+                break
+            key = (chosen.classification.scene_id, chosen.classification.lane)
+            penalties = {
+                "performer": (
+                    self.config.ranking.performer_repeat_penalty
+                    if key in performer_penalized
+                    else 0.0
+                ),
+                "studio": (self.config.ranking.studio_penalty if key in studio_penalized else 0.0),
+                "content": (
+                    self.config.ranking.content_penalty * covered_share[key] if varied else 0.0
+                ),
+                "history": 0.0,
+                "live_cooldown": 0.0,
+            }
+            bonuses = {
+                "uncovered_content": (
+                    self.config.ranking.uncovered_content_bonus * (1 - covered_share[key])
+                    if varied and chosen.content
+                    else 0.0
+                )
+            }
+            ordered.append((chosen, utilities[key], penalties, bonuses))
+            selected_scene_ids.add(chosen.classification.scene_id)
+            previous = chosen
+            if not varied:
+                continue
+            changed: set[tuple[str, str]] = set()
+            for performer in set(chosen.performers) - seen_performers:
+                seen_performers.add(performer)
+                for affected in performer_index[performer] - performer_penalized:
+                    performer_penalized.add(affected)
+                    utilities[affected] -= self.config.ranking.performer_repeat_penalty
+                    changed.add(affected)
+            if chosen.studio_group and chosen.studio_group not in seen_studios:
+                seen_studios.add(chosen.studio_group)
+                for affected in studio_index[chosen.studio_group] - studio_penalized:
+                    studio_penalized.add(affected)
+                    utilities[affected] -= self.config.ranking.studio_penalty
+                    changed.add(affected)
+            for feature in set(chosen.content) - covered_features:
+                covered_features.add(feature)
+                for affected, share in feature_index[feature]:
+                    covered_share[affected] += share
+                    utilities[affected] -= (
+                        self.config.ranking.content_penalty
+                        + self.config.ranking.uncovered_content_bonus
+                    ) * share
+                    changed.add(affected)
+            for affected in changed:
+                if by_key[affected].classification.scene_id in selected_scene_ids:
+                    continue
+                versions[affected] += 1
+                push(affected)
+        return ordered
+
+    def recommend(
+        self,
+        lane: str,
+        count: int,
+        *,
+        exploration: float = 0,
+        include_tags: tuple[str, ...] = (),
+        exclude_tags: tuple[str, ...] = (),
+        performer_ids: tuple[str, ...] = (),
+        studio_ids: tuple[str, ...] = (),
+        gender: str = "",
+    ) -> Slate:
+        started = time.perf_counter()
+        timings: dict[str, int] = {}
+        if lane not in LANE_NAMES:
+            raise ValueError(f"unknown lane: {lane}")
+        if count < 1:
+            raise ValueError("count must be positive")
+        if not math.isfinite(exploration) or not -1 <= exploration <= 1:
+            raise ValueError("exploration must be between -1 and 1")
+        model_id = RecommendationModelStore(self.connection).current_model_id()
+        if model_id is None:
+            raise RuntimeError("no published model; run build-model first")
+        scene_filter = self._scene_filter(
+            include_tags, exclude_tags, performer_ids, studio_ids, gender
+        )
+        if exploration == 0:
+            materialized = self._load_materialized_slate(model_id, lane, count, scene_filter)
+            if materialized is not None:
+                return materialized
+        prepared_slate = None
+        if exploration == 0 and scene_filter is None:
+            prepared_slate = self._load_prepared_slate(model_id, lane, count)
+            if prepared_slate is not None and len(prepared_slate.items) >= count:
+                return prepared_slate
+        source_lanes = {lane}
+        if lane == "for_you":
+            source_lanes = set(self.config.ranking.for_you_pattern)
+            if exploration:
+                source_lanes.update(FAMILIAR_PATTERN if exploration < 0 else ADVENTUROUS_PATTERN)
+        source_lane_key = frozenset(source_lanes)
+        if model_id != self._cached_model_id or source_lane_key != self._cached_source_lanes:
+            policy = LanePolicy(self.connection, self.config)
+            prepared = self._load_prepared(model_id, source_lanes)
+            classifications: tuple[LaneClassification, ...] = ()
+            if not prepared:
+                classifications = policy.load(model_id, lanes=source_lanes)
+                if not classifications:
+                    policy.classify(model_id)
+                    classifications = policy.load(model_id, lanes=source_lanes)
+            timings["classifications"] = round((time.perf_counter() - started) * 1000)
+            record_duration("python", "ranking.classifications", timings["classifications"])
+            stage_started = time.perf_counter()
+            self._cached_model_id = model_id
+            self._cached_source_lanes = source_lane_key
+            self._cached_candidates = prepared or tuple(self._candidates(model_id, classifications))
+            if not prepared:
+                self._save_prepared_candidates(model_id, source_lanes, self._cached_candidates)
+            timings["candidates"] = round((time.perf_counter() - stage_started) * 1000)
+            record_duration("python", "ranking.candidates", timings["candidates"])
+        stage_started = time.perf_counter()
+        now_ms = time.time_ns() // 1_000_000
+        candidate_ids = {item.classification.scene_id for item in self._cached_candidates}
+        live_eligibility = scene_eligibility(
+            self.connection, now_ms, self.config, scene_ids=candidate_ids
+        )
+        direct_plays = {
+            str(row["scene_id"]): int(row["last_played"])
+            for row in self.connection.execute(
+                """
+                SELECT scene_id, max(ended_at_ms) AS last_played FROM play_session
+                WHERE provenance='direct_player' GROUP BY scene_id
+                """
+            )
+        }
+        unrecovered_direct_plays = {
+            scene_id
+            for scene_id, played_at_ms in direct_plays.items()
+            if scene_recovery(
+                max(0.0, (now_ms - played_at_ms) / 86_400_000), config=self.config.model
+            )
+            < 0.10
+        }
+        candidates = tuple(
+            candidate
+            for candidate in self._cached_candidates
+            if bool(
+                live_eligibility.get(candidate.classification.scene_id, {}).get("eligible", False)
+            )
+            and not (
+                candidate.classification.lane == "best_bets"
+                and candidate.classification.scene_id in direct_plays
+            )
+            and not (
+                candidate.classification.lane == "revisit"
+                and candidate.classification.scene_id in unrecovered_direct_plays
+            )
+            and (scene_filter is None or scene_filter(candidate.classification.scene_id))
+        )
+        self._live_fit, self._live_cooldown = self._live_current_fit(model_id, direct_plays, now_ms)
+        timings["eligibility"] = round((time.perf_counter() - stage_started) * 1000)
+        record_duration("python", "ranking.eligibility", timings["eligibility"])
+        stage_started = time.perf_counter()
+        candidate_lookup = {
+            (item.classification.scene_id, item.classification.lane): item for item in candidates
+        }
+        prefix_items = tuple(
+            item
+            for item in (prepared_slate.items if prepared_slate else ())
+            if (item.scene_id, item.source_lane) in candidate_lookup
+        )
+        selected = [candidate_lookup[(item.scene_id, item.source_lane)] for item in prefix_items]
+        selected_utilities: list[tuple[float, dict[str, float], dict[str, float]]] = []
+        diagnostics: list[str] = []
+        history = self._history_context(model_id) if self.diversity_enabled else (set(), set(), ())
+        self._pair_similarities.clear()
+        self._history_similarities = (
+            {
+                candidate.classification.scene_id: max(
+                    (self._cosine(candidate.content, vector) for vector in history[2]), default=0.0
+                )
+                for candidate in candidates
+            }
+            if self.diversity_enabled
+            else {}
+        )
+        timings["history"] = round((time.perf_counter() - stage_started) * 1000)
+        record_duration("python", "ranking.history", timings["history"])
+        stage_started = time.perf_counter()
+        selected_scene_ids = {candidate.classification.scene_id for candidate in selected}
+        seen_performers = {
+            performer for candidate in selected for performer in candidate.performers
+        }
+        seen_studios = {candidate.studio_group for candidate in selected if candidate.studio_group}
+        covered_content = {name for candidate in selected for name in candidate.content}
+        content_similarities = (
+            {
+                candidate.classification.scene_id: max(
+                    (self._candidate_similarity(candidate, previous) for previous in selected),
+                    default=0.0,
+                )
+                for candidate in candidates
+            }
+            if self.diversity_enabled
+            else {}
+        )
+        # At most stretch_per_dimension card per challenged dimension per page,
+        # mirrored from _build_order's rotation since this greedy path has its
+        # own separate selection loop for the live-recompute / filtered case.
+        # Gated on diversity_enabled to match _build_order's varied gate: with
+        # diversity off, stretch (a QUERIED_SCORE_FIRST_LANES member) must fall
+        # back to plain lane_value order, the same as the live SQL query path.
+        stretch_dimensions = (
+            sorted({dim for c in candidates if (dim := _stretch_dimension(c.classification))})
+            if lane == "stretch" and self.diversity_enabled
+            else ()
+        )
+        # At most blind_spot_per_facet card per dark facet per page, mirrored
+        # from _build_order's rotation for this greedy path's own separate
+        # selection loop. Unconditional on diversity_enabled: blind_spots is
+        # not a QUERIED_SCORE_FIRST_LANES member, so there is no live SQL path
+        # this needs to stay equivalent to.
+        blind_spot_facets = (
+            sorted({f for c in candidates if (f := _blind_spot_facet(c.classification))})
+            if lane == "blind_spots"
+            else ()
+        )
+        # At most dormant_per_entity card per dormant entity per page, same
+        # reasoning as blind_spot_facets above.
+        dormant_entities = (
+            sorted({e for c in candidates if (e := _dormant_entity(c.classification))})
+            if lane == "dormant"
+            else ()
+        )
+        for position in range(len(selected), count):
+            target_lane = self._target(lane, position, exploration)
+            target_dimension = (
+                stretch_dimensions[
+                    (position // max(1, self.config.ranking.stretch_per_dimension))
+                    % len(stretch_dimensions)
+                ]
+                if lane == "stretch" and stretch_dimensions
+                else None
+            )
+            target_facet = (
+                blind_spot_facets[
+                    (position // max(1, self.config.ranking.blind_spot_per_facet))
+                    % len(blind_spot_facets)
+                ]
+                if lane == "blind_spots" and blind_spot_facets
+                else None
+            )
+            target_entity = (
+                dormant_entities[
+                    (position // max(1, self.config.ranking.dormant_per_entity))
+                    % len(dormant_entities)
+                ]
+                if lane == "dormant" and dormant_entities
+                else None
+            )
+            remaining = [
+                candidate
+                for candidate in candidates
+                if candidate.classification.scene_id not in selected_scene_ids
+            ]
+            preferred = [
+                candidate
+                for candidate in remaining
+                if candidate.classification.lane == target_lane
+                and (
+                    target_dimension is None
+                    or _stretch_dimension(candidate.classification) == target_dimension
+                )
+                and (
+                    target_facet is None
+                    or _blind_spot_facet(candidate.classification) == target_facet
+                )
+                and (
+                    target_entity is None
+                    or _dormant_entity(candidate.classification) == target_entity
+                )
+            ]
+            pool = preferred or (
+                [
+                    candidate
+                    for candidate in remaining
+                    if candidate.classification.lane == target_lane
+                ]
+                or remaining
+            )
+            ranked = []
+            for candidate in pool:
+                utility = self._utility(
+                    candidate,
+                    selected[-1] if selected else None,
+                    history,
+                    seen_performers,
+                    seen_studios,
+                    covered_content,
+                    content_similarities.get(candidate.classification.scene_id, 0.0),
+                )
+                if utility is None:
+                    continue
+                ranked.append((utility[0], candidate.classification.scene_id, candidate, utility))
+            if not ranked and self.config.ranking.relax_adjacent_when_exhausted:
+                diagnostics.append(f"position {position}: relaxed adjacent performer constraint")
+                for candidate in pool:
+                    utility = self._utility(
+                        candidate,
+                        selected[-1] if selected else None,
+                        history,
+                        seen_performers,
+                        seen_studios,
+                        covered_content,
+                        content_similarities.get(candidate.classification.scene_id, 0.0),
+                        relax_adjacent=True,
+                    )
+                    if utility:
+                        ranked.append(
+                            (utility[0], candidate.classification.scene_id, candidate, utility)
+                        )
+            if not ranked:
+                diagnostics.append(f"position {position}: candidate pool exhausted")
+                break
+            _, _, chosen, utility = min(ranked, key=lambda item: (-item[0], item[1]))
+            selected.append(chosen)
+            selected_scene_ids.add(chosen.classification.scene_id)
+            selected_utilities.append(utility)
+            if self.diversity_enabled:
+                seen_performers.update(chosen.performers)
+                if chosen.studio_group:
+                    seen_studios.add(chosen.studio_group)
+                covered_content.update(chosen.content)
+                for candidate in remaining:
+                    scene_id = candidate.classification.scene_id
+                    if scene_id in selected_scene_ids:
+                        continue
+                    content_similarities[scene_id] = max(
+                        content_similarities[scene_id],
+                        self._candidate_similarity(candidate, chosen),
+                    )
+
+        timings["selection"] = round((time.perf_counter() - stage_started) * 1000)
+        record_duration("python", "ranking.selection", timings["selection"])
+        stage_started = time.perf_counter()
+        new_selected = selected[len(prefix_items) :]
+        scores = RecommendationModelStore(self.connection).scores(
+            model_id, {candidate.classification.scene_id for candidate in new_selected}
+        )
+        # The displayed "Rank in <lane>" is relative to the lane's best
+        # (issue #212) — see _load_materialized_slate.
+        lane_maxes = _lane_value_maxes(self.connection, model_id)
+        items = list(prefix_items)
+        selected_items = zip(new_selected, selected_utilities, strict=True)
+        for position, (chosen, utility) in enumerate(selected_items, start=len(prefix_items)):
+            score = scores[chosen.classification.scene_id]
+            reasons = ["eligibility.lane"]
+            reasons.extend(f"diversity.{name}" for name, value in utility[1].items() if value > 0)
+            items.append(
+                RecommendationItem(
+                    chosen.classification.scene_id,
+                    lane,
+                    chosen.classification.lane,
+                    chosen.classification.subtype,
+                    position,
+                    score.appeal,
+                    self._live_fit.get(score.scene_id, score.current_fit),
+                    score.confidence,
+                    _rank_value(
+                        chosen.classification.lane_value,
+                        lane_maxes.get(chosen.classification.lane),
+                    ),
+                    utility[0],
+                    utility[1],
+                    utility[2],
+                    score.components,
+                    score.neighbors,
+                    score.eligibility,
+                    chosen.classification.qualification,
+                    tuple(reasons),
+                )
+            )
+        timings["items"] = round((time.perf_counter() - stage_started) * 1000)
+        record_duration("python", "ranking.items", timings["items"])
+        timings["total"] = round((time.perf_counter() - started) * 1000)
+        slate = Slate(model_id, lane, tuple(items), tuple(diagnostics), timings)
+        if exploration == 0 and scene_filter is None:
+            self._save_prepared_slate(slate)
+        return slate
+
+    def lane_order(self, lane: str) -> list[LaneEntry]:
+        """Every scene the lane ranks and could show now, in lane order."""
+        if lane not in LANE_NAMES:
+            raise ValueError(f"unknown lane: {lane}")
+        model_id = RecommendationModelStore(self.connection).current_model_id()
+        if model_id is None:
+            raise RuntimeError("no published model; run build-model first")
+        if self.connection.execute(
+            "SELECT 1 FROM model_lane_order_state WHERE model_id=?", (model_id,)
+        ).fetchone():
+            ordering = "varied" if self.diversity_enabled else "score_first"
+            if not self.diversity_enabled and lane in QUERIED_SCORE_FIRST_LANES:
+                count = self.connection.execute(
+                    "SELECT count(*) FROM model_scene_lane WHERE model_id=? AND lane=?",
+                    (model_id, lane),
+                ).fetchone()[0]
+            else:
+                count = self.connection.execute(
+                    "SELECT count(*) FROM model_lane_order"
+                    " WHERE model_id=? AND lane=? AND ordering=?",
+                    (model_id, lane, ordering),
+                ).fetchone()[0]
+            if not count:
+                return []
+            now_ms = time.time_ns() // 1_000_000
+            direct_plays, unrecovered = self._direct_play_filters(now_ms)
+            rows = self._materialized_rows(
+                model_id, lane, int(count), None, now_ms, direct_plays, unrecovered
+            )
+            return [
+                LaneEntry(str(row["scene_id"]), str(row["source_lane"]), float(row["utility"]))
+                for row in rows
+            ]
+        if lane == "for_you":
+            count = self.connection.execute(
+                "SELECT count(DISTINCT scene_id) FROM model_scene_lane WHERE model_id=?",
+                (model_id,),
+            ).fetchone()[0]
+        else:
+            count = self.connection.execute(
+                "SELECT count(DISTINCT scene_id) FROM model_scene_lane WHERE model_id=? AND lane=?",
+                (model_id, lane),
+            ).fetchone()[0]
+        if not count:
+            return []
+        return [
+            LaneEntry(item.scene_id, item.source_lane, item.final_utility)
+            for item in self.recommend(lane, int(count)).items
+        ]
+
+    def _materialized_rows(
+        self,
+        model_id: str,
+        lane: str,
+        count: int,
+        scene_filter: Callable[[str], bool] | None,
+        now_ms: int,
+        direct_plays: dict[str, int],
+        unrecovered_direct_plays: set[str],
+    ) -> list[sqlite3.Row]:
+        """Up to count of the lane's published rows, in order, that are
+        eligible now and pass scene_filter."""
+        ordering = "varied" if self.diversity_enabled else "score_first"
+        query_score_first = not self.diversity_enabled and lane in QUERIED_SCORE_FIRST_LANES
+        selected_rows: list[sqlite3.Row] = []
+        offset = 0
+        chunk_size = max(100, count)
+        while len(selected_rows) < count:
+            if query_score_first:
+                rows = self.connection.execute(
+                    """
+                    SELECT 0 AS position, scene_id, lane AS source_lane,
+                           lane_value AS utility, ? AS ranking_json
+                    FROM model_scene_lane
+                    WHERE model_id=? AND lane=?
+                    ORDER BY lane_value DESC, scene_id
+                    LIMIT ? OFFSET ?
+                    """,
+                    (SCORE_FIRST_RANKING_JSON, model_id, lane, chunk_size, offset),
+                ).fetchall()
+            else:
+                rows = self.connection.execute(
+                    """
+                    SELECT position, scene_id, source_lane, utility, ranking_json
+                    FROM model_lane_order
+                    WHERE model_id=? AND lane=? AND ordering=?
+                    ORDER BY position LIMIT ? OFFSET ?
+                    """,
+                    (model_id, lane, ordering, chunk_size, offset),
+                ).fetchall()
+            if not rows:
+                break
+            offset += len(rows)
+            scene_ids = {str(row["scene_id"]) for row in rows}
+            eligibility = scene_eligibility(
+                self.connection, now_ms, self.config, scene_ids=scene_ids
+            )
+            selected_rows.extend(
+                row
+                for row in rows
+                if self._materialized_row_is_eligible(
+                    row, eligibility, direct_plays, unrecovered_direct_plays, scene_filter
+                )
+            )
+            if len(rows) < chunk_size:
+                break
+        return selected_rows[:count]
+
+    def _load_materialized_slate(
+        self,
+        model_id: str,
+        lane: str,
+        count: int,
+        scene_filter: Callable[[str], bool] | None = None,
+    ) -> Slate | None:
+        started = time.perf_counter()
+        if not self.connection.execute(
+            "SELECT 1 FROM model_lane_order_state WHERE model_id=?", (model_id,)
+        ).fetchone():
+            return None
+        now_ms = time.time_ns() // 1_000_000
+        direct_plays, unrecovered_direct_plays = self._direct_play_filters(now_ms)
+        selected_rows = self._materialized_rows(
+            model_id, lane, count, scene_filter, now_ms, direct_plays, unrecovered_direct_plays
+        )
+        scene_ids = {str(row["scene_id"]) for row in selected_rows}
+        scores = RecommendationModelStore(self.connection).scores(model_id, scene_ids)
+        classifications: dict[tuple[str, str], LaneClassification] = {}
+        if scene_ids:
+            placeholders = ",".join("?" for _ in scene_ids)
+            for row in self.connection.execute(
+                f"""
+                SELECT scene_id, lane, subtype, lane_value, qualification_json
+                FROM model_scene_lane
+                WHERE model_id=? AND scene_id IN ({placeholders})
+                """,
+                (model_id, *scene_ids),
+            ):
+                classification = LaneClassification(
+                    str(row["scene_id"]),
+                    str(row["lane"]),
+                    str(row["subtype"]) if row["subtype"] else None,
+                    float(row["lane_value"]),
+                    json.loads(str(row["qualification_json"])),
+                )
+                classifications[(classification.scene_id, classification.lane)] = classification
+        self._live_fit, self._live_cooldown = self._live_current_fit(model_id, direct_plays, now_ms)
+        # The displayed "Rank in <lane>" is relative to the lane's best
+        # (issue #212): normalize each item's lane_value by its source lane's
+        # max, so the top of every lane reads 1.00.
+        lane_maxes = _lane_value_maxes(self.connection, model_id)
+        items = []
+        for position, row in enumerate(selected_rows):
+            scene_id = str(row["scene_id"])
+            source_lane = str(row["source_lane"])
+            classification = classifications[(scene_id, source_lane)]
+            score = scores[scene_id]
+            ranking = json.loads(str(row["ranking_json"]))
+            penalties = {
+                str(name): float(value)
+                for name, value in dict(ranking.get("penalties", {})).items()
+            }
+            penalties["live_cooldown"] = self._live_cooldown.get(scene_id, 0.0)
+            bonuses = {
+                str(name): float(value) for name, value in dict(ranking.get("bonuses", {})).items()
+            }
+            reasons = ["eligibility.lane"]
+            reasons.extend(
+                f"diversity.{name}"
+                for name, value in penalties.items()
+                if name != "live_cooldown" and value > 0
+            )
+            items.append(
+                RecommendationItem(
+                    scene_id,
+                    lane,
+                    source_lane,
+                    classification.subtype,
+                    position,
+                    score.appeal,
+                    self._live_fit.get(scene_id, score.current_fit),
+                    score.confidence,
+                    _rank_value(classification.lane_value, lane_maxes.get(source_lane)),
+                    float(row["utility"]) - penalties["live_cooldown"],
+                    penalties,
+                    bonuses,
+                    score.components,
+                    score.neighbors,
+                    score.eligibility,
+                    classification.qualification,
+                    tuple(reasons),
+                )
+            )
+        elapsed = round((time.perf_counter() - started) * 1_000)
+        record_duration("python", "ranking.materialized", elapsed)
+        return Slate(
+            model_id,
+            lane,
+            tuple(items),
+            (),
+            {"materialized": 1, "selection": elapsed, "total": elapsed},
+        )
+
+    def available_count(
+        self,
+        model_id: str | None,
+        lane: str,
+        *,
+        exclude_scene_ids: set[str] | None = None,
+    ) -> int | None:
+        """Count a materialized lane without hydrating recommendation items.
+
+        The lane spans the whole library, but the eligibility inputs (feedback, exclusions,
+        pruning, blocked tags, file availability) change rarely, so the per-lane count is
+        cached under a fingerprint of those inputs and only recomputed when they change.
+        Slate items are still eligibility-checked per request; only the pagination total is
+        reused. Plays are deliberately not part of the fingerprint: they change constantly
+        and only shift best-bets/revisit totals by a few.
+        """
+        started = time.perf_counter()
+        if model_id is None:
+            return None
+        if not self.connection.execute(
+            "SELECT 1 FROM model_lane_order_state WHERE model_id=?", (model_id,)
+        ).fetchone():
+            return None
+        ordering = "varied" if self.diversity_enabled else "score_first"
+        query_score_first = not self.diversity_enabled and lane in QUERIED_SCORE_FIRST_LANES
+        excluded = exclude_scene_ids or set()
+        fingerprint = self._eligibility_fingerprint()
+        cache_key = f"eligibility_count:{model_id}:{lane}:{ordering}"
+        row = self.connection.execute(
+            "SELECT value FROM application_meta WHERE key=?", (cache_key,)
+        ).fetchone()
+        if row is not None:
+            payload = json.loads(str(row[0]))
+            if payload.get("fingerprint") == fingerprint:
+                total = int(payload["count"]) - self._excluded_eligible_count(excluded)
+                elapsed = round((time.perf_counter() - started) * 1_000)
+                record_duration("python", "ranking.available_count", elapsed)
+                return max(0, total)
+        if query_score_first:
+            rows = self.connection.execute(
+                """
+                SELECT scene_id, lane AS source_lane
+                FROM model_scene_lane
+                WHERE model_id=? AND lane=?
+                """,
+                (model_id, lane),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """
+                SELECT scene_id, source_lane
+                FROM model_lane_order
+                WHERE model_id=? AND lane=? AND ordering=?
+                """,
+                (model_id, lane, ordering),
+            ).fetchall()
+        scene_ids = {str(row["scene_id"]) for row in rows}
+        now_ms = time.time_ns() // 1_000_000
+        eligibility = scene_eligibility(self.connection, now_ms, self.config, scene_ids=scene_ids)
+        direct_plays, unrecovered_direct_plays = self._direct_play_filters(now_ms)
+        total = sum(
+            self._materialized_row_is_eligible(
+                row, eligibility, direct_plays, unrecovered_direct_plays
+            )
+            for row in rows
+        )
+        with transaction(self.connection):
+            self.connection.execute(
+                """
+                INSERT INTO application_meta(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                (
+                    cache_key,
+                    json.dumps({"fingerprint": fingerprint, "count": total}, separators=(",", ":")),
+                ),
+            )
+        total -= self._excluded_eligible_count(excluded)
+        elapsed = round((time.perf_counter() - started) * 1_000)
+        record_duration("python", "ranking.available_count", elapsed)
+        return max(0, total)
+
+    def _eligibility_fingerprint(self) -> str:
+        """Cheap digest of the eligibility inputs that change between model rebuilds."""
+        digest = hashlib.sha256()
+        for label, sql in (
+            (
+                "feedback",
+                "SELECT count(*), coalesce(max(occurred_at_ms), 0) FROM feedback"
+                " WHERE reversed_by_id IS NULL",
+            ),
+            (
+                "exclusion",
+                "SELECT count(*), coalesce(max(created_at_ms), 0) FROM exclusion"
+                " WHERE reversed_at_ms IS NULL",
+            ),
+            (
+                "pruning",
+                "SELECT count(*), coalesce(max(updated_at_ms), 0) FROM pruning_candidate",
+            ),
+            (
+                "blocked_tags",
+                "SELECT count(*), coalesce(max(occurred_at_ms), 0) FROM direct_tag_preference"
+                " WHERE blocked=1",
+            ),
+            ("files", "SELECT count(*), 0 FROM source_file WHERE available=1"),
+        ):
+            row = self.connection.execute(sql).fetchone()
+            digest.update(f"{label}:{row[0]}:{row[1]}".encode())
+        return digest.hexdigest()
+
+    def _excluded_eligible_count(self, excluded: set[str]) -> int:
+        """Eligible scenes among this request's per-lane exclusions."""
+        if not excluded:
+            return 0
+        eligibility = scene_eligibility(
+            self.connection, time.time_ns() // 1_000_000, self.config, scene_ids=excluded
+        )
+        return sum(1 for scene_id in excluded if eligibility.get(scene_id, {}).get("eligible"))
+
+    def _score_review_eligibility(
+        self, now_ms: int, scene_ids: set[str]
+    ) -> dict[str, dict[str, object]]:
+        """scene_eligibility for the review surface: the current_thumb_down
+        reason does NOT exclude. Recommendation lanes hide thumb-downed
+        scenes so they are never re-recommended; the score-review surface
+        exists to inspect the bottom of the appeal distribution, and the
+        scenes the user explicitly disliked are exactly the ones it must
+        show. Every other reason (file_unavailable, hard_exclusion,
+        pruning_*, not_now, blocked_tag) still excludes. Mirrors the Go
+        core's scoreReviewEligibility exactly."""
+        eligibility = scene_eligibility(self.connection, now_ms, self.config, scene_ids=scene_ids)
+        for state in eligibility.values():
+            if state.get("eligible"):
+                continue
+            reasons = state.get("reasons", [])
+            if not isinstance(reasons, list):
+                continue
+            state["reasons"] = [r for r in reasons if r != "current_thumb_down"]
+            state["eligible"] = not state["reasons"]
+        return eligibility
+
+    def score_review_available_count(self, model_id: str, max_appeal: float = 0.0) -> int:
+        """Count eligible scenes at the bottom of the appeal distribution
+        (appeal <= max_appeal) without hydrating items, applying the same
+        live eligibility as the slate path."""
+        scene_ids = {
+            str(row[0])
+            for row in self.connection.execute(
+                """
+                SELECT scene_id FROM model_scene_score
+                WHERE model_id=? AND appeal <= ?
+                """,
+                (model_id, max_appeal),
+            )
+        }
+        eligibility = self._score_review_eligibility(time.time_ns() // 1_000_000, scene_ids)
+        return sum(1 for scene_id in scene_ids if eligibility.get(scene_id, {}).get("eligible"))
+
+    def score_review(
+        self, model_id: str, count: int, *, max_appeal: float = 0.0, order: str = "asc"
+    ) -> Slate:
+        """The bottom of the appeal distribution: model_scene_score rows
+        ordered by appeal (ASC = least-appealing first, the default review
+        direction; DESC = most-appealing within the window first), filtered
+        appeal <= max_appeal, the same live eligibility applied as the slate
+        path, hydrated into recommendation items with score-first semantics
+        (final_utility = appeal, the score-first zero penalties/bonuses, lane
+        "score_review")."""
+        if model_id is None:
+            raise RuntimeError("no published model; run build-model first")
+        started = time.perf_counter()
+        now_ms = time.time_ns() // 1_000_000
+        direction = "ASC" if order == "asc" else "DESC"
+        selected_rows: list[sqlite3.Row] = []
+        offset = 0
+        chunk_size = max(100, count)
+        while len(selected_rows) < count:
+            rows = self.connection.execute(
+                f"""
+                SELECT scene_id FROM model_scene_score
+                WHERE model_id=? AND appeal <= ?
+                ORDER BY appeal {direction}, scene_id
+                LIMIT ? OFFSET ?
+                """,
+                (model_id, max_appeal, chunk_size, offset),
+            ).fetchall()
+            if not rows:
+                break
+            offset += len(rows)
+            scene_ids = {str(row["scene_id"]) for row in rows}
+            eligibility = self._score_review_eligibility(now_ms, scene_ids)
+            selected_rows.extend(
+                row for row in rows if eligibility.get(str(row["scene_id"]), {}).get("eligible")
+            )
+            if len(rows) < chunk_size:
+                break
+        selected_rows = selected_rows[:count]
+        scene_ids = {str(row["scene_id"]) for row in selected_rows}
+        scores = RecommendationModelStore(self.connection).scores(model_id, scene_ids)
+        penalties = json.loads(SCORE_FIRST_RANKING_JSON)["penalties"]
+        penalties["live_cooldown"] = 0.0
+        bonuses = json.loads(SCORE_FIRST_RANKING_JSON)["bonuses"]
+        items = []
+        for position, row in enumerate(selected_rows):
+            scene_id = str(row["scene_id"])
+            score = scores[scene_id]
+            items.append(
+                RecommendationItem(
+                    scene_id,
+                    "score_review",
+                    "score_review",
+                    None,
+                    position,
+                    score.appeal,
+                    score.current_fit,
+                    score.confidence,
+                    score.appeal,
+                    score.appeal,
+                    dict(penalties),
+                    dict(bonuses),
+                    score.components,
+                    score.neighbors,
+                    score.eligibility,
+                    {},
+                    ("eligibility.lane",),
+                )
+            )
+        elapsed = round((time.perf_counter() - started) * 1_000)
+        record_duration("python", "ranking.score_review", elapsed)
+        return Slate(
+            model_id,
+            "score_review",
+            tuple(items),
+            (),
+            {"materialized": 1, "selection": elapsed, "total": elapsed},
+        )
+
+    def _direct_play_filters(self, now_ms: int) -> tuple[dict[str, int], set[str]]:
+        direct_plays = {
+            str(row["scene_id"]): int(row["last_played"])
+            for row in self.connection.execute(
+                f"""
+                SELECT scene_id, max(ended_at_ms) AS last_played FROM play_session
+                WHERE provenance='direct_player' AND {OBSERVED_PLAYBACK_SQL} GROUP BY scene_id
+                """
+            )
+        }
+        unrecovered_direct_plays = {
+            scene_id
+            for scene_id, played_at_ms in direct_plays.items()
+            if scene_recovery(
+                max(0.0, (now_ms - played_at_ms) / 86_400_000), config=self.config.model
+            )
+            < 0.10
+        }
+        return direct_plays, unrecovered_direct_plays
+
+    def _scene_filter(
+        self,
+        include_tags: tuple[str, ...],
+        exclude_tags: tuple[str, ...],
+        performer_ids: tuple[str, ...],
+        studio_ids: tuple[str, ...],
+        gender: str,
+    ) -> Callable[[str], bool] | None:
+        """A predicate for get_slate's include/exclude tag, performer,
+        studio, and gender filters, or None when none are set. Mirrors the
+        corresponding per-candidate checks in SimilarityService.scenes
+        (curator/similarity.py), narrowed to the fields that make sense for a
+        lane that's already been classified by the model: no
+        minimum-similarity or favorite-only knob, since those are about
+        ranking a candidate against a source entity, not about narrowing a
+        pre-picked set.
+        """
+        if not (include_tags or exclude_tags or performer_ids or studio_ids or gender):
+            return None
+        performers = self._scene_performers()
+        genders = self._performer_genders() if gender else {}
+        studios = self._studios() if studio_ids else {}
+        included = equivalent_tag_names(self.connection, include_tags)
+        excluded = equivalent_tag_names(self.connection, exclude_tags)
+        filter_names = set().union(*included, *excluded)
+        scene_tags = self._scene_tags(filter_names) if filter_names else {}
+        performer_id_set = set(performer_ids)
+        studio_id_set = set(studio_ids)
+
+        def matches(scene_id: str) -> bool:
+            candidate_performers = performers.get(scene_id, set())
+            if gender and not any(genders.get(value) == gender for value in candidate_performers):
+                return False
+            candidate_tags = scene_tags.get(scene_id, set())
+            if any(not group & candidate_tags for group in included):
+                return False
+            if any(group & candidate_tags for group in excluded):
+                return False
+            if performer_id_set and not performer_id_set <= candidate_performers:
+                return False
+            return not (studio_id_set and studios.get(scene_id) not in studio_id_set)
+
+        return matches
+
+    def _performer_genders(self) -> dict[str, str]:
+        return {
+            str(row["performer_id"]): str(row["gender"] or "")
+            for row in self.connection.execute("SELECT performer_id, gender FROM source_performer")
+        }
+
+    def _scene_performers(self) -> dict[str, set[str]]:
+        result: dict[str, set[str]] = {}
+        for row in self.connection.execute(
+            "SELECT scene_id, performer_id FROM scene_performer ORDER BY scene_id, performer_id"
+        ):
+            result.setdefault(str(row["scene_id"]), set()).add(str(row["performer_id"]))
+        return result
+
+    def _scene_tags(self, names: set[str]) -> dict[str, set[str]]:
+        result: dict[str, set[str]] = {}
+        for row in self.connection.execute(
+            f"""
+            SELECT st.scene_id, t.name FROM scene_tag st
+            JOIN source_tag t USING(tag_id) WHERE lower(t.name) IN
+            ({",".join("?" for _ in names)})
+            """,
+            sorted(names),
+        ):
+            result.setdefault(str(row["scene_id"]), set()).add(str(row["name"]).casefold())
+        return result
+
+    def _studios(self) -> dict[str, str]:
+        return {
+            str(row["scene_id"]): str(row["studio_id"])
+            for row in self.connection.execute(
+                "SELECT scene_id, studio_id FROM source_scene WHERE studio_id IS NOT NULL"
+            )
+        }
+
+    @staticmethod
+    def _materialized_row_is_eligible(
+        row: sqlite3.Row,
+        eligibility: dict[str, dict[str, object]],
+        direct_plays: dict[str, int],
+        unrecovered_direct_plays: set[str],
+        scene_filter: Callable[[str], bool] | None = None,
+    ) -> bool:
+        scene_id = str(row["scene_id"])
+        source_lane = str(row["source_lane"])
+        return (
+            bool(eligibility.get(scene_id, {}).get("eligible", False))
+            and not (source_lane == "best_bets" and scene_id in direct_plays)
+            and not (source_lane == "revisit" and scene_id in unrecovered_direct_plays)
+            and (scene_filter is None or scene_filter(scene_id))
+        )
+
+    def _save_prepared_slate(self, slate: Slate) -> None:
+        with transaction(self.connection):
+            self.connection.execute(
+                """
+                INSERT INTO application_meta(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+                """,
+                (
+                    self._slate_key(slate.model_id, slate.lane),
+                    json.dumps(
+                        {
+                            "created_at_ms": time.time_ns() // 1_000_000,
+                            "items": [asdict(item) for item in slate.items],
+                        },
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+
+    def _load_prepared_slate(self, model_id: str, lane: str, count: int) -> Slate | None:
+        started = time.perf_counter()
+        row = self.connection.execute(
+            "SELECT value FROM application_meta WHERE key=?",
+            (self._slate_key(model_id, lane),),
+        ).fetchone()
+        if row is None:
+            return None
+        payload = json.loads(str(row[0]))
+        created_at_ms = int(payload["created_at_ms"])
+        if time.time_ns() // 1_000_000 - created_at_ms > 3_600_000:
+            return None
+        items = tuple(self._recommendation_item(item) for item in payload["items"])
+        if not items:
+            return Slate(model_id, lane, (), (), {"precomputed": 1, "total": 0})
+        scene_ids = {item.scene_id for item in items}
+        eligibility = scene_eligibility(
+            self.connection,
+            time.time_ns() // 1_000_000,
+            self.config,
+            scene_ids=scene_ids,
+        )
+        placeholders = ",".join("?" for _ in scene_ids)
+        changed = {
+            str(row[0])
+            for row in self.connection.execute(
+                f"""
+                SELECT scene_id FROM play_session
+                WHERE ended_at_ms>=? AND scene_id IN ({placeholders})
+                AND (provenance<>'direct_player' OR {OBSERVED_PLAYBACK_SQL})
+                """,
+                (created_at_ms, *scene_ids),
+            )
+        }
+        selected = tuple(
+            replace(item, position=position)
+            for position, item in enumerate(
+                item
+                for item in items
+                if item.scene_id not in changed
+                and bool(eligibility.get(item.scene_id, {}).get("eligible", False))
+            )
+        )[:count]
+        elapsed = round((time.perf_counter() - started) * 1_000)
+        return Slate(model_id, lane, selected, (), {"precomputed": 1, "total": elapsed})
+
+    @staticmethod
+    def _recommendation_item(payload: dict[str, Any]) -> RecommendationItem:
+        return RecommendationItem(
+            scene_id=str(payload["scene_id"]),
+            lane=str(payload["lane"]),
+            source_lane=str(payload["source_lane"]),
+            subtype=str(payload["subtype"]) if payload.get("subtype") else None,
+            position=int(payload["position"]),
+            appeal=float(payload["appeal"]),
+            current_fit=float(payload["current_fit"]),
+            confidence=float(payload["confidence"]),
+            lane_value=float(payload["lane_value"]),
+            final_utility=float(payload["final_utility"]),
+            penalties={str(k): float(v) for k, v in dict(payload["penalties"]).items()},
+            bonuses={str(k): float(v) for k, v in dict(payload["bonuses"]).items()},
+            components=dict(payload["components"]),
+            neighbors=tuple(dict(item) for item in payload["neighbors"]),
+            eligibility=dict(payload["eligibility"]),
+            qualification=dict(payload["qualification"]),
+            reason_ids=tuple(map(str, payload["reason_ids"])),
+        )
+
+    def _load_prepared(self, model_id: str, lanes: set[str]) -> tuple[_Candidate, ...]:
+        placeholders = ",".join("?" for _ in lanes)
+        rows = self.connection.execute(
+            f"""
+            SELECT lane, candidates_json, candidate_count FROM model_lane_candidate_cache
+            WHERE model_id=? AND lane IN ({placeholders})
+            """,
+            (model_id, *lanes),
+        ).fetchall()
+        if {str(row["lane"]) for row in rows} != lanes:
+            return ()
+        expected = {
+            str(row["lane"]): int(row["candidate_count"])
+            for row in self.connection.execute(
+                f"""
+                SELECT lane, count(*) AS candidate_count FROM model_scene_lane
+                WHERE model_id=? AND lane IN ({placeholders}) GROUP BY lane
+                """,
+                (model_id, *lanes),
+            )
+        }
+        if any(int(row["candidate_count"]) != expected.get(str(row["lane"]), 0) for row in rows):
+            return ()
+        candidates = tuple(
+            _Candidate(
+                LaneClassification(
+                    str(item["scene_id"]),
+                    str(item["lane"]),
+                    str(item["subtype"]) if item.get("subtype") else None,
+                    float(item["lane_value"]),
+                    dict(item["qualification"]),
+                ),
+                tuple(map(str, item["performers"])),
+                str(item["studio_group"]) if item.get("studio_group") else None,
+                {str(name): float(value) for name, value in item["content"].items()},
+            )
+            for row in rows
+            for item in json.loads(str(row["candidates_json"]))
+        )
+        self._cached_vectors = {
+            candidate.classification.scene_id: candidate.content for candidate in candidates
+        }
+        return candidates
+
+    def _save_prepared_candidates(
+        self, model_id: str, lanes: set[str], candidates: tuple[_Candidate, ...]
+    ) -> None:
+        rows = []
+        for lane in lanes:
+            payload = [
+                {
+                    "scene_id": item.classification.scene_id,
+                    "lane": item.classification.lane,
+                    "subtype": item.classification.subtype,
+                    "lane_value": item.classification.lane_value,
+                    "qualification": item.classification.qualification,
+                    "performers": item.performers,
+                    "studio_group": item.studio_group,
+                    "content": item.content,
+                }
+                for item in candidates
+                if item.classification.lane == lane
+            ]
+            rows.append(
+                (
+                    model_id,
+                    lane,
+                    json.dumps(payload, separators=(",", ":")),
+                    len(payload),
+                    time.time_ns() // 1_000_000,
+                )
+            )
+        with transaction(self.connection):
+            self.connection.executemany(
+                """
+                INSERT INTO model_lane_candidate_cache(
+                    model_id, lane, candidates_json, candidate_count, created_at_ms
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(model_id, lane) DO UPDATE SET
+                    candidates_json=excluded.candidates_json,
+                    candidate_count=excluded.candidate_count,
+                    created_at_ms=excluded.created_at_ms
+                """,
+                rows,
+            )
+
+    def _target(self, lane: str, position: int, exploration: float) -> str:
+        if lane == "for_you":
+            base = self.config.ranking.for_you_pattern
+            alternative = FAMILIAR_PATTERN if exploration < 0 else ADVENTUROUS_PATTERN
+            mixed_slots = round(abs(exploration) * len(base))
+            use_alternative = (position * 7) % len(base) < mixed_slots
+            pattern = alternative if use_alternative else base
+            return pattern[position % len(pattern)]
+        return lane
+
+    def _candidates(
+        self, model_id: str, classifications: tuple[LaneClassification, ...]
+    ) -> list[_Candidate]:
+        feature_row = self.connection.execute(
+            "SELECT feature_version FROM model_version WHERE model_id=?", (model_id,)
+        ).fetchone()
+        scene_ids = {item.scene_id for item in classifications}
+        vectors = FeatureStore(self.connection).scene_content_vectors(
+            str(feature_row[0]), scene_ids
+        )
+        self._cached_vectors = vectors
+        performers: dict[str, list[str]] = {}
+        placeholders = ",".join("?" for _ in scene_ids)
+        for row in self.connection.execute(
+            f"""
+            SELECT scene_id, performer_id FROM scene_performer
+            WHERE scene_id IN ({placeholders}) ORDER BY scene_id, position
+            """,
+            tuple(scene_ids),
+        ):
+            performers.setdefault(str(row["scene_id"]), []).append(str(row["performer_id"]))
+        studios = {
+            str(row["scene_id"]): (
+                str(row["parent_studio_id"] or row["studio_id"]) if row["studio_id"] else None
+            )
+            for row in self.connection.execute(
+                f"""
+                SELECT s.scene_id, s.studio_id, st.parent_studio_id
+                FROM source_scene s LEFT JOIN source_studio st ON st.studio_id=s.studio_id
+                WHERE s.scene_id IN ({placeholders})
+                """,
+                tuple(scene_ids),
+            )
+        }
+        return [
+            _Candidate(
+                classification,
+                tuple(performers.get(classification.scene_id, ())),
+                studios.get(classification.scene_id),
+                vectors.get(classification.scene_id, {}),
+            )
+            for classification in classifications
+        ]
+
+    def _utility(
+        self,
+        candidate: _Candidate,
+        previous: _Candidate | None,
+        history: tuple[set[str], set[str], tuple[dict[str, float], ...]],
+        seen_performers: set[str],
+        seen_studios: set[str],
+        covered_content: set[str],
+        content_similarity: float,
+        *,
+        relax_adjacent: bool = False,
+    ) -> tuple[float, dict[str, float], dict[str, float]] | None:
+        if (
+            self.diversity_enabled
+            and previous
+            and not self.config.ranking.adjacent_shared_performers
+            and not relax_adjacent
+            and set(candidate.performers) & set(previous.performers)
+        ):
+            return None
+        penalties = {
+            "performer": 0.0,
+            "studio": 0.0,
+            "content": 0.0,
+            "history": 0.0,
+            "live_cooldown": 0.0,
+        }
+        penalties["live_cooldown"] = self._live_cooldown.get(candidate.classification.scene_id, 0.0)
+        uncovered_share = 0.0
+        if self.diversity_enabled:
+            if set(candidate.performers) & seen_performers:
+                penalties["performer"] = self.config.ranking.performer_repeat_penalty
+            if candidate.studio_group and candidate.studio_group in seen_studios:
+                penalties["studio"] = self.config.ranking.studio_penalty
+            penalties["content"] = self.config.ranking.content_penalty * content_similarity
+            history_performers, history_studios, history_vectors = history
+            if set(candidate.performers) & history_performers:
+                penalties["history"] += self.config.ranking.history_performer_penalty
+            if candidate.studio_group and candidate.studio_group in history_studios:
+                penalties["history"] += self.config.ranking.history_studio_penalty
+            if history_vectors:
+                penalties["history"] += (
+                    self.config.ranking.history_content_penalty
+                    * self._history_similarities[candidate.classification.scene_id]
+                )
+            uncovered_share = (
+                len(set(candidate.content) - covered_content) / len(candidate.content)
+                if candidate.content
+                else 0.0
+            )
+        bonuses = {
+            "uncovered_content": self.config.ranking.uncovered_content_bonus * uncovered_share
+        }
+        final = (
+            candidate.classification.lane_value + sum(bonuses.values()) - sum(penalties.values())
+        )
+        return final, penalties, bonuses
+
+    def _slate_key(self, model_id: str, lane: str) -> str:
+        suffix = "" if self.diversity_enabled else ":unshuffled"
+        return f"slate:{model_id}:{lane}{suffix}"
+
+    def _live_current_fit(
+        self, model_id: str, direct_plays: dict[str, int], now_ms: int
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        if not direct_plays:
+            return {}, {}
+        placeholders = ",".join("?" for _ in direct_plays)
+        rows = self.connection.execute(
+            f"""
+            SELECT scene_id, appeal, current_fit FROM model_scene_score
+            WHERE model_id=? AND scene_id IN ({placeholders})
+            """,
+            (model_id, *direct_plays),
+        )
+        result: dict[str, float] = {}
+        penalties: dict[str, float] = {}
+        for row in rows:
+            scene_id = str(row["scene_id"])
+            appeal = float(row["appeal"])
+            days = max(0.0, (now_ms - direct_plays[scene_id]) / 86_400_000)
+            recovery = scene_recovery(days, config=self.config.model)
+            live_fit = appeal - max(0.0, appeal) * (1 - recovery)
+            stored_fit = float(row["current_fit"])
+            result[scene_id] = min(stored_fit, live_fit)
+            penalties[scene_id] = max(0.0, stored_fit - live_fit)
+        return result, penalties
+
+    def _candidate_similarity(self, left: _Candidate, right: _Candidate) -> float:
+        left_id = left.classification.scene_id
+        right_id = right.classification.scene_id
+        key = (left_id, right_id) if left_id <= right_id else (right_id, left_id)
+        if key not in self._pair_similarities:
+            self._pair_similarities[key] = self._cosine(left.content, right.content)
+        return self._pair_similarities[key]
+
+    def _history_context(
+        self, model_id: str
+    ) -> tuple[set[str], set[str], tuple[dict[str, float], ...]]:
+        rows = self.connection.execute(
+            """
+            SELECT scene_id FROM recommendation_history
+            ORDER BY shown_at_ms DESC LIMIT ?
+            """,
+            (self.config.ranking.history_size,),
+        ).fetchall()
+        scene_ids = [str(row[0]) for row in rows]
+        if not scene_ids:
+            return set(), set(), ()
+        placeholders = ",".join("?" for _ in scene_ids)
+        performers = {
+            str(row[0])
+            for row in self.connection.execute(
+                f"SELECT performer_id FROM scene_performer WHERE scene_id IN ({placeholders})",
+                scene_ids,
+            )
+        }
+        studios = {
+            str(row[0])
+            for row in self.connection.execute(
+                f"""
+                SELECT COALESCE(st.parent_studio_id, s.studio_id)
+                FROM source_scene s LEFT JOIN source_studio st ON st.studio_id=s.studio_id
+                WHERE s.scene_id IN ({placeholders}) AND s.studio_id IS NOT NULL
+                """,
+                scene_ids,
+            )
+        }
+        return (
+            performers,
+            studios,
+            # Content repetition is about the immediate run; performer and studio
+            # repetition still use the full history window above.
+            tuple(
+                self._cached_vectors[scene_id]
+                for scene_id in scene_ids[:10]
+                if scene_id in self._cached_vectors
+            ),
+        )
+
+    @staticmethod
+    def _cosine(left: dict[str, float], right: dict[str, float]) -> float:
+        if not left or not right:
+            return 0.0
+        dot = sum(value * right.get(name, 0.0) for name, value in left.items())
+        left_norm = math.sqrt(sum(value * value for value in left.values()))
+        right_norm = math.sqrt(sum(value * value for value in right.values()))
+        return dot / (left_norm * right_norm) if left_norm and right_norm else 0.0

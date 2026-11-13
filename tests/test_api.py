@@ -1,0 +1,696 @@
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from curator.api import CuratorAPI
+from curator.explanations import ExplanationService
+from curator.features import FeatureStore
+from curator.model import ModelUpdateCoordinator, PreferenceModelBuilder
+from curator.ranking import Slate, SlateBuilder
+from curator.similarity import SimilarityService
+from curator.storage import MigrationRunner, connect_database
+from tests.model.test_builder import DAY_MS, REFERENCE_MS, _database
+
+
+def _multi_candidate_database(path: Path) -> sqlite3.Connection:
+    """_database plus three more revisit-qualifying scenes.
+
+    Blind Spots (unlike the Adventure lane it replaced) gates on corroborated
+    dark facets that need a realistically sized library to appear at all
+    (dark_min_library=60), so it cannot supply _database's small fixture with
+    extra for_you candidates the way Adventure's admit-everyone lane used to.
+    These tests need multiple for_you candidates for paging/materialization
+    behavior, not Blind Spots specifically, so more scenes are added on the
+    cheaper revisit path instead — same recipe as 'old-good's own play
+    history (played well past cooldown recovery, a durable 'o' signal).
+    """
+    connection = _database(path)
+    scenes = (
+        ("extra-good-1", "studio-1"),
+        ("extra-good-2", "studio-1"),
+        ("extra-good-3", "studio-1"),
+    )
+    connection.executemany(
+        "INSERT INTO source_scene(scene_id, title, studio_id, source_hash) VALUES (?, ?, ?, ?)",
+        tuple((scene_id, scene_id, studio_id, scene_id) for scene_id, studio_id in scenes),
+    )
+    connection.executemany(
+        "INSERT INTO source_file(file_id, scene_id, available, source_hash) VALUES (?, ?, 1, ?)",
+        tuple((f"file-{scene_id}", scene_id, f"file-hash-{scene_id}") for scene_id, _ in scenes),
+    )
+    connection.executemany(
+        "INSERT INTO scene_tag(scene_id, tag_id, provenance) VALUES (?, 'good', 'scene')",
+        tuple((scene_id,) for scene_id, _ in scenes),
+    )
+    connection.executemany(
+        "INSERT INTO scene_performer(scene_id, performer_id, position) VALUES (?, 'p1', 0)",
+        tuple((scene_id,) for scene_id, _ in scenes),
+    )
+    connection.executemany(
+        "INSERT INTO source_play(scene_id, played_at_ms, ordinal) VALUES (?, ?, 0)",
+        tuple((scene_id, REFERENCE_MS - 120 * DAY_MS) for scene_id, _ in scenes),
+    )
+    connection.executemany(
+        """
+        INSERT INTO behavior_event(
+            event_id, event_type, scene_id, occurred_at_ms, outcome, confidence,
+            provenance, payload_json
+        ) VALUES (?, 'occasion_outcome', ?, ?, 1.0, 1, 'synthetic', '{"primary_signal":"o"}')
+        """,
+        tuple(
+            (f"event-{scene_id}", scene_id, REFERENCE_MS - 120 * DAY_MS) for scene_id, _ in scenes
+        ),
+    )
+    return connection
+
+
+def test_slate_api_defers_explanations_until_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection = _multi_candidate_database(tmp_path / "curator.sqlite3")
+    PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+    monkeypatch.setattr(
+        ExplanationService,
+        "ensure",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("eager explanation")),
+    )
+
+    result = CuratorAPI(connection).get_slate(
+        "for_you", 3, impression_id="api-impression", now_ms=REFERENCE_MS
+    )
+
+    assert result["impression_id"] == "api-impression"
+    assert result["config_updated_at_ms"] == 0
+    assert result["model_pending"] is False
+    assert result["rebuilding"] is False
+    assert set(result["timings_ms"]) == {
+        "model_update",
+        "ranking",
+        "impression",
+        "total",
+    }
+    assert len(result["items"]) == 3
+    assert all(
+        "explanation" not in item and "supporting_reasons" not in item for item in result["items"]
+    )
+    assert (
+        connection.execute(
+            "SELECT count(*) FROM model_scene_reason WHERE model_id=?",
+            (result["model_id"],),
+        ).fetchone()[0]
+        == 0
+    )
+    explanation = CuratorAPI(connection).explanation(str(result["items"][0]["scene_id"]))
+    assert explanation["schema_version"] == 2
+    assert explanation["summary"]
+    assert explanation["supporting_reasons"]
+    assert explanation["components"]
+    assert {row["name"] for row in explanation["components"]} >= {
+        "content_similarity",
+        "model_confidence",
+    }
+    assert [axis["name"] for axis in explanation["evidence_fingerprint"]["axes"]] == [
+        "content",
+        "performers",
+        "studios",
+        "similar_scenes",
+        "direct_history",
+    ]
+    assert explanation["evidence_fingerprint"]["metadata_coverage"]["available"] is True
+    assert (
+        connection.execute(
+            "SELECT count(*) FROM impression WHERE impression_id='api-impression'"
+        ).fetchone()[0]
+        == 1
+    )
+    excluded = {item["scene_id"] for item in result["items"]}
+    replacement = CuratorAPI(connection).get_slate(
+        "for_you", 1, exclude_scene_ids=excluded, now_ms=REFERENCE_MS
+    )
+    assert replacement["items"][0]["scene_id"] not in excluded
+
+
+def test_slate_api_never_builds_a_pending_model_inline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection = _database(tmp_path / "curator.sqlite3")
+    PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+    ModelUpdateCoordinator(connection, clock_ms=lambda: REFERENCE_MS).request("feedback")
+    monkeypatch.setattr(
+        PreferenceModelBuilder,
+        "build",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("inline model build")),
+    )
+
+    result = CuratorAPI(connection).get_slate("for_you", 1, now_ms=REFERENCE_MS)
+
+    assert result["model_pending"] is True
+    assert result["items"]
+
+
+def test_feedback_history_is_newest_first_paginated_and_correctable(tmp_path: Path) -> None:
+    connection = _database(tmp_path / "curator.sqlite3")
+    api = CuratorAPI(connection)
+    existing = int(api.feedback_history()["total"])
+    for feedback_id, feedback_type, occurred_at_ms in (
+        ("older", "thumb_down", REFERENCE_MS + 10),
+        ("newer", "not_now", REFERENCE_MS + 20),
+    ):
+        api.submit_feedback(
+            [
+                {
+                    "feedback_id": feedback_id,
+                    "scene_id": "old-good",
+                    "feedback_type": feedback_type,
+                    "occurred_at_ms": occurred_at_ms,
+                }
+            ]
+        )
+
+    first = api.feedback_history(page=1, page_size=1)
+    second = api.feedback_history(page=2, page_size=1)
+    assert first["total"] == existing + 2
+    assert first["items"][0]["feedback_id"] == "newer"
+    assert second["items"][0]["feedback_id"] == "older"
+
+    api.correct_feedback("newer", "undo", None, now_ms=REFERENCE_MS + 30)
+    assert api.feedback_history()["items"][0]["reversed_by_id"] == "undo"
+
+
+def test_slate_api_pages_one_ranked_prefix_with_global_positions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection = _multi_candidate_database(tmp_path / "curator.sqlite3")
+    PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+    api = CuratorAPI(connection)
+    fail = lambda *_args, **_kwargs: (_ for _ in ()).throw(  # noqa: E731
+        AssertionError("materialized requests must not hydrate candidates")
+    )
+    monkeypatch.setattr("curator.ranking.slate.SlateBuilder._load_prepared", fail)
+    monkeypatch.setattr("curator.ranking.slate.SlateBuilder._candidates", fail)
+    assert api.get_slate("best_bets", 1, now_ms=REFERENCE_MS)["items"] == []
+
+    whole = api.get_slate("for_you", 2, now_ms=REFERENCE_MS)
+    first = api.get_slate("for_you", 1, page=1, impression_id="page-1", now_ms=REFERENCE_MS)
+    second = api.get_slate("for_you", 1, page=2, impression_id="page-2", now_ms=REFERENCE_MS)
+
+    assert first["has_more"] is True
+    assert first["total"] == whole["total"]
+    assert first["ranking_timings_ms"]["materialized"] == 1
+    assert [first["items"][0]["scene_id"], second["items"][0]["scene_id"]] == [
+        item["scene_id"] for item in whole["items"]
+    ]
+    assert [first["items"][0]["position"], second["items"][0]["position"]] == [0, 1]
+    assert (
+        connection.execute(
+            "SELECT position FROM impression_item WHERE impression_id='page-2'"
+        ).fetchone()[0]
+        == 1
+    )
+    assert api.get_slate("for_you", 20, page=20, now_ms=REFERENCE_MS)["has_more"] is False
+    api.update_config({"diversity_enabled": False}, now_ms=REFERENCE_MS)
+    assert (
+        api.get_slate("for_you", 2, now_ms=REFERENCE_MS)["ranking_timings_ms"]["materialized"] == 1
+    )
+
+
+def test_slate_api_materializes_only_through_requested_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection = _multi_candidate_database(tmp_path / "curator.sqlite3")
+    PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+    requested_counts: list[int] = []
+    recommend = SlateBuilder.recommend
+
+    def observed(
+        self: SlateBuilder,
+        lane: str,
+        count: int,
+        *,
+        exploration: float = 0,
+        include_tags: tuple[str, ...] = (),
+        exclude_tags: tuple[str, ...] = (),
+        performer_ids: tuple[str, ...] = (),
+        studio_ids: tuple[str, ...] = (),
+        gender: str = "",
+    ) -> Slate:
+        requested_counts.append(count)
+        return recommend(
+            self,
+            lane,
+            count,
+            exploration=exploration,
+            include_tags=include_tags,
+            exclude_tags=exclude_tags,
+            performer_ids=performer_ids,
+            studio_ids=studio_ids,
+            gender=gender,
+        )
+
+    monkeypatch.setattr(SlateBuilder, "recommend", observed)
+
+    # for_you: any lane outside QUERIED_SCORE_FIRST_LANES exercises this
+    # caching path (materialize only through the requested page rather than
+    # the whole candidate set); blind_spots also qualifies but needs a
+    # realistically sized library to produce any candidates at all, which
+    # this fixture doesn't have.
+    result = CuratorAPI(connection).get_slate("for_you", 1, page=2, now_ms=REFERENCE_MS)
+
+    assert result["items"]
+    assert requested_counts == [2]
+
+
+def test_scene_inspector_returns_complete_score_state(tmp_path: Path) -> None:
+    connection = _database(tmp_path / "curator.sqlite3")
+    PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+
+    inspected = CuratorAPI(connection).inspector("scene", "old-good")
+
+    assert inspected["entity_type"] == "scene"
+    assert inspected["score"]["scene_id"] == "old-good"
+    assert inspected["explanation"]["summary"]
+
+
+def test_taste_profile_exposes_inference_and_direct_answer(tmp_path: Path) -> None:
+    connection = _database(tmp_path / "curator.sqlite3")
+    connection.execute(
+        "INSERT INTO source_tag(tag_id, name, source_hash) VALUES ('unused', 'Unused', 'unused')"
+    )
+    connection.execute(
+        """
+        INSERT INTO source_tag(tag_id, name, source_hash)
+        VALUES ('attribute', 'Black Man', 'attribute')
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO source_tag_stash_id(tag_id, endpoint, stash_id)
+        VALUES ('unused', 'https://stashdb.org/graphql', 'external-unused')
+        """
+    )
+    PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+    connection.execute("UPDATE tag_role SET role='performer_attribute' WHERE tag_id='attribute'")
+    api = CuratorAPI(connection)
+
+    profile = api.taste_profile()
+    good = next(item for item in profile["items"] if item["tag_id"] == "good")
+    assert good["name"] == "Familiar Scenario"
+    assert good["scene_count"] == 4
+    assert good["direct_value"] is None
+    assert good["prompt"] in {"belief", "uncertain"}
+    unused = next(item for item in profile["items"] if item["tag_id"] == "unused")
+    assert unused["scene_count"] == 0
+    assert unused["inferred_value"] == 0
+    attribute = next(item for item in profile["items"] if item["tag_id"] == "attribute")
+    assert attribute["scene_count"] == 0
+    assert attribute["prompt"] is None
+
+    assert (
+        api.submit_tag_preferences(
+            [{"preference_id": "direct", "tag_id": "good", "value": 0.5, "occurred_at_ms": 10}]
+        )["accepted"]
+        == 1
+    )
+    good = next(item for item in api.taste_profile()["items"] if item["tag_id"] == "good")
+    assert good["direct_value"] == 0.5
+    assert good["prompt"] is None
+    assert (
+        api.submit_tag_preferences(
+            [{"preference_id": "unused", "tag_id": "unused", "value": -1, "occurred_at_ms": 11}]
+        )["accepted"]
+        == 1
+    )
+    assert api.external_tag_choices([{"id": "external-unused", "name": "External name"}])[
+        "items"
+    ] == [{"tag_id": "unused", "name": "Unused", "direct_value": -1.0, "direct_blocked": False}]
+    assert (
+        api.submit_tag_preferences(
+            [
+                {
+                    "preference_id": "attribute",
+                    "tag_id": "attribute",
+                    "value": -1,
+                    "occurred_at_ms": 12,
+                }
+            ]
+        )["accepted"]
+        == 1
+    )
+    assert api.external_tag_choices([{"name": "Black Man"}])["items"] == [
+        {"tag_id": "attribute", "name": "Black Man", "direct_value": -1.0, "direct_blocked": False}
+    ]
+
+
+def test_similar_scenes_blend_similarity_with_appeal_and_explain_relationships(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    connection = _database(tmp_path / "curator.sqlite3")
+    PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+    original = FeatureStore.scene_content_vectors
+
+    def bounded_vectors(self, feature_version, scene_ids=None):
+        assert scene_ids is not None
+        return original(self, feature_version, scene_ids)
+
+    studio_scans = 0
+    original_studios = SimilarityService._studios
+
+    def counted_studios(self):
+        nonlocal studio_scans
+        studio_scans += 1
+        return original_studios(self)
+
+    monkeypatch.setattr(FeatureStore, "scene_content_vectors", bounded_vectors)
+    monkeypatch.setattr(SimilarityService, "_studios", counted_studios)
+
+    result = CuratorAPI(connection).similar(
+        "scene", "old-good", 5, impression_id="similar-impression", now_ms=REFERENCE_MS
+    )
+
+    assert result["entity_type"] == "scene"
+    assert result["items"]
+    assert result["items"][0]["entity_id"] != "old-good"
+    assert all(
+        item["rank_score"]
+        == pytest.approx(
+            0.7 * item["similarity"]
+            + 0.3 * item["appeal"]
+            + 0.05 * item.get("details", {}).get("multi_hop_reach", 0.0)
+        )
+        for item in result["items"]
+    )
+    assert any("shared_content" in item["relationships"] for item in result["items"])
+    assert all(item["label"] for item in result["items"])
+    assert studio_scans == 1
+    impression = connection.execute(
+        "SELECT lane, request_context_json FROM impression WHERE impression_id='similar-impression'"
+    ).fetchone()
+    assert impression["lane"] == "similar"
+    assert '"provenance":"similar"' in impression["request_context_json"]
+
+
+def test_similar_performers_are_preference_aware_and_inspectable(tmp_path: Path) -> None:
+    connection = _database(tmp_path / "curator.sqlite3")
+    PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+
+    result = CuratorAPI(connection).similar("performer", "p1", 2)
+
+    assert [item["entity_id"] for item in result["items"]] == ["p3", "p2"]
+    assert result["items"][0]["rank_score"] > result["items"][1]["rank_score"]
+    assert result["items"][0]["details"]["blocks"]
+
+
+def test_local_similarity_pages_one_ranked_prefix(tmp_path: Path) -> None:
+    connection = _database(tmp_path / "curator.sqlite3")
+    PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+    api = CuratorAPI(connection)
+
+    whole = api.similar("scene", "old-good", 2)
+    first = api.similar("scene", "old-good", 1, page=1)
+    second = api.similar("scene", "old-good", 1, page=2)
+
+    assert first["has_more"] is True
+    assert first["total"] == whole["total"]
+    assert [first["items"][0]["entity_id"], second["items"][0]["entity_id"]] == [
+        item["entity_id"] for item in whole["items"]
+    ]
+    assert [first["items"][0]["position"], second["items"][0]["position"]] == [0, 1]
+
+
+def test_local_similarity_filters_gender(tmp_path: Path) -> None:
+    connection = _database(tmp_path / "curator.sqlite3")
+    connection.execute("UPDATE source_performer SET gender='FEMALE' WHERE performer_id='p3'")
+    connection.execute("UPDATE source_performer SET gender='MALE' WHERE performer_id='p2'")
+    PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+
+    result = CuratorAPI(connection).similar("performer", "p1", gender="FEMALE")
+
+    assert [item["entity_id"] for item in result["items"]] == ["p3"]
+
+
+def test_local_scene_similarity_filters_candidates(tmp_path: Path) -> None:
+    connection = _database(tmp_path / "curator.sqlite3")
+    PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+    api = CuratorAPI(connection)
+    connection.execute(
+        "INSERT INTO source_tag(tag_id, name, source_hash) VALUES ('appearance', 'Big Ass', 'a')"
+    )
+    connection.execute(
+        "INSERT INTO scene_tag(scene_id, tag_id, provenance) VALUES "
+        "('recent-good', 'appearance', 'scene')"
+    )
+
+    tagged = api.similar("scene", "old-good", include_tags=("Familiar Scenario",))
+    assert [item["entity_id"] for item in tagged["items"]] == [
+        "recent-good",
+        "unlabeled",
+        "unseen-good",
+    ]
+    performer = api.similar("scene", "old-good", performer_ids=("p3",))
+    assert [item["entity_id"] for item in performer["items"]] == [
+        "unlabeled",
+        "unseen-good",
+    ]
+    assert [
+        item["entity_id"]
+        for item in api.similar("scene", "old-good", exclude_tags=("Familiar Scenario",))["items"]
+    ] == ["unusual"]
+    assert "recent-good" not in {
+        item["entity_id"]
+        for item in api.similar("scene", "old-good", exclude_tags=("Big Ass",))["items"]
+    }
+    assert [
+        item["entity_id"] for item in api.similar("scene", "old-good", favorite_only=True)["items"]
+    ] == ["recent-good"]
+
+
+def test_similar_scene_does_not_wait_for_impression_write_lock(tmp_path: Path) -> None:
+    path = tmp_path / "curator.sqlite3"
+    connection = _database(path)
+    PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+    locker = connect_database(path)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        result = CuratorAPI(connection).similar(
+            "scene", "old-good", impression_id="locked-impression"
+        )
+    finally:
+        locker.rollback()
+        locker.close()
+
+    assert result["items"]
+    assert result["impression_id"] is None
+    assert (
+        connection.execute(
+            "SELECT 1 FROM impression WHERE impression_id='locked-impression'"
+        ).fetchone()
+        is None
+    )
+
+
+def test_sidecar_configuration_is_validated(tmp_path: Path) -> None:
+    connection = _database(tmp_path / "curator.sqlite3")
+    api = CuratorAPI(connection)
+    assert api.config()["config"]["rotation_cooldown_days"] == 7
+    assert api.config()["config"]["recommendation_endless_scroll"] is False
+
+    config = api.update_config(
+        {
+            "page_size": 30,
+            "diversity_enabled": False,
+            "rotation_cooldown_days": 3,
+            "recommendation_endless_scroll": True,
+        },
+        now_ms=10,
+    )["config"]
+    assert config["page_size"] == 30
+    assert config["diversity_enabled"] is False
+    assert config["rotation_cooldown_days"] == 3
+    assert config["recommendation_endless_scroll"] is True
+    with pytest.raises(ValueError, match="recommendation_endless_scroll"):
+        api.update_config({"recommendation_endless_scroll": "true"})
+    with pytest.raises(ValueError, match="page_size"):
+        api.update_config({"page_size": 0})
+    with pytest.raises(ValueError, match="diversity_enabled"):
+        api.update_config({"diversity_enabled": 0})
+    with pytest.raises(ValueError, match="rotation_cooldown_days"):
+        api.update_config({"rotation_cooldown_days": 0})
+    with pytest.raises(ValueError, match="unknown"):
+        api.update_config({"mystery": True})
+
+
+def test_prune_candidates_are_reversible_tags_not_deletions(tmp_path: Path) -> None:
+    connection = _database(tmp_path / "curator.sqlite3")
+    PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+    api = CuratorAPI(connection)
+
+    candidates = api.prune_candidates("explicit")
+    assert [item["scene_id"] for item in candidates["items"]] == ["disliked"]
+    assert "Explicit negative feedback" in candidates["items"][0]["evidence"]
+    assert api.prune_candidates("suspects", aggressiveness=0.5)["aggressiveness"] == 0.5
+    with pytest.raises(ValueError, match="aggressiveness"):
+        api.prune_candidates("suspects", aggressiveness=1.1)
+
+    api.record_prune_tags(["disliked"], True, "prune-tag", "[Prune]")
+    assert api.prune_candidates("tagged")["items"][0]["scene_id"] == "disliked"
+    updated_at_ms = connection.execute(
+        "SELECT updated_at_ms FROM pruning_candidate WHERE scene_id='disliked'"
+    ).fetchone()[0]
+    assert api.reconcile_prune_tag("[Prune]") is False
+    assert (
+        connection.execute(
+            "SELECT updated_at_ms FROM pruning_candidate WHERE scene_id='disliked'"
+        ).fetchone()[0]
+        == updated_at_ms
+    )
+    assert (
+        connection.execute(
+            "SELECT state FROM pruning_candidate WHERE scene_id='disliked'"
+        ).fetchone()[0]
+        == "remove"
+    )
+
+    api.record_prune_tags(["disliked"], False, "prune-tag", "[Prune]")
+    assert api.prune_candidates("tagged")["items"] == []
+    assert (
+        connection.execute("SELECT 1 FROM pruning_candidate WHERE scene_id='disliked'").fetchone()
+        is None
+    )
+
+
+def _breadth_prune_database(path: Path) -> sqlite3.Connection:
+    """One studio far over Blind Spots' breadth ceiling (dark_max_library=500)
+    and almost entirely unplayed, plus a small played control studio so
+    darkness has a non-zero base rate to compare against.
+
+    Exercises CuratorAPI.prune_candidates's 'breadth' view, which routes
+    exactly the signal Blind Spots discards for being too broad to be a
+    region — see docs/workpackage-lane-redesign.md, "Route the
+    breadth-ceiling signal to pruning".
+    """
+    connection = connect_database(path)
+    MigrationRunner(connection).migrate(applied_at_ms=1)
+    connection.execute(
+        """
+        INSERT INTO feature_build(
+            feature_version, status, config_json, source_fingerprint,
+            created_at_ms, published_at_ms
+        ) VALUES ('features', 'published', '{}', 'source', 1, 1)
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO model_version(
+            model_id, status, feature_version, config_json, created_at_ms, published_at_ms
+        ) VALUES ('model', 'published', 'features', '{}', 1, 1)
+        """
+    )
+    connection.executemany(
+        "INSERT INTO source_studio(studio_id, name, source_hash) VALUES (?, ?, ?)",
+        (("mega-studio", "Mega Studio", "ms"), ("control-studio", "Control Studio", "cs")),
+    )
+    connection.executemany(
+        "INSERT INTO source_scene(scene_id, title, studio_id, source_hash) VALUES (?, ?, ?, ?)",
+        (
+            (f"mega-{index:03d}", f"mega-{index:03d}", "mega-studio", f"mega-{index:03d}")
+            for index in range(600)
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO source_scene(scene_id, title, studio_id, source_hash) VALUES (?, ?, ?, ?)",
+        (
+            (f"control-{index}", f"control-{index}", "control-studio", f"control-{index}")
+            for index in range(5)
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO source_play(scene_id, played_at_ms, ordinal) VALUES (?, 1, 0)",
+        ((f"control-{index}",) for index in range(5)),
+    )
+    return connection
+
+
+def test_prune_candidates_breadth_view_surfaces_the_blind_spots_ceiling_signal(
+    tmp_path: Path,
+) -> None:
+    connection = _breadth_prune_database(tmp_path / "curator.sqlite3")
+    api = CuratorAPI(connection)
+
+    breadth = api.prune_candidates("breadth", page_size=1)
+    assert breadth["total"] == 600
+    assert breadth["items"][0]["scene_id"].startswith("mega-")
+    assert breadth["items"][0]["breadth"] is True
+    assert breadth["items"][0]["evidence"] == [
+        "Broad, low-engagement studio (Mega Studio): owns 600, played 0"
+    ]
+
+    # Folds into the default "candidates" view too, alongside explicit/suspect.
+    assert api.prune_candidates("candidates", page_size=1)["total"] == 600
+    # Control studio's scenes are all played and stay out of the breadth pool.
+    assert not any(
+        item["scene_id"].startswith("control-") for item in api.prune_candidates("breadth")["items"]
+    )
+    assert api.prune_candidates("suspects")["total"] == 0
+
+    api.dismiss_prune_candidate("mega-000", now_ms=10)
+    dismissed = api.prune_candidates("breadth")
+    assert dismissed["total"] == 599
+    assert "mega-000" not in [item["scene_id"] for item in dismissed["items"]]
+
+
+def test_explicit_negative_feedback_reopens_a_dismissed_prune_suspect(tmp_path: Path) -> None:
+    connection = _database(tmp_path / "curator.sqlite3")
+    api = CuratorAPI(connection)
+    api.dismiss_prune_candidate("unusual", now_ms=10)
+
+    api.submit_feedback(
+        [
+            {
+                "feedback_id": "later-down",
+                "scene_id": "unusual",
+                "feedback_type": "thumb_down",
+                "occurred_at_ms": 20,
+            }
+        ]
+    )
+
+    row = connection.execute(
+        "SELECT state, reason FROM pruning_candidate WHERE scene_id='unusual'"
+    ).fetchone()
+    assert tuple(row) == ("review", "Thumbs down")
+
+
+def test_recommendation_history_uses_qualified_impressions_without_new_tracking(
+    tmp_path: Path,
+) -> None:
+    connection = _database(tmp_path / "curator.sqlite3")
+    PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+    api = CuratorAPI(connection)
+    for impression_id, lane, shown_at_ms in (
+        ("older", "best_bets", REFERENCE_MS + 10),
+        ("newer", "discover", REFERENCE_MS + 20),
+    ):
+        slate = api.get_slate("for_you", 1, impression_id=impression_id, now_ms=shown_at_ms - 1)
+        connection.execute(
+            "UPDATE impression SET lane=? WHERE impression_id=?",
+            (lane, impression_id),
+        )
+        api.submit_events(
+            [
+                {
+                    "event_id": f"qualified:{impression_id}",
+                    "event_type": "qualified_impression",
+                    "impression_id": impression_id,
+                    "scene_id": slate["items"][0]["scene_id"],
+                    "occurred_at_ms": shown_at_ms,
+                }
+            ]
+        )
+
+    history = api.recommendation_history(page_size=1)
+    assert history["total"] == 2
+    assert history["items"][0]["impression_id"] == "newer"
+    assert history["items"][0]["reason_snapshot"]
+    assert history["items"][0]["current_model"] == 1
+    assert api.recommendation_history(lane="best_bets")["items"][0]["impression_id"] == "older"

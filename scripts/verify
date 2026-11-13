@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+pytest() (
+  local base temporary
+  base="${TMPDIR:-/tmp}"
+  mkdir -p "$base"
+  temporary=$(mktemp -d "$base/pytest-curator.XXXXXX")
+  trap 'rm -rf "$temporary"' EXIT
+  uv run --frozen pytest -q --basetemp="$temporary" "$@"
+)
+
+pytest_not_integration() (
+  # Keep module fixtures together; bound native threads inside each worker.
+  OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+    pytest -n "${CURATOR_TEST_WORKERS:-4}" --dist=loadfile -m "not integration" "$@"
+)
+
+# ── compiled core (Go) ─────────────────────────────────────────────────
+# Go is a dev/build dependency only; the compiled core is the single runtime
+# implementation, so the shipped plugin requires it (a missing binary fails
+# build stages loudly). A missing Go toolchain skips the core checks; a
+# failing build fails the run.
+core_build_and_check() {
+  if ! command -v go >/dev/null 2>&1; then
+    echo "[verify] go toolchain not found; skipping compiled-core checks (the full gate and plugin packaging require Go)" >&2
+    return 0
+  fi
+  scripts/build_core.sh
+  ( cd core && go vet ./... && go test ./... )
+}
+
+# Differential gate: the binary must reproduce the numpy stage outputs within
+# tolerance on seeded synthetic corpora. CURATOR_CORE pins the built binary.
+core_gate() {
+  if [[ ! -x "core/bin/curator-core" ]]; then
+    core_build_and_check
+  fi
+  CURATOR_CORE="$(pwd)/core/bin/curator-core" pytest_not_integration tests/core tests/model/test_core.py
+}
+
+case "${1:-}" in
+  changed)
+    shift
+    mapfile -d '' files < <(
+      { git diff --name-only -z --diff-filter=ACMR; git diff --cached --name-only -z --diff-filter=ACMR; git ls-files --others --exclude-standard -z; } |
+        sort -zu
+    )
+    python=()
+    javascript=false
+    core_changed=false
+    for file in "${files[@]}"; do
+      [[ -f "$file" ]] || continue
+      [[ "$file" == *.py ]] && python+=("$file")
+      [[ "$file" == plugin/stash-curator.js ]] && javascript=true
+      [[ "$file" == core/* ]] && core_changed=true
+    done
+    # Regenerate the scoring fingerprint before building: the Go binary embeds
+    # the constant, so a stale one would be compiled into the parity run.
+    uv run --frozen python scripts/scoring_fingerprint.py --write >/dev/null
+    if [[ "$core_changed" == true ]]; then
+      core_build_and_check
+    fi
+    ((${#python[@]} == 0)) || uv run --frozen ruff format "${python[@]}"
+    ((${#python[@]} == 0)) || uv run --frozen ruff check "${python[@]}"
+    [[ "$javascript" == false ]] || node --check plugin/stash-curator.js
+    (($# == 0)) || CURATOR_TEST_WORKERS="${CURATOR_TEST_WORKERS:-0}" pytest_not_integration "$@"
+    git diff --check
+    ;;
+  core)
+    core_build_and_check
+    core_gate
+    ;;
+  perf)
+    core_build_and_check
+    uv run --frozen python scripts/perf_gate.py
+    ;;
+  test|full)
+    # Fails rather than rewrites: a stale constant means the digest does not
+    # identify the code, and CI must not paper over that by mutating the tree.
+    uv run --frozen python scripts/scoring_fingerprint.py --check
+    core_build_and_check
+    uv run --frozen ruff check .
+    uv run --frozen ruff format --check .
+    uv run --frozen mypy curator plugin/backend.py
+    # Build the archive before pytest so the packaging/archive tests validate
+    # the zip this run produces, not a stale one.
+    pytest_args=()
+    if [[ "$1" == full ]]; then
+      uv run --frozen python scripts/build_plugin.py
+    else
+      pytest_args=(-k 'not test_plugin_archive_contains_runtime_and_core')
+    fi
+    # One pytest pass with the built binary pinned. core_gate's test set
+    # (tests/core + tests/model/test_core.py) is a subset of the full
+    # non-integration suite, so running both doubled the core tests; the
+    # env-sensitive resolver tests shadow CURATOR_CORE per-test, so a global
+    # pin does not change their behavior.
+    CURATOR_CORE="$(pwd)/core/bin/curator-core" pytest_not_integration --durations=20 "${pytest_args[@]}"
+    # The full gate retains the benchmark; routine native tests omit its setup.
+    if [[ "$1" == full ]]; then
+      uv run --frozen python scripts/perf_gate.py
+    fi
+    node --check plugin/stash-curator.js
+    git diff --check
+    ;;
+  integration)
+    # Optional pytest arguments select the tests (CI runs two shards);
+    # the default is the whole integration suite.
+    shift
+    (( $# )) || set -- tests/integration/
+    # ── build plugin ──
+    # The test Stash container only needs the host architecture's Linux core;
+    # skipping the other four cross-compiles saves most of the build.
+    case "$(uname -m)" in
+      aarch64 | arm64) core_platform=linux/arm64 ;;
+      *) core_platform=linux/amd64 ;;
+    esac
+    uv run --frozen python scripts/build_plugin.py --platform "$core_platform"
+    compose_file="tests/integration/docker-compose.yml"
+    plugin_dir="/tmp/stash-curator-integration/plugins/stash-curator"
+    mkdir -p "$plugin_dir"
+    unzip -oq dist/stash-curator.zip -d "$plugin_dir"
+    # Incognito's tests need it installed beside Curator: its latest release,
+    # from its own repository.
+    mkdir -p /tmp/stash-curator-integration/plugins/incognito dist
+    curl -fsSL -o dist/incognito.zip \
+      https://github.com/mrx-31415/stash-incognito/releases/latest/download/incognito.zip
+    unzip -oq dist/incognito.zip -d /tmp/stash-curator-integration/plugins/incognito
+    # copy config
+    cp tests/integration/stash-config.yml /tmp/stash-curator-integration/config.yml
+    # Stash creates none of these itself; when they are missing it only warns, then
+    # fails every cover, preview, sprite, and temporary file it tries to write.
+    mkdir -p /tmp/stash-curator-integration/{generated,cache,blobs}
+    # ── start stash ──
+    stash_image="${STASH_IMAGE:-stashapp/stash:latest}"
+    cleanup() {
+      echo "[verify] tearing down Stash …"
+      cd "$(dirname "$0")/.."
+      STASH_IMAGE="$stash_image" STASH_CONFIG=/tmp/stash-curator-integration \
+        docker compose -f "$compose_file" down --volumes 2>/dev/null || true
+    }
+    trap cleanup EXIT
+    # Stash keeps its own database and blobs in the config directory. Start every run
+    # from a fresh library so earlier runs cannot leak state, and a newer STASH_IMAGE
+    # cannot stop at NEEDS_MIGRATION on a database left by an older one. Empty the
+    # directories created above rather than removing them.
+    echo "[verify] resetting Stash library ($stash_image) …"
+    docker run --rm -v /tmp/stash-curator-integration:/stash "$stash_image" \
+      sh -c 'rm -rf /stash/stash-go.sqlite* /stash/blobs/* /stash/generated/* /stash/cache/*'
+    echo "[verify] starting Stash …"
+    STASH_IMAGE="$stash_image" STASH_CONFIG=/tmp/stash-curator-integration \
+      docker compose -f "$compose_file" up -d --wait
+    # The sidecar database and its artifact directory are created inside the container as
+    # root in WAL mode. Host tests read it read-only, and a WAL read needs to create the
+    # -shm file, so the data directory must be writable by the test user. Reset it with a
+    # root container every run so the integration environment starts from a clean sidecar
+    # instead of leftover state, including root-owned artifact subdirectories.
+    echo "[verify] resetting Curator sidecar …"
+    docker run --rm -v "$plugin_dir":/plugin "$stash_image" \
+      sh -c 'rm -rf /plugin/data && mkdir -p /plugin/data && chmod 777 /plugin/data'
+    # ── seed ──
+    echo "[verify] seeding data …"
+    STASH_URL="${STASH_URL:-http://localhost:9999}"
+    uv run --frozen python tests/integration/seed.py --stash-url "$STASH_URL"
+    # ── run playwright tests ──
+    echo "[verify] running integration tests …"
+    uv run --group integration --frozen pytest "$@" -m integration -v \
+      --base-url "$STASH_URL" \
+      --video=retain-on-failure \
+      --screenshot=only-on-failure \
+      --output=/tmp/stash-curator-integration-test-output
+    ;;
+  *)
+    echo "usage: scripts/verify {changed [pytest-target ...]|core|perf|test|full|integration}" >&2
+    exit 2
+    ;;
+esac

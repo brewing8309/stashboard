@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  attach-artifact:
+    name: Attach Curator's plugin archives to release
+    runs-on: ubuntu-latest
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    steps:
+      # Build from the release's own commit: main may have moved on by now.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.21"
+          python-version: "3.12"
+      - name: Install Go (plugin packaging builds the compiled core)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: core/go.sum
+      - name: Install zig (C cross-compiler for the sqlite driver)
+        run: |
+          curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+          tar -C "$HOME" -xf /tmp/zig.tar.xz
+          echo "$HOME/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+      - name: Cache Go and zig build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/.cache/zig
+          key: build-${{ runner.os }}-${{ hashFiles('core/go.mod', 'core/go.sum') }}-${{ hashFiles('core/*.go') }}
+          restore-keys: |
+            build-${{ runner.os }}-
+      - run: uv run --frozen python scripts/build_plugin.py
+      - env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          gh release upload "${{ needs.release-please.outputs.tag_name }}"
+          dist/stash-curator*.zip dist/index*.yml
+      - name: Publish the release to the stable plugin source
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run pages.yml --ref main

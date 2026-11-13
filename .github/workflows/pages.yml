@@ -1,0 +1,86 @@
+name: Documentation and plugin source
+
+# The stable plugin source serves the latest release's own archives, so its
+# index date (all Stash compares to offer updates) only moves on a release.
+# Auto Seek and Incognito come from their own repositories' releases (and dev
+# builds), fetched on each run.
+# The dev source under /dev/ is rebuilt from main on every push. The release
+# workflow dispatches this one after attaching a new release's archives.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    env:
+      HUB_TOKEN: ${{ secrets.HUB_DISPATCH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # dev_version() counts the commits since the last release.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.21"
+          python-version: "3.12"
+      - name: Install Go (plugin packaging builds the compiled core)
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: core/go.sum
+      - name: Install zig (C cross-compiler for the sqlite driver)
+        run: |
+          curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz
+          tar -C "$HOME" -xf /tmp/zig.tar.xz
+          echo "$HOME/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+      - name: Cache Go and zig build caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/.cache/zig
+          key: build-${{ runner.os }}-${{ hashFiles('core/go.mod', 'core/go.sum') }}-${{ hashFiles('core/*.go') }}
+          restore-keys: |
+            build-${{ runner.os }}-
+      - uses: actions/configure-pages@v6
+      - run: uv run --frozen python scripts/build_plugin.py --dev
+      - run: mkdir -p docs/dev && cp dist/dev/stash-curator*.zip dist/dev/index*.yml docs/dev/
+      # Auto Seek and Incognito live in their own repositories; both sources keep
+      # listing them for installations made from here.
+      - name: Add the companion plugins' dev builds
+        run: uv run --frozen python scripts/stable_source.py --dev docs/dev
+      - name: Assemble the regular plugin source from the latest release of each plugin
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run --frozen python scripts/stable_source.py docs
+      - uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./docs
+          destination: ./_site
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
+      # The plugin hub (mrx-31415/stash-plugins) mirrors these indexes. It
+      # checks hourly; with a HUB_DISPATCH_TOKEN secret it is told once the new
+      # indexes are live. It deploys only when something changed.
+      - name: Tell the plugin hub
+        if: env.HUB_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ env.HUB_TOKEN }}
+        run: gh api repos/mrx-31415/stash-plugins/dispatches -f event_type=plugin-released

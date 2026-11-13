@@ -1,0 +1,985 @@
+"""Slice-1 backend differential harness: model-seeded read-path ops.
+
+The Slice-1 ops (get_slate, get_similar, get_explanation,
+get_recommendation_history, get_shortlist, get_feedback_history,
+get_taste_profile, get_diagnostics) read a *published model* through the
+attached artifact views, so a plain migrated sidecar is not enough: the
+sidecar is seeded by building a real model with the Python builder on the
+synthetic corpus from tests/model/test_builder.py, then interaction rows are
+added deterministically. Every test runs plugin/backend.py and the built
+curator-core binary against identical fresh sidecar copies and asserts the
+outputs are byte-identical per the run-varying-fields contract from
+docs/handover-go-backend-slice1.md (fixed impression_id in args; timing
+fields compared structurally). These tests skip when the binary is not
+built; `scripts/verify core` builds it and runs this suite.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import sqlite3
+import threading
+from http.server import HTTPServer
+from pathlib import Path
+
+import pytest
+
+from curator.core import core_binary
+from curator.model import PreferenceModelBuilder
+from tests.core.compare import assert_equivalent
+from tests.core.test_backend import PLUGIN_DIR, _StubStash, _with_db_path, payload, run_backend
+from tests.model.test_builder import REFERENCE_MS, _database
+
+DAY_MS = 86_400_000
+
+
+@pytest.fixture(scope="module")
+def binary() -> Path:
+    path = core_binary()
+    if path is None:
+        pytest.skip("curator-core binary not built; run scripts/verify core")
+    return path
+
+
+@pytest.fixture(scope="module")
+def stub_stash() -> str:
+    server = HTTPServer(("127.0.0.1", 0), _StubStash)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+
+
+def make_model_sidecar(path: Path) -> None:
+    """A synthetic sidecar with a published model (real builder output) and
+    deterministic interaction rows for the read-path ops."""
+    connection = _database(path)
+    try:
+        PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+        connection.executemany(
+            """
+            INSERT INTO impression(
+                impression_id, requested_at_ms, lane, model_id, config_version,
+                request_context_json
+            ) VALUES (?, ?, 'for_you', 'model-seed', 'builtin', '{}')
+            """,
+            [(f"imp-hist-{i}", REFERENCE_MS - (50 - i) * DAY_MS) for i in range(3)],
+        )
+        connection.executemany(
+            """
+            INSERT INTO impression_item(
+                impression_id, scene_id, position, policy_score, reason_snapshot_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                ("imp-hist-0", "old-good", 0, 0.5, '["eligibility.lane"]'),
+                ("imp-hist-1", "recent-good", 0, 0.6, '["eligibility.lane"]'),
+                ("imp-hist-2", "unseen-good", 0, 0.4, '["eligibility.lane"]'),
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO recommendation_history(history_id, scene_id, impression_id,
+                lane, shown_at_ms) VALUES (?, ?, ?, 'for_you', ?)
+            """,
+            [
+                ("imp-hist-0:old-good", "old-good", "imp-hist-0", REFERENCE_MS - 50 * DAY_MS),
+                ("imp-hist-1:recent-good", "recent-good", "imp-hist-1", REFERENCE_MS - 25 * DAY_MS),
+                ("imp-hist-2:unseen-good", "unseen-good", "imp-hist-2", REFERENCE_MS - 8 * DAY_MS),
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO feedback(
+                feedback_id, scene_id, feedback_type, value, occurred_at_ms,
+                impression_id, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("fb-1", "old-good", "thumb_up", 1.0, REFERENCE_MS - 30 * DAY_MS, None, "{}"),
+                ("fb-2", "recent-good", "thumb_up", 1.0, REFERENCE_MS - 20 * DAY_MS, None, "{}"),
+                ("fb-3", "disliked", "not_now", None, REFERENCE_MS - 10 * DAY_MS, None, "{}"),
+                (
+                    "fb-4",
+                    "unseen-good",
+                    "reversal",
+                    None,
+                    REFERENCE_MS - 5 * DAY_MS,
+                    None,
+                    '{"replaces_feedback_id":"fb-1"}',
+                ),
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO external_shortlist(
+                entity_type, external_id, score, sources_json, payload_json, added_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "scene",
+                    "stashdb-1",
+                    0.92,
+                    '["stashdb"]',
+                    '{"title":"External One","date":"2020-01-01"}',
+                    REFERENCE_MS - 40 * DAY_MS,
+                ),
+                (
+                    "scene",
+                    "stashdb-2",
+                    0.71,
+                    '["stashdb","manual"]',
+                    '{"title":"External Two"}',
+                    REFERENCE_MS - 15 * DAY_MS,
+                ),
+                (
+                    "performer",
+                    "stashdb-perf-1",
+                    0.65,
+                    '["stashdb"]',
+                    '{"name":"Performer X"}',
+                    REFERENCE_MS - 3 * DAY_MS,
+                ),
+            ],
+        )
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+
+
+@pytest.fixture(scope="module")
+def model_sidecar(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    path = tmp_path_factory.mktemp("model-sidecar") / "curator.sqlite3"
+    make_model_sidecar(path)
+    return path
+
+
+def assert_slice1_identical(
+    binary: Path,
+    plugin_dir: Path,
+    raw: bytes,
+    same_path: Path,
+    *,
+    timing_fields: tuple[str, ...] = (),
+) -> None:
+    """Run both backends on fresh copies of the model sidecar and assert the
+    outputs are byte-identical once the run-varying fields are handled:
+    timing fields are compared structurally (key set + non-negative ints,
+    values may differ)."""
+    run_dir = same_path.parent / f"{same_path.stem}-backend-run"
+    run_db = run_dir / same_path.name
+    derived_src = same_path.parent / f"{same_path.stem}-derived"
+    outputs: list = []
+    for runner in (None, binary):
+        shutil.rmtree(run_dir, ignore_errors=True)
+        run_dir.mkdir()
+        shutil.copy2(same_path, run_db)
+        derived_dst = run_dir / f"{run_db.stem}-derived"
+        if derived_src.is_dir():
+            shutil.copytree(derived_src, derived_dst)
+        try:
+            result = run_backend(runner, plugin_dir, _with_db_path(raw, run_db))
+        finally:
+            shutil.rmtree(run_dir, ignore_errors=True)
+        outputs.append(result)
+    python_result, go_result = outputs
+    assert go_result.returncode == python_result.returncode
+    py_out = json.loads(python_result.stdout)
+    go_out = json.loads(go_result.stdout)
+    if python_result.returncode != 0:
+        assert_equivalent(py_out, go_out)
+        return
+    assert set(py_out) == {"output"} and set(go_out) == {"output"}
+    a, b = py_out["output"], go_out["output"]
+    # get_slates nests one slate per lane; each carries its own timings.
+    pairs = zip(a["slates"], b["slates"], strict=True) if "slates" in a else [(a, b)]
+    for left, right in pairs:
+        _drop_timings(left, right, timing_fields)
+    assert_equivalent(a, b)
+
+
+def _drop_timings(a: dict, b: dict, timing_fields: tuple[str, ...]) -> None:
+    for field in timing_fields:
+        if isinstance(a[field], dict):
+            assert set(a[field]) == set(b[field])
+            for value in (*a[field].values(), *b[field].values()):
+                assert isinstance(value, int) and value >= 0
+        else:
+            assert isinstance(a[field], int) and isinstance(b[field], int)
+            assert a[field] >= 0 and b[field] >= 0
+        a.pop(field)
+        b.pop(field)
+
+
+# ── byte-identical Slice-1 ops on a builder-seeded sidecar ──────────────────
+
+
+@pytest.mark.parametrize(
+    "lane", ["for_you", "best_bets", "revisit", "stretch", "blind_spots", "dormant"]
+)
+def test_together_mode_all_lanes(
+    model_sidecar: Path, binary: Path, stub_stash: str, tmp_path: Path, lane: str
+) -> None:
+    path = tmp_path / model_sidecar.name
+    shutil.copy2(model_sidecar, path)
+    shutil.copytree(
+        model_sidecar.parent / f"{model_sidecar.stem}-derived",
+        path.parent / f"{path.stem}-derived",
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO source_tag(tag_id,name,source_hash) "
+            "VALUES ('together-parent','Parent','h')"
+        )
+        connection.execute("INSERT INTO tag_parent VALUES ('good','together-parent')")
+        config = json.loads(
+            connection.execute("SELECT config_json FROM curator_config").fetchone()[0]
+        )
+        config["moods"] = [
+            {
+                "id": "together",
+                "name": "Together",
+                "excluded_tags": [{"id": "together-parent", "name": "Parent"}],
+            }
+        ]
+        connection.execute("UPDATE curator_config SET config_json=?", (json.dumps(config),))
+    args = dict(lane=lane, count=500, impression_id="together-test")
+    off = json.loads(
+        run_backend(binary, PLUGIN_DIR, payload("get_slate", path, stub_stash, **args)).stdout
+    )["output"]
+    raw = payload("get_slate", path, stub_stash, together_mode=True, **args)
+    on = json.loads(run_backend(binary, PLUGIN_DIR, raw).stdout)["output"]
+    hidden = {"old-good", "recent-good", "unseen-good", "unlabeled"}
+    assert [item["scene_id"] for item in on["items"]] == [
+        item["scene_id"] for item in off["items"] if item["scene_id"] not in hidden
+    ]
+    assert on["total"] == len(on["items"])
+    paged = payload(
+        "get_slate",
+        path,
+        stub_stash,
+        lane=lane,
+        together_mode=True,
+        count=1,
+        page=2,
+        impression_id="together-page",
+    )
+    page = json.loads(run_backend(binary, PLUGIN_DIR, paged).stdout)["output"]
+    assert page["total"] == on["total"]
+    assert [item["scene_id"] for item in page["items"]] == [
+        item["scene_id"] for item in on["items"][1:2]
+    ]
+    assert_slice1_identical(
+        binary, PLUGIN_DIR, raw, same_path=path, timing_fields=("timings_ms", "ranking_timings_ms")
+    )
+    moods = [
+        {
+            "id": "together",
+            "name": "Together",
+            "excluded_tags": [{"id": "together-parent", "name": "Parent"}],
+        },
+        {
+            "id": "light",
+            "name": "Lighthearted",
+            "excluded_tags": [{"id": "unusual", "name": "Unusual"}],
+        },
+    ]
+
+    def save_moods() -> None:
+        update = payload("update_config", path, stub_stash, values={"moods": moods})
+        result = run_backend(binary, PLUGIN_DIR, update)
+        assert result.returncode == 0, result.stdout
+
+    save_moods()
+    named = payload("get_slate", path, stub_stash, mood_id="light", **args)
+    light = json.loads(run_backend(binary, PLUGIN_DIR, named).stdout)["output"]
+    assert light["mood_id"] == "light"
+    assert [item["scene_id"] for item in light["items"]] == [
+        item["scene_id"] for item in off["items"] if item["scene_id"] != "unusual"
+    ]
+    assert light["total"] == len(light["items"])
+    assert_slice1_identical(
+        binary,
+        PLUGIN_DIR,
+        named,
+        same_path=path,
+        timing_fields=("timings_ms", "ranking_timings_ms"),
+    )
+    moods[1]["name"] = "Relaxed"
+    save_moods()
+    renamed = json.loads(run_backend(binary, PLUGIN_DIR, named).stdout)["output"]
+    assert renamed["mood_id"] == "light"
+    assert renamed["moods"][1]["name"] == "Relaxed"
+    moods.pop()
+    save_moods()
+    deleted = json.loads(run_backend(binary, PLUGIN_DIR, named).stdout)["output"]
+    assert deleted["mood_id"] == ""
+    assert [item["scene_id"] for item in deleted["items"]] == [
+        item["scene_id"] for item in off["items"]
+    ]
+    assert_slice1_identical(
+        binary,
+        PLUGIN_DIR,
+        named,
+        same_path=path,
+        timing_fields=("timings_ms", "ranking_timings_ms"),
+    )
+
+
+def test_get_slate_byte_identical(model_sidecar: Path, binary: Path, stub_stash: str) -> None:
+    raw = payload(
+        "get_slate",
+        model_sidecar,
+        stub_stash,
+        lane="for_you",
+        count=5,
+        page=1,
+        impression_id="fixed-impression-slate",
+    )
+    assert_slice1_identical(
+        binary,
+        PLUGIN_DIR,
+        raw,
+        same_path=model_sidecar,
+        timing_fields=("timings_ms", "ranking_timings_ms"),
+    )
+
+
+def test_get_slates_byte_identical(
+    model_sidecar: Path, binary: Path, stub_stash: str, tmp_path: Path
+) -> None:
+    """The front page's batch: per-lane overrides on shared args, in order."""
+    # get_slates writes impressions, so run on a private copy of the sidecar.
+    path = tmp_path / model_sidecar.name
+    shutil.copy2(model_sidecar, path)
+    shutil.copytree(
+        model_sidecar.parent / f"{model_sidecar.stem}-derived",
+        tmp_path / f"{path.stem}-derived",
+    )
+    raw = payload(
+        "get_slates",
+        path,
+        stub_stash,
+        count=4,
+        page=1,
+        draw_at_ms=REFERENCE_MS,
+        context={"route": "/", "front_page": True},
+        slates=[
+            {"lane": "for_you", "impression_id": "fixed-front-for-you", "draw_seed": "seed-a"},
+            {"lane": "revisit", "impression_id": "fixed-front-revisit", "draw_seed": "seed-b"},
+            {
+                "lane": "best_bets",
+                "impression_id": "fixed-front-best",
+                "exclude_scene_ids": ["old-good"],
+            },
+        ],
+    )
+    assert_slice1_identical(
+        binary,
+        PLUGIN_DIR,
+        raw,
+        same_path=path,
+        timing_fields=("timings_ms", "ranking_timings_ms"),
+    )
+    output = json.loads(run_backend(binary, PLUGIN_DIR, raw).stdout)["output"]
+    assert [slate["lane"] for slate in output["slates"]] == ["for_you", "revisit", "best_bets"]
+    assert [slate["impression_id"] for slate in output["slates"]] == [
+        "fixed-front-for-you",
+        "fixed-front-revisit",
+        "fixed-front-best",
+    ]
+    assert "old-good" not in {item["scene_id"] for item in output["slates"][2]["items"]}
+
+
+@pytest.mark.parametrize("slates", [[], "for_you", [None]])
+def test_get_slates_rejects_bad_batches(
+    model_sidecar: Path, binary: Path, stub_stash: str, slates: object
+) -> None:
+    raw = payload("get_slates", model_sidecar, stub_stash, slates=slates)
+    assert_slice1_identical(binary, PLUGIN_DIR, raw, same_path=model_sidecar)
+
+
+def test_get_slate_draw_byte_identical(
+    model_sidecar: Path, binary: Path, stub_stash: str, tmp_path: Path
+) -> None:
+    path = tmp_path / model_sidecar.name
+    shutil.copy2(model_sidecar, path)
+    shutil.copytree(
+        model_sidecar.parent / f"{model_sidecar.stem}-derived",
+        tmp_path / f"{path.stem}-derived",
+    )
+    with sqlite3.connect(path) as connection:
+        config_json = json.loads(
+            connection.execute(
+                "SELECT config_json FROM curator_config WHERE singleton=1"
+            ).fetchone()[0]
+        )
+        config_json["rotation_cooldown_days"] = 3
+        connection.execute(
+            "UPDATE curator_config SET config_json=? WHERE singleton=1",
+            (json.dumps(config_json),),
+        )
+        connection.execute(
+            """INSERT INTO recommendation_history
+               (history_id, scene_id, impression_id, lane, shown_at_ms)
+               VALUES (?, ?, ?, 'for_you', ?)""",
+            ("draw-exposure", "recent-good", "imp-hist-1", REFERENCE_MS - DAY_MS),
+        )
+    raw = payload(
+        "get_slate",
+        path,
+        stub_stash,
+        lane="for_you",
+        count=5,
+        page=1,
+        impression_id="fixed-impression-draw",
+        draw_seed="fixed-draw-seed",
+        draw_at_ms=REFERENCE_MS,
+    )
+    assert_slice1_identical(
+        binary,
+        PLUGIN_DIR,
+        raw,
+        same_path=path,
+        timing_fields=("timings_ms", "ranking_timings_ms"),
+    )
+
+
+def test_get_slate_page_exclusions_byte_identical(
+    model_sidecar: Path, binary: Path, stub_stash: str
+) -> None:
+    raw = payload(
+        "get_slate",
+        model_sidecar,
+        stub_stash,
+        lane="best_bets",
+        count=3,
+        page=2,
+        exclude_scene_ids=["unseen-good"],
+        impression_id="fixed-impression-slate-2",
+    )
+    assert_slice1_identical(
+        binary,
+        PLUGIN_DIR,
+        raw,
+        same_path=model_sidecar,
+        timing_fields=("timings_ms", "ranking_timings_ms"),
+    )
+
+
+def test_get_slate_performer_and_tag_filters_byte_identical(
+    model_sidecar: Path, binary: Path, stub_stash: str
+) -> None:
+    raw = payload(
+        "get_slate",
+        model_sidecar,
+        stub_stash,
+        lane="for_you",
+        count=5,
+        page=1,
+        performer_ids=["p1"],
+        include_tags=["Familiar Scenario"],
+        impression_id="fixed-impression-slate-filters",
+    )
+    assert_slice1_identical(
+        binary,
+        PLUGIN_DIR,
+        raw,
+        same_path=model_sidecar,
+        timing_fields=("timings_ms", "ranking_timings_ms"),
+    )
+
+
+def test_get_slate_studio_and_gender_filters_byte_identical(
+    model_sidecar: Path, binary: Path, stub_stash: str
+) -> None:
+    raw = payload(
+        "get_slate",
+        model_sidecar,
+        stub_stash,
+        lane="for_you",
+        count=5,
+        page=1,
+        studio_ids=["studio-2"],
+        exclude_tags=["nonexistent-tag"],
+        gender="FEMALE",
+        impression_id="fixed-impression-slate-filters-2",
+    )
+    assert_slice1_identical(
+        binary,
+        PLUGIN_DIR,
+        raw,
+        same_path=model_sidecar,
+        timing_fields=("timings_ms", "ranking_timings_ms"),
+    )
+
+
+def test_get_slate_filtered_page_and_exclusions_byte_identical(
+    model_sidecar: Path, binary: Path, stub_stash: str
+) -> None:
+    raw = payload(
+        "get_slate",
+        model_sidecar,
+        stub_stash,
+        lane="for_you",
+        count=1,
+        page=2,
+        performer_ids=["p1"],
+        exclude_scene_ids=["unseen-good"],
+        impression_id="fixed-impression-slate-filtered-page",
+    )
+    assert_slice1_identical(
+        binary,
+        PLUGIN_DIR,
+        raw,
+        same_path=model_sidecar,
+        timing_fields=("timings_ms", "ranking_timings_ms"),
+    )
+
+
+def test_get_similar_scene_byte_identical(
+    model_sidecar: Path, binary: Path, stub_stash: str
+) -> None:
+    raw = payload(
+        "get_similar",
+        model_sidecar,
+        stub_stash,
+        entity_type="scene",
+        entity_id="recent-good",
+        count=5,
+        page=1,
+        impression_id="fixed-impression-similar",
+    )
+    assert_slice1_identical(
+        binary, PLUGIN_DIR, raw, same_path=model_sidecar, timing_fields=("timings_ms",)
+    )
+
+
+def test_get_similar_scene_filters_byte_identical(
+    model_sidecar: Path, binary: Path, stub_stash: str
+) -> None:
+    raw = payload(
+        "get_similar",
+        model_sidecar,
+        stub_stash,
+        entity_type="scene",
+        entity_id="old-good",
+        count=3,
+        page=1,
+        include_tags=["Familiar Scenario"],
+        favorite_only=True,
+        impression_id="fixed-impression-similar-2",
+    )
+    assert_slice1_identical(
+        binary, PLUGIN_DIR, raw, same_path=model_sidecar, timing_fields=("timings_ms",)
+    )
+
+
+def test_get_similar_performer_byte_identical(
+    model_sidecar: Path, binary: Path, stub_stash: str
+) -> None:
+    raw = payload(
+        "get_similar",
+        model_sidecar,
+        stub_stash,
+        entity_type="performer",
+        entity_id="p1",
+        count=5,
+        page=1,
+    )
+    assert_slice1_identical(
+        binary, PLUGIN_DIR, raw, same_path=model_sidecar, timing_fields=("timings_ms",)
+    )
+
+
+def test_get_similar_performer_gender_byte_identical(
+    model_sidecar: Path, binary: Path, stub_stash: str
+) -> None:
+    raw = payload(
+        "get_similar",
+        model_sidecar,
+        stub_stash,
+        entity_type="performer",
+        entity_id="p2",
+        count=3,
+        page=1,
+        gender="FEMALE",
+    )
+    assert_slice1_identical(
+        binary, PLUGIN_DIR, raw, same_path=model_sidecar, timing_fields=("timings_ms",)
+    )
+
+
+def test_get_explanation_byte_identical(model_sidecar: Path, binary: Path, stub_stash: str) -> None:
+    raw = payload("get_explanation", model_sidecar, stub_stash, scene_id="recent-good")
+    assert_slice1_identical(binary, PLUGIN_DIR, raw, same_path=model_sidecar)
+
+
+def test_get_explanation_disliked_byte_identical(
+    model_sidecar: Path, binary: Path, stub_stash: str
+) -> None:
+    raw = payload("get_explanation", model_sidecar, stub_stash, scene_id="disliked")
+    assert_slice1_identical(binary, PLUGIN_DIR, raw, same_path=model_sidecar)
+
+
+def test_get_recommendation_history_byte_identical(
+    model_sidecar: Path, binary: Path, stub_stash: str
+) -> None:
+    raw = payload("get_recommendation_history", model_sidecar, stub_stash, page=1, page_size=10)
+    assert_slice1_identical(binary, PLUGIN_DIR, raw, same_path=model_sidecar)
+
+
+def test_get_shortlist_byte_identical(model_sidecar: Path, binary: Path, stub_stash: str) -> None:
+    raw = payload("get_shortlist", model_sidecar, stub_stash, page=1, page_size=10)
+    assert_slice1_identical(binary, PLUGIN_DIR, raw, same_path=model_sidecar)
+
+
+def test_get_feedback_history_byte_identical(
+    model_sidecar: Path, binary: Path, stub_stash: str
+) -> None:
+    raw = payload("get_feedback_history", model_sidecar, stub_stash, page=1, page_size=10)
+    assert_slice1_identical(binary, PLUGIN_DIR, raw, same_path=model_sidecar)
+
+
+def test_get_taste_profile_byte_identical(
+    model_sidecar: Path, binary: Path, stub_stash: str
+) -> None:
+    raw = payload("get_taste_profile", model_sidecar, stub_stash)
+    assert_slice1_identical(binary, PLUGIN_DIR, raw, same_path=model_sidecar)
+
+
+def test_get_diagnostics_byte_identical(model_sidecar: Path, binary: Path, stub_stash: str) -> None:
+    raw = payload("get_diagnostics", model_sidecar, stub_stash)
+    assert_slice1_identical(
+        binary, PLUGIN_DIR, raw, same_path=model_sidecar, timing_fields=("generated_at_ms",)
+    )
+
+
+def make_measurement_sidecar(path: Path) -> None:
+    """A sidecar for get_impression_measurement (#146 Channel B): a published
+    model plus a deterministic mix of played, skipped, and never-shown scenes.
+
+    - imp-play: shown scene "recent-good" with a direct_player play_session
+      linked to the impression (observed playback: active_seconds > 0).
+    - imp-thumb: shown scene "old-good" with a non-reversed thumb_up linked to
+      the impression.
+    - imp-skip: shown scene "unseen-good" with no positive action.
+    - "disliked", "unlabeled", "unusual" are in source_scene but never shown.
+    """
+    connection = _database(path)
+    try:
+        PreferenceModelBuilder(connection, clock_ms=lambda: REFERENCE_MS).build()
+        connection.executemany(
+            """
+            INSERT INTO impression(
+                impression_id, requested_at_ms, lane, model_id, config_version,
+                request_context_json
+            ) VALUES (?, ?, 'for_you', 'model-seed', 'builtin', '{}')
+            """,
+            [
+                (f"imp-{suffix}", REFERENCE_MS - i * DAY_MS)
+                for suffix, i in (("play", 10), ("thumb", 9), ("skip", 8))
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO impression_item(
+                impression_id, scene_id, position, policy_score, reason_snapshot_json
+            ) VALUES (?, ?, 0, ?, '["eligibility.lane"]')
+            """,
+            [
+                ("imp-play", "recent-good", 0.6),
+                ("imp-thumb", "old-good", 0.5),
+                ("imp-skip", "unseen-good", 0.4),
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO play_session(
+                session_id, scene_id, started_at_ms, ended_at_ms, active_seconds,
+                provenance, confidence, impression_id, summary_json
+            ) VALUES ('sess-play', 'recent-good', ?, ?, 30.0, 'direct_player', 0.8,
+                      'imp-play', '{}')
+            """,
+            (REFERENCE_MS - DAY_MS, REFERENCE_MS - DAY_MS + 30_000),
+        )
+        connection.execute(
+            """
+            INSERT INTO feedback(
+                feedback_id, scene_id, feedback_type, value, occurred_at_ms,
+                impression_id, payload_json
+            ) VALUES ('fb-thumb', 'old-good', 'thumb_up', 1.0, ?, 'imp-thumb', '{}')
+            """,
+            (REFERENCE_MS - 2 * DAY_MS,),
+        )
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        connection.close()
+
+
+def test_get_impression_measurement_byte_identical(
+    tmp_path: Path, binary: Path, stub_stash: str
+) -> None:
+    """The shown-never-played measurement op must be byte-identical between
+    Python and Go, and must classify played vs skipped vs never-shown
+    correctly (issue #146 Channel B pre-condition gate)."""
+    path = tmp_path / "curator.sqlite3"
+    make_measurement_sidecar(path)
+    raw = payload("get_impression_measurement", path, stub_stash)
+    assert_slice1_identical(binary, PLUGIN_DIR, raw, same_path=path)
+    # The op is read-only: it must not mutate the sidecar between runs, so a
+    # second identical comparison against the same source confirms stability.
+    assert_slice1_identical(binary, PLUGIN_DIR, raw, same_path=path)
+
+
+def test_impression_measurement_counts(tmp_path: Path) -> None:
+    """Python-side behavioral check of the bucket definitions (#146 Channel B):
+    played = shown + positive action in that impression; skipped = shown and
+    not played; never_shown = in source_scene, never surfaced."""
+    from curator.storage.database import connect_database
+    from curator.storage.migrations import MigrationRunner
+    from plugin.backend import _impression_measurement
+
+    path = tmp_path / "curator.sqlite3"
+    make_measurement_sidecar(path)
+    connection = connect_database(path)
+    MigrationRunner(connection).migrate(applied_at_ms=1)
+    try:
+        report = _impression_measurement(connection)
+    finally:
+        connection.close()
+    buckets = report["buckets"]
+    assert buckets["shown"]["count"] == 3
+    assert buckets["played"]["count"] == 2  # recent-good (play) + old-good (thumb)
+    assert buckets["skipped"]["count"] == 1  # unseen-good
+    assert buckets["never_shown"]["count"] == 3  # disliked, unlabeled, unusual
+    assert report["shown_play_rate"] == pytest.approx(round(2 / 3, 6))
+    # The skipped scene's policy_score is preserved; never-shown has none.
+    assert buckets["skipped"]["mean_policy_score"] == 0.4
+    assert buckets["never_shown"]["mean_policy_score"] is None
+
+
+# ── read-path write parity ──────────────────────────────────────────────────
+
+
+def _run_once_on_copy(binary: Path, plugin_dir: Path, raw: bytes, same_path: Path) -> Path:
+    """Run the backend once on a fresh copy and return the copy's path."""
+    run_dir = same_path.parent / f"{same_path.stem}-write-run"
+    shutil.rmtree(run_dir, ignore_errors=True)
+    run_dir.mkdir()
+    run_db = run_dir / same_path.name
+    shutil.copy2(same_path, run_db)
+    derived_src = same_path.parent / f"{same_path.stem}-derived"
+    if derived_src.is_dir():
+        shutil.copytree(derived_src, run_dir / f"{run_db.stem}-derived")
+    result = run_backend(binary, plugin_dir, _with_db_path(raw, run_db))
+    assert result.returncode == 0, result.stdout
+    return run_db
+
+
+def _interaction_state(path: Path, prefix: str) -> dict[str, object]:
+    connection = sqlite3.connect(path)
+    try:
+        cache = sorted(
+            connection.execute(
+                "SELECT key, value FROM application_meta WHERE key LIKE 'eligibility_count:%'"
+            ).fetchall()
+        )
+        impressions = sorted(
+            connection.execute(
+                """
+                SELECT impression_id, lane, model_id, config_version, request_context_json
+                FROM impression WHERE impression_id LIKE ?
+                """,
+                (f"{prefix}%",),
+            ).fetchall()
+        )
+        items = sorted(
+            connection.execute(
+                """
+                SELECT impression_id, scene_id, position, policy_score, reason_snapshot_json
+                FROM impression_item WHERE impression_id LIKE ? ORDER BY impression_id, position
+                """,
+                (f"{prefix}%",),
+            ).fetchall()
+        )
+        return {"cache": cache, "impressions": impressions, "items": items}
+    finally:
+        connection.close()
+
+
+def test_get_slate_write_state_parity(model_sidecar: Path, binary: Path, stub_stash: str) -> None:
+    """get_slate's read-path writes (eligibility-count cache + impression
+    rows) leave identical sidecar state on both implementations; only the
+    requested_at_ms timestamp may differ."""
+    raw = payload(
+        "get_slate",
+        model_sidecar,
+        stub_stash,
+        lane="for_you",
+        count=5,
+        page=1,
+        impression_id="state-impression",
+    )
+    python_db = _run_once_on_copy(None, PLUGIN_DIR, raw, model_sidecar)
+    go_db = _run_once_on_copy(binary, PLUGIN_DIR, raw, model_sidecar)
+    python_state = _interaction_state(python_db, "state-")
+    go_state = _interaction_state(go_db, "state-")
+    assert python_state["cache"] == go_state["cache"]
+    assert python_state["items"] == go_state["items"]
+    python_impressions = {row[0]: row for row in python_state["impressions"]}
+    go_impressions = {row[0]: row for row in go_state["impressions"]}
+    assert set(python_impressions) == set(go_impressions) == {"state-impression"}
+    for impression_id, python_row in python_impressions.items():
+        go_row = go_impressions[impression_id]
+        assert python_row[1:] == go_row[1:]  # everything except requested_at_ms
+
+
+def test_get_similar_write_state_parity(model_sidecar: Path, binary: Path, stub_stash: str) -> None:
+    """get_similar (scene) records a ranked impression with the same state on
+    both implementations (the busy_timeout=100 juggling is connection-scoped
+    and leaves the same rows)."""
+    raw = payload(
+        "get_similar",
+        model_sidecar,
+        stub_stash,
+        entity_type="scene",
+        entity_id="recent-good",
+        count=5,
+        page=1,
+        impression_id="state-similar",
+    )
+    python_db = _run_once_on_copy(None, PLUGIN_DIR, raw, model_sidecar)
+    go_db = _run_once_on_copy(binary, PLUGIN_DIR, raw, model_sidecar)
+    python_state = _interaction_state(python_db, "state-")
+    go_state = _interaction_state(go_db, "state-")
+    assert python_state["cache"] == go_state["cache"] == []
+    assert python_state["items"] == go_state["items"]
+    python_impressions = {row[0]: row for row in python_state["impressions"]}
+    go_impressions = {row[0]: row for row in go_state["impressions"]}
+    assert set(python_impressions) == set(go_impressions) == {"state-similar"}
+    for impression_id, python_row in python_impressions.items():
+        go_row = go_impressions[impression_id]
+        assert python_row[1:] == go_row[1:]
+        assert python_row[1] == "similar"
+
+
+def test_get_similar_fill_appeal_cache_parity(
+    model_sidecar: Path, binary: Path, stub_stash: str
+) -> None:
+    """Similar caches the model's eligible scenes outside the lane index; a
+    warm cache and one left by another model both reproduce Python's output."""
+    raw = payload(
+        "get_similar",
+        model_sidecar,
+        stub_stash,
+        entity_type="scene",
+        entity_id="recent-good",
+        count=5,
+        page=1,
+        impression_id="fixed-impression-similar-cache",
+    )
+    warm = _run_once_on_copy(binary, PLUGIN_DIR, raw, model_sidecar)
+    connection = sqlite3.connect(warm)
+    try:
+        (cached,) = connection.execute(
+            "SELECT value FROM application_meta WHERE key='similar_fill_appeals'"
+        ).fetchone()
+        (model_id,) = connection.execute(
+            "SELECT model_id FROM model_version WHERE status='published'"
+        ).fetchone()
+    finally:
+        connection.close()
+    assert cached.split("\n")[0] == model_id
+    assert len(cached.split("\n")) > 1
+    assert_slice1_identical(binary, PLUGIN_DIR, raw, same_path=warm, timing_fields=("timings_ms",))
+
+    connection = sqlite3.connect(warm)
+    try:
+        connection.execute(
+            "UPDATE application_meta SET value='other-model\nrecent-good\t1' "
+            "WHERE key='similar_fill_appeals'"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    assert_slice1_identical(binary, PLUGIN_DIR, raw, same_path=warm, timing_fields=("timings_ms",))
+
+
+# ── profiling parity for the Slice-1 ops ─────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "operation,args",
+    [
+        ("get_slate", {"lane": "for_you", "count": 3, "impression_id": "trace-impression"}),
+        ("get_similar", {"entity_type": "scene", "entity_id": "recent-good", "count": 3}),
+        ("get_diagnostics", {}),
+    ],
+)
+def test_slice1_profiling_trace_parity(
+    model_sidecar: Path,
+    binary: Path,
+    stub_stash: str,
+    operation: str,
+    args: dict[str, object],
+) -> None:
+    """Every Slice-1 op records a profile_trace row when profilingEnabled is
+    on, with the same shape on both implementations: root plugin event, a
+    stash span for the settings fetch, sqlite spans, and a consistent
+    span_count."""
+    _StubStash.plugin_settings = {"profilingEnabled": True}
+    try:
+        sidecar = model_sidecar
+        raw = payload(operation, sidecar, stub_stash, **args)
+        rows: dict[str, tuple] = {}
+        for runner in (None, binary):
+            run_dir = sidecar.parent / f"{sidecar.stem}-trace-{runner is None}"
+            shutil.rmtree(run_dir, ignore_errors=True)
+            run_dir.mkdir()
+            run_db = run_dir / sidecar.name
+            shutil.copy2(sidecar, run_db)
+            derived_src = sidecar.parent / f"{sidecar.stem}-derived"
+            if derived_src.is_dir():
+                shutil.copytree(derived_src, run_dir / f"{run_db.stem}-derived")
+            result = run_backend(runner, PLUGIN_DIR, _with_db_path(raw, run_db))
+            assert result.returncode == 0, result.stdout
+            connection = sqlite3.connect(run_db)
+            try:
+                row = connection.execute(
+                    """
+                    SELECT trace_id, kind, operation, started_at_ms, duration_us,
+                           status, span_count, truncated, trace_json
+                    FROM profile_trace
+                    """
+                ).fetchone()
+            finally:
+                connection.close()
+            rows["python" if runner is None else "go"] = row
+    finally:
+        _StubStash.plugin_settings = {}
+    python_row, go_row = rows["python"], rows["go"]
+    assert python_row is not None and go_row is not None
+    for row in (python_row, go_row):
+        trace_id, kind, operation_name, _, duration_us, status, span_count, truncated, _ = row
+        assert re.match(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", trace_id
+        )
+        assert kind == "operation" and operation_name == operation
+        assert status == "ok" and truncated == 0
+        assert duration_us >= 0 and span_count > 0
+    python_json = json.loads(python_row[8])
+    go_json = json.loads(go_row[8])
+    assert python_json["displayTimeUnit"] == go_json["displayTimeUnit"] == "ms"
+    for events in (python_json["traceEvents"], go_json["traceEvents"]):
+        root = events[0]
+        assert root["name"] == operation and root["cat"] == "plugin"
+        assert root["ph"] == "X" and root["pid"] == 1 and root["tid"] == 0
+        assert root["args"] == {"status": "ok", "kind": "operation"}
+        assert any(e["cat"] == "stash" and e["name"] == "CuratorPluginSettings" for e in events)
+        assert any(e["cat"] == "sqlite" for e in events)
+        for event in events:
+            assert {"name", "cat", "ph", "ts", "dur", "pid", "tid"} <= set(event)
