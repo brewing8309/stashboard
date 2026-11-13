@@ -541,18 +541,33 @@
   // in a line grow to fill it when a neighbour has nothing to show.
   function Module({ id, sizeOf, title, href, label, extra, className, innerRef, children }) {
     const link = href ? h(Link, { to: href, className: "stashboard-view-all" }, label) : null;
+    const theme = Core.moduleTheme(sizeOf || id);
+    const style = { "--span": Core.moduleSize(sizeOf || id).span };
+    if (theme) style["--hue"] = theme.hue;
     return h("section", {
       ref: innerRef,
-      className: `stashboard-module stashboard-module-${id.replace(/[^a-z0-9]+/gi, "-")} ${className || ""}`,
+      className: `stashboard-module stashboard-module-${id.replace(/[^a-z0-9]+/gi, "-")}${theme ? " has-theme" : ""} ${className || ""}`,
       "data-row": id,
-      style: { "--span": Core.moduleSize(sizeOf || id).span }
+      style
     },
       title || extra || link
         ? h("header", { className: "stashboard-module-head" },
-          title ? h("h2", null, title) : h("span"),
+          title ? h("h2", null, theme ? h("span", { className: "stashboard-module-icon", "aria-hidden": true }, theme.icon) : null, title) : h("span"),
           h("span", { className: "stashboard-module-extra" }, extra || null, link))
         : null,
       children);
+  }
+
+  // Discover modules show a few and keep the rest for "More".
+  function useMore(id, lang) {
+    const [open, setOpen] = useState(false);
+    const size = Core.moduleSize(id);
+    const shown = open ? size.more || size.count : size.count;
+    const button = (total) => (total > size.count
+      ? h("button", { type: "button", className: "stashboard-more", "aria-expanded": open, onClick: () => setOpen(!open) },
+        open ? `▴ ${Core.t(lang, "action.less")}` : `▾ ${Core.t(lang, "action.more", { count: total - size.count })}`)
+      : null);
+    return { shown, button };
   }
 
   // Nothing to show: takes no room.
@@ -847,7 +862,8 @@
           h("span", { className: "stashboard-bubble-name" }, `${p.radar ? "📡 " : ""}${p.name}`)))), "is-bubbles"));
   }
 
-  // Curator's For you, as a top five with big numbers.
+  // Curator's For you, as a top five: number one big, the next four beside
+  // it, each in the pictures' own 16:9 with its place in big numbers.
   function TopFive({ id, env, ctx }) {
     const lang = env.lang;
     const seed = Core.rowSeed(ctx.day, id, ctx.mix);
@@ -855,10 +871,10 @@
     const scenes = (state.data && state.data.scenes) || [];
     if (state.status === "done" && !scenes.length) return h(Empty, { id, innerRef: ref });
     return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, null) },
-      moduleBody(state, lang, null, () => h("ol", { className: "stashboard-top" },
+      moduleBody(state, lang, null, () => h("ol", { className: `stashboard-top is-${scenes.length}` },
         scenes.map((scene, i) => h("li", { key: scene.id, className: "stashboard-scene stashboard-rank", "data-scene": scene.id },
-          h("span", { className: "stashboard-rank-number", "aria-hidden": true }, i + 1),
           h(SceneThumb, { scene, className: "stashboard-rank-thumb" },
+            h("span", { className: "stashboard-rank-number", "aria-hidden": true }, i + 1),
             h("span", { className: "stashboard-rank-caption" },
               h("span", { className: "stashboard-scene-title" }, Core.sceneTitle(scene)))))))));
   }
@@ -941,8 +957,7 @@
   // One random scene you haven't started, kept secret until you press Go.
   function Surprise({ id, env, ctx }) {
     const lang = env.lang;
-    const [roll, setRoll] = useState(0);
-    const seed = Core.rowSeed(ctx.day, id, ctx.mix + roll * 1000);
+    const seed = Core.rowSeed(ctx.day, id, ctx.mix);
     const { ref, state } = useModuleData(() => loadLocalRow({ kind: "random" }, { ...ctx, seed, count: 1 }), `${id}|${seed}|${ctx.refresh}`);
     const scene = state.data && state.data.scenes[0];
     if (state.status === "done" && !scene) return h(Empty, { id, innerRef: ref });
@@ -954,8 +969,7 @@
         h("h2", null, Core.t(lang, "surprise.title")),
         h("p", { className: "stashboard-scene-meta" }, Core.t(lang, "surprise.sub")),
         h("div", { className: "stashboard-surprise-actions" },
-          h(Link, { to: `/scenes/${scene.id}?autoplay=true`, className: "btn btn-primary stashboard-surprise-go" }, Core.t(lang, "action.go")),
-          h(Button, { variant: "secondary", className: "stashboard-surprise-roll", onClick: () => setRoll(roll + 1) }, Core.t(lang, "action.reroll"))))));
+          h(Link, { to: `/scenes/${scene.id}?autoplay=true`, className: "btn btn-primary stashboard-surprise-go" }, Core.t(lang, "action.go"))))));
   }
 
   // Every other library or Curator module: four scenes.
@@ -980,17 +994,21 @@
     const row = Core.parseRowId(id);
     const box = env.boxes.find((b) => b.host === row.host);
     const stasharr = useStasharr();
-    const count = Core.moduleSize(id).count;
-    const { ref, state } = useModuleData(() => loadBoxRow(row, box, { ...ctx, count }), `${id}|${ctx.day}|${ctx.refresh}|${ctx.hideOwned}`);
+    const size = Core.moduleSize(id);
+    const more = useMore(id, lang);
+    const { ref, state } = useModuleData(() => loadBoxRow(row, box, { ...ctx, count: size.more || size.count }), `${id}|${ctx.day}|${ctx.refresh}|${ctx.hideOwned}`);
     if (!box) return null;
-    const cards = (state.data && state.data.cards) || [];
+    const all = (state.data && state.data.cards) || [];
+    const cards = all.slice(0, more.shown);
     if (state.status === "done" && !cards.length) return h(Empty, { id, innerRef: ref });
     const site = { href: box.site, target: "_blank", rel: "noopener noreferrer", className: "stashboard-view-all" };
     const chart = row.kind === "trending";
     return h(Module, { id, innerRef: ref, title: Core.rowTitle(lang, id, env, null), extra: h("a", site, `↗ ${box.name}`) },
-      moduleBody(state, lang, box, () => (chart
-        ? h("div", { className: "stashboard-chart" }, cards.map((card, i) => h(ChartItem, { key: card.id, card, rank: i + 1, box, lang, stasharr })))
-        : h("div", { className: "stashboard-tile" }, cards.map((card) => h(BoxCard, { key: card.id, card, box, lang, stasharr }))))));
+      moduleBody(state, lang, box, () => h(React.Fragment, null,
+        chart
+          ? h("div", { className: "stashboard-chart" }, cards.map((card, i) => h(ChartItem, { key: card.id, card, rank: i + 1, box, lang, stasharr })))
+          : h("div", { className: "stashboard-tile" }, cards.map((card) => h(BoxCard, { key: card.id, card, box, lang, stasharr }))),
+        more.button(all.length))));
   }
 
   // A radar performer: portrait, how they're doing, and four scenes (first
@@ -1003,8 +1021,8 @@
     const id = `radar:${performer.id}`;
     const since = Core.radarSince(performer);
     const seed = Core.rowSeed(ctx.day, id, ctx.mix);
-    const size = Core.moduleSize("radar").count;
-    const { ref, state } = useModuleData(() => loadRadarRow(performer, env, { ...ctx, seed, count: size }), `${id}|${seed}|${ctx.refresh}`);
+    const more = useMore("radar", lang);
+    const { ref, state } = useModuleData(() => loadRadarRow(performer, env, { ...ctx, seed, count: Core.moduleSize("radar").more }), `${id}|${seed}|${ctx.refresh}`);
     if (!since) return null;
 
     const data = state.data || {};
@@ -1043,15 +1061,20 @@
               h(Button, { variant: decide ? "primary" : "secondary", size: "sm", disabled: busy, className: "stashboard-radar-favourite", onClick: act(makeFavourite, "radar.favourited") }, Core.t(lang, "radar.favourite")),
               h(Button, { variant: "secondary", size: "sm", disabled: busy, className: "stashboard-radar-remove", onClick: act((pid) => setRadar(pid, false), "radar.removed") }, Core.t(lang, "radar.remove"))))),
         moduleBody(state, lang, data.box, () => {
+          // Half from the library, half from the stash-box, as far as each has
+          // enough; "More" shows the rest of both.
           const missing = data.cards.filter((card) => !card.localId);
-          const local = data.scenes.slice(0, missing.length ? Math.max(size - missing.length, size / 2) : size);
-          const cards = missing.slice(0, size - local.length);
+          const want = more.shown;
+          const local = data.scenes.slice(0, missing.length ? Math.max(want - missing.length, want / 2) : want);
+          const cards = missing.slice(0, want - local.length);
           if (!local.length && !cards.length) return h(RowMessage, { text: Core.t(lang, "radar.empty") });
+          const total = Math.min(data.scenes.length + missing.length, Core.moduleSize("radar").more);
           return h(React.Fragment, null,
             h("div", { className: "stashboard-radar-scenes" },
               local.map((scene) => h("div", { key: `l${scene.id}`, className: "stashboard-scene is-local", "data-scene": scene.id },
                 h(SceneThumb, { scene }), h("span", { className: "stashboard-scene-title stashboard-sr" }, Core.sceneTitle(scene)))),
               cards.map((card) => h(BoxCard, { key: `b${card.id}`, card, box: data.box, lang, stasharr, compact: true }))),
+            more.button(total),
             data.boxError ? h(RowMessage, { text: errorText(data.boxError, lang, data.box) }) : null);
         })));
   }

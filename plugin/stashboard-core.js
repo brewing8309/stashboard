@@ -100,11 +100,42 @@
     "local:studio_spotlight": { span: 4, count: 3 },
     "local:rediscover": { span: 5, count: 1 },
     "local:random": { span: 3, count: 1 },
-    radar: { span: 4, count: 4 },
-    "box:trending": { span: 4, count: 5 }
+    radar: { span: 4, count: 4, more: 12 },
+    "box:trending": { span: 4, count: 5, more: 20 }
   };
   const TILE = { span: 6, count: 4 };
-  const BOX_TILE = { span: 4, count: 4 };
+  // Discover modules load `more` and show the rest on "More".
+  const BOX_TILE = { span: 4, count: 4, more: 16 };
+
+  // Each module's colour (a hue) and symbol, so they tell apart at a glance.
+  const THEMES = {
+    "local:continue": { icon: "⏯", hue: 205 },
+    "curator:for_you": { icon: "🏆", hue: 45 },
+    "local:tag_of_the_day": { icon: "🏷", hue: 280 },
+    "local:studio_spotlight": { icon: "🎬", hue: 185 },
+    "local:rediscover": { icon: "🕰", hue: 25 },
+    "local:random": { icon: "🎲", hue: 330 },
+    "local:recently_added": { icon: "🆕", hue: 145 },
+    "local:unwatched_favorites": { icon: "❤", hue: 350 },
+    "local:top_rated": { icon: "⭐", hue: 48 },
+    "curator:best_bets": { icon: "🎯", hue: 8 },
+    "curator:revisit": { icon: "🔁", hue: 170 },
+    "curator:stretch": { icon: "🧗", hue: 95 },
+    "curator:blind_spots": { icon: "🔦", hue: 255 },
+    "curator:dormant": { icon: "💤", hue: 220 },
+    radar: { icon: "📡", hue: 160 },
+    "box:trending": { icon: "🔥", hue: 15 },
+    "box:favorites": { icon: "💫", hue: 300 },
+    "box:performers": { icon: "👥", hue: 200 },
+    "box:new": { icon: "✨", hue: 55 }
+  };
+
+  function moduleTheme(id) {
+    const row = parseRowId(id);
+    if (!row) return null;
+    if (row.source === "box") return THEMES[`box:${row.kind}`] || null;
+    return THEMES[id] || null;
+  }
 
   function moduleSize(id) {
     const row = parseRowId(id);
@@ -632,7 +663,7 @@
   const STRINGS = {
     en: {
       "row.spotlight": "Spotlight",
-      "row.radar": "📡 On your radar",
+      "row.radar": "On your radar",
       "row.bubbles": "Your performers",
       "row.radar.one": "More from {name}",
       "row.local.continue": "Up next",
@@ -671,9 +702,10 @@
       "action.play": "Play",
       "action.details": "Details",
       "action.nextPick": "↻ Another pick",
+      "action.more": "More ({count})",
+      "action.less": "Less",
       "action.again": "▶ Play again",
       "action.go": "▶ Go",
-      "action.reroll": "🎲 Another one",
       "action.otherTag": "🎲",
       "action.otherTag.title": "Other tags",
       "upnext.left": "{minutes} min left",
@@ -741,7 +773,7 @@
     },
     de: {
       "row.spotlight": "Im Rampenlicht",
-      "row.radar": "📡 Auf deinem Radar",
+      "row.radar": "Auf deinem Radar",
       "row.bubbles": "Deine Performer",
       "row.radar.one": "Mehr von {name}",
       "row.local.continue": "Als Nächstes",
@@ -780,9 +812,10 @@
       "action.play": "Abspielen",
       "action.details": "Details",
       "action.nextPick": "↻ Anderer Tipp",
+      "action.more": "Mehr ({count})",
+      "action.less": "Weniger",
       "action.again": "▶ Nochmal",
       "action.go": "▶ Los",
-      "action.reroll": "🎲 Andere",
       "action.otherTag": "🎲",
       "action.otherTag.title": "Andere Tags",
       "upnext.left": "noch {minutes} Min",
@@ -956,7 +989,7 @@
 
   const api = {
     PLUGIN_ID, CURATOR_PLUGIN_ID, KNOWN_BOXES, boxFromConfig, usableBoxes,
-    LOCAL_ROWS, CURATOR_LANES, BOX_ROWS, DEFAULT_ON, MODULES, moduleSize, UPNEXT_TOTAL, TAG_CHIPS, ZONES, rowZone, byZone, availableRows, parseRowId, defaultLayout,
+    LOCAL_ROWS, CURATOR_LANES, BOX_ROWS, DEFAULT_ON, MODULES, moduleSize, THEMES, moduleTheme, UPNEXT_TOTAL, TAG_CHIPS, ZONES, rowZone, byZone, availableRows, parseRowId, defaultLayout,
     resolveLayout, visibleRows, readSettings, serializeLayout,
     dayKey, hashSeed, rowSeed, isoDate,
     REDISCOVER_DAYS, CONTINUE_OVERFETCH, pastWatched, localRowQuery, PICK_MIN_SCENES, pickQuery, localRowLink,

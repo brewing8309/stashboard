@@ -80,6 +80,50 @@
   text-transform: uppercase;
   color: var(--stashboard-muted);
 }
+/* A module's own colour and symbol */
+.stashboard-module.has-theme {
+  --tint: hsl(var(--hue) 75% 62%);
+  border-top: 3px solid hsl(var(--hue) 70% 52%);
+  background:
+    linear-gradient(165deg, hsl(var(--hue) 70% 45% / 0.2), hsl(var(--hue) 70% 45% / 0) 55%),
+    var(--stashboard-panel);
+}
+.stashboard-discover .stashboard-module.has-theme {
+  background:
+    linear-gradient(165deg, hsl(var(--hue) 70% 45% / 0.2), hsl(var(--hue) 70% 45% / 0) 55%),
+    rgba(20, 26, 31, 0.55);
+}
+.stashboard-module.has-theme .stashboard-module-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--tint);
+}
+.stashboard-module-icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  font-size: 0.95rem;
+  letter-spacing: 0;
+  border-radius: 7px;
+  background: hsl(var(--hue) 70% 50% / 0.25);
+}
+.stashboard-more {
+  align-self: center;
+  margin-top: 12px;
+  padding: 3px 14px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--tint, var(--stashboard-accent));
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: none;
+}
+.stashboard-more:hover {
+  background: hsl(var(--hue, 205) 70% 50% / 0.18);
+}
+
 .stashboard-module-extra {
   display: flex;
   align-items: baseline;
@@ -444,38 +488,56 @@
   text-overflow: ellipsis;
 }
 
-/* Top five */
+/* Top five: number one big, the next four in a square beside it, all 16:9. */
 .stashboard-top {
-  flex: 1;
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 6px;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr);
+  grid-auto-rows: auto;
+  gap: 8px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
-.stashboard-rank {
-  min-height: 170px;
+.stashboard-top .stashboard-rank:first-child {
+  grid-row: span 2;
+}
+.stashboard-top.is-1,
+.stashboard-top.is-2,
+.stashboard-top.is-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.stashboard-top.is-1 .stashboard-rank:first-child,
+.stashboard-top.is-2 .stashboard-rank:first-child,
+.stashboard-top.is-3 .stashboard-rank:first-child {
+  grid-row: auto;
+}
+.stashboard-thumb.stashboard-rank-thumb {
+  height: 100%;
 }
 .stashboard-rank-number {
   position: absolute;
-  left: -2px;
-  bottom: -14px;
-  font-size: 7.5rem;
+  left: 6px;
+  bottom: -0.12em;
+  z-index: 1;
+  font-size: 3.2rem;
   font-weight: 900;
   line-height: 1;
-  letter-spacing: -0.06em;
-  color: #202b33;
-  -webkit-text-stroke: 3px rgba(255, 255, 255, 0.45);
+  letter-spacing: -0.04em;
+  color: #fff;
+  -webkit-text-stroke: 2px rgba(10, 14, 18, 0.85);
+  paint-order: stroke fill;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.6);
   font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
-.stashboard-thumb.stashboard-rank-thumb {
-  position: absolute;
-  top: 0;
-  right: 0;
-  width: 64%;
-  height: 100%;
-  aspect-ratio: auto;
+.stashboard-top .stashboard-rank:first-child .stashboard-rank-number {
+  font-size: 6rem;
+}
+.stashboard-rank .stashboard-rank-caption {
+  padding-left: 3.2rem;
+}
+.stashboard-top .stashboard-rank:first-child .stashboard-rank-caption {
+  padding-left: 5.4rem;
 }
 .stashboard-rank-caption,
 .stashboard-mosaic-caption {
